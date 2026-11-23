@@ -27,6 +27,13 @@ AUTO_DIAGRAM_SLOT_RE = re.compile(
     re.DOTALL,
 )
 HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
+SLICE_BLOCK_RE = re.compile(
+    r"(?P<start><!--\s*SLICE:(?P<id>[^>]+?):START\s*-->)"
+    r"(?P<body>.*?)"
+    r"(?P<end><!--\s*SLICE:(?P=id):END\s*-->)",
+    re.DOTALL | re.IGNORECASE,
+)
+SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
 
 
 class DraftFormatError(ValueError):
@@ -200,6 +207,8 @@ def parse_draft_file(path: Path) -> DraftPacket:
         outside_markers.append(rewritten_body[cursor:])
         if "".join(outside_markers).strip():
             raise DraftFormatError("draft body has text outside its SECTION markers")
+    if SLICE_MARKER_RE.search(rewritten_body):
+        raise DraftFormatError("draft body must not contain SLICE markers")
     undeclared_sections = [sec_id for sec_id in sections if sec_id not in section_ids]
     if undeclared_sections:
         raise DraftFormatError(
@@ -244,49 +253,6 @@ def _first_heading(text: str) -> tuple[int, str] | None:
     return None
 
 
-def _retain_canonical_heading(existing: str, new_content: str) -> str:
-    """Keep the document's canonical section heading when the draft body omits it."""
-    canonical = _first_heading(existing)
-    if canonical is None:
-        return new_content
-    level, heading = canonical
-    lines = _split_lines(new_content)
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        m = HEADING_RE.match(stripped)
-        if m and len(m.group(1)) <= level:
-            lines[idx] = heading
-            return "\n".join(lines)
-        break
-    if not new_content:
-        return heading
-    return f"{heading}\n\n{new_content}"
-
-
-def _retain_auto_diagram_slots(existing: str, new_content: str) -> str:
-    """Carry over AUTO-DIAGRAM slots owned by the document that the draft omits."""
-    draft_slot_ids = {m.group("id").strip() for m in AUTO_DIAGRAM_SLOT_RE.finditer(new_content)}
-    retained = [
-        m.group(0).strip()
-        for m in AUTO_DIAGRAM_SLOT_RE.finditer(existing)
-        if m.group("id").strip() not in draft_slot_ids
-    ]
-    if not retained:
-        return new_content
-    blocks = "\n\n".join(retained)
-    lines = _split_lines(new_content)
-    insert_at = 0
-    for idx, line in enumerate(lines):
-        if line.strip():
-            insert_at = idx + 1 if HEADING_RE.match(line.strip()) else 0
-            break
-    head = "\n".join(lines[:insert_at]).strip()
-    tail = "\n".join(lines[insert_at:]).strip()
-    return "\n\n".join(part for part in (head, blocks, tail) if part)
-
-
 def _strip_leading_heading(text: str, max_level: int) -> str:
     """Drop the first non-empty line when it is a heading at or above ``max_level``."""
     lines = _split_lines(text)
@@ -301,48 +267,64 @@ def _strip_leading_heading(text: str, max_level: int) -> str:
     return text
 
 
-def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str | Sequence[str]) -> str:
-    """Patch a single section in document text between its START and END markers.
+def patch_section_in_doc(
+    doc_text: str, sec_id: str, draft_bodies: Sequence[tuple[str, str]]
+) -> str:
+    """Patch the slices of one section that this run drafted.
 
-    ``new_content`` may be a sequence of draft bodies targeting the same section; they are
-    concatenated in the given order, keeping one canonical section heading.
+    Each packet's prose lives in ``<!-- SLICE:<packet_id>:START/END -->`` markers inside the
+    canonical section. Only the slices named in ``draft_bodies`` are replaced; every other
+    existing slice, the canonical heading and the AUTO-DIAGRAM slots are preserved, and new
+    slices are inserted in ``packet_id`` order.
     """
-    parts = [new_content] if isinstance(new_content, str) else list(new_content)
+    # If a draft body itself contains SECTION markers for this id, strip them
+    start_pat = re.compile(
+        rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>]+|\s+[^>]+)?\s*-->", re.IGNORECASE
+    )
+    end_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->", re.IGNORECASE)
+    drafted: dict[str, str] = {}
+    for packet_id, body in draft_bodies:
+        if packet_id in drafted:
+            raise DraftFormatError(f"duplicate packet_id '{packet_id}' for section '{sec_id}'")
+        drafted[packet_id] = end_pat.sub("", start_pat.sub("", body.strip())).strip()
 
-    # If a part itself contains SECTION markers for this id, strip them
-    start_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>]+|\s+[^>]+)?\s*-->")
-    end_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->")
-    clean_parts = [end_pat.sub("", start_pat.sub("", part.strip())).strip() for part in parts]
-    clean_new = "\n\n".join(part for part in clean_parts if part)
+    start_match = next(
+        (m for m in SECTION_START_RE.finditer(doc_text) if m.group("id") == sec_id), None
+    )
+    end_match = end_pat.search(doc_text, start_match.end()) if start_match is not None else None
+    if start_match is None or end_match is None:
+        raise DraftFormatError(f"section '{sec_id}' does not exist in the target document")
 
-    # Find the section in doc_text
-    start_match = None
-    for m in SECTION_START_RE.finditer(doc_text):
-        if m.group("id") == sec_id:
-            start_match = m
-            break
+    existing_section = doc_text[start_match.end() : end_match.start()]
+    slice_bodies = {
+        m.group("id").strip(): m.group("body").strip()
+        for m in SLICE_BLOCK_RE.finditer(existing_section)
+    }
+    # Document-owned content of the section: its canonical heading and AUTO-DIAGRAM slots
+    section_own_content = SLICE_BLOCK_RE.sub("", existing_section)
+    canonical = _first_heading(section_own_content)
+    owned_parts = [canonical[1]] if canonical is not None else []
+    owned_parts.extend(
+        m.group(0).strip() for m in AUTO_DIAGRAM_SLOT_RE.finditer(section_own_content)
+    )
+    if canonical is not None:
+        drafted = {
+            packet_id: _strip_leading_heading(body, canonical[0])
+            for packet_id, body in drafted.items()
+        }
+    slice_bodies.update(drafted)
 
-    if start_match is not None:
-        end_marker = re.compile(
-            rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->",
-            re.IGNORECASE,
-        )
-        end_match = end_marker.search(doc_text, start_match.end())
-        if end_match:
-            existing_section = doc_text[start_match.end() : end_match.start()]
-            canonical = _first_heading(existing_section)
-            if canonical is not None and len(clean_parts) > 1:
-                # Combined drafts: keep only the first part's heading slot
-                rest = [_strip_leading_heading(p, canonical[0]) for p in clean_parts[1:]]
-                clean_new = "\n\n".join(p for p in [clean_parts[0], *rest] if p)
-            clean_new = _retain_canonical_heading(existing_section, clean_new)
-            clean_new = _retain_auto_diagram_slots(existing_section, clean_new)
-            # Preserve start marker and end marker
-            before = doc_text[: start_match.end()]
-            after = doc_text[end_match.start() :]
-            return f"{before}\n{clean_new}\n{after}"
+    blocks = [
+        f"<!-- SLICE:{packet_id}:START -->\n{slice_bodies[packet_id]}\n"
+        f"<!-- SLICE:{packet_id}:END -->"
+        for packet_id in sorted(slice_bodies)
+    ]
+    content = "\n\n".join(part for part in [*owned_parts, *blocks] if part)
 
-    raise DraftFormatError(f"section '{sec_id}' does not exist in the target document")
+    # Preserve start marker and end marker
+    before = doc_text[: start_match.end()]
+    after = doc_text[end_match.start() :]
+    return f"{before}\n{content}\n{after}"
 
 
 def renumber_footnotes_in_doc(doc_text: str, definitions: dict[str, str]) -> str:
@@ -599,17 +581,16 @@ def assemble(
         for packet in packets:
             doc_definitions.update(packet.definitions)
 
-        # Several drafts may target one section: combine them in packet_id order
+        # Several drafts may target one section: each draft owns one slice of it
         bodies_by_section: dict[str, list[tuple[str, str]]] = {}
         for packet in packets:
             for sec_id in packet.section_ids:
                 bodies_by_section.setdefault(sec_id, []).append(
                     (packet.packet_id, packet.sections[sec_id])
                 )
-        for sec_id, entries in bodies_by_section.items():
-            ordered = [body for _, body in sorted(entries, key=lambda e: e[0])]
+        for sec_id, draft_bodies in bodies_by_section.items():
             try:
-                doc_text = patch_section_in_doc(doc_text, sec_id, ordered)
+                doc_text = patch_section_in_doc(doc_text, sec_id, draft_bodies)
             except DraftFormatError as e:
                 stderr.write(
                     f"Error: Invalid draft for {doc_name}: {e}. "

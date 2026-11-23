@@ -112,10 +112,11 @@ def test_patch_section_in_doc():
         "Old Sec 2\n"
         "<!-- SECTION:sec2:END -->\n"
     )
-    patched = patch_section_in_doc(doc, "sec1", "New Sec 1 Content")
+    patched = patch_section_in_doc(doc, "sec1", [("pkt-a", "New Sec 1 Content")])
     assert "New Sec 1 Content" in patched
     assert "Old Sec 2" in patched
     assert "Old Sec 1" not in patched
+    assert "<!-- SLICE:pkt-a:START -->" in patched
 
 
 def test_renumber_footnotes_and_deduplication():
@@ -249,11 +250,11 @@ def test_assemble_incremental_run_patches_only_named_sections(tmp_path):
     assert code == 0
     assert not drafts.exists()
 
-    # Second run: patch ONLY design-sec2
+    # Second run: re-draft ONLY design-sec2's own packet
     drafts.mkdir(parents=True)
     (drafts / "packet-patch-sec2.md").write_text(
         "---\n"
-        "packet_id: patch-sec2\n"
+        "packet_id: init\n"
         "target_doc: DESIGN.md\n"
         "section_ids:\n"
         "  - design-sec2\n"
@@ -611,6 +612,13 @@ def test_assemble_missing_declared_section_exits_3_and_keeps_drafts(tmp_path):
             "[^1]: `src/app.py:1` — `alpha`\n",
             id="repeated-marker-id",
         ),
+        pytest.param(
+            "<!-- SLICE:other-packet:START -->\n"
+            "## 2. Components & Modules\n\nCopied slice prose[^1].\n"
+            "<!-- SLICE:other-packet:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="draft-authors-slice-markers",
+        ),
     ],
 )
 def test_assemble_rejects_drafted_prose_no_section_owns(tmp_path, body):
@@ -622,6 +630,116 @@ def test_assemble_rejects_drafted_prose_no_section_owns(tmp_path, body):
     code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
     assert code == 3
     assert (drafts / "unowned.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_incremental_slice_redraft_preserves_sibling_slices(tmp_path):
+    """Re-drafting one module slice keeps the sibling slices and their citations (SPEC 9.2/9.3)."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "billing.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "## 2. Components & Modules\n\nBilling module debits accounts[^1].\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "orders.md",
+        "design-sec2-mod-orders",
+        ["design-sec2"],
+        "## 2. Components & Modules\n\nOrders module tracks shipments[^1].\n\n"
+        "[^1]: `src/app.py:4` — `beta`\n",
+    )
+
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+    first = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert first.index("Billing module debits accounts") < first.index(
+        "Orders module tracks shipments"
+    )
+
+    drafts.mkdir(parents=True)
+    _write_design_draft(
+        drafts,
+        "billing-2.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "## 2. Components & Modules\n\nBilling module now refunds accounts[^1].\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Billing module now refunds accounts[^1]." in content
+    assert "Billing module debits accounts" not in content
+    assert "Orders module tracks shipments[^2]." in content
+    assert "[^2]: `src/app.py:4` — `beta`" in content
+    assert "<!-- SLICE:design-sec2-mod-orders:START -->" in content
+    assert content.count("<!-- SLICE:design-sec2-mod-orders:START -->") == 1
+
+
+def test_assemble_inserts_new_slice_in_packet_id_order(tmp_path):
+    """A slice added by a later run is inserted among the existing slices by packet_id."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "orders.md",
+        "design-sec2-mod-orders",
+        ["design-sec2"],
+        "Orders module tracks shipments[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+
+    drafts.mkdir(parents=True)
+    _write_design_draft(
+        drafts,
+        "accounts.md",
+        "design-sec2-mod-accounts",
+        ["design-sec2"],
+        "Accounts module owns balances[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "billing.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "Billing module debits accounts[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert (
+        content.index("Accounts module owns balances")
+        < content.index("Billing module debits accounts")
+        < content.index("Orders module tracks shipments")
+    )
+
+
+def test_assemble_rejects_duplicate_packet_ids_for_one_section(tmp_path):
+    """Two drafts claiming the same packet slice exit 3 instead of one overwriting the other."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "first.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "First billing prose[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "second.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "Second billing prose[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "design-sec2-mod-billing" in err.getvalue()
+    assert (drafts / "first.md").is_file()
+    assert (drafts / "second.md").is_file()
     assert not (repo / "docs" / "DESIGN.md").exists()
 
 
@@ -728,24 +846,35 @@ def test_parse_draft_file_rejects_unknown_target_doc(tmp_path):
 
 
 def test_patch_section_in_doc_preserves_canonical_heading():
-    """Patching keeps the document's canonical heading even when the draft omits it."""
+    """Patching keeps one canonical heading however the draft spells its own heading."""
     doc = (
         "<!-- SECTION:design-sec2:START -->\n"
         "## 2. Components & Modules\n\n"
         "<!-- SECTION:design-sec2:END -->\n"
     )
 
-    prose_only = patch_section_in_doc(doc, "design-sec2", "Component prose[^1].")
-    assert "## 2. Components & Modules\n\nComponent prose[^1]." in prose_only
+    prose_only = patch_section_in_doc(doc, "design-sec2", [("pkt", "Component prose[^1].")])
+    assert (
+        "## 2. Components & Modules\n\n<!-- SLICE:pkt:START -->\nComponent prose[^1]." in prose_only
+    )
 
-    deeper_heading = patch_section_in_doc(doc, "design-sec2", "### How to Run It\n\nSteps[^1].")
-    assert "## 2. Components & Modules\n\n### How to Run It" in deeper_heading
+    deeper_heading = patch_section_in_doc(
+        doc, "design-sec2", [("pkt", "### How to Run It\n\nSteps[^1].")]
+    )
+    assert (
+        "## 2. Components & Modules\n\n<!-- SLICE:pkt:START -->\n### How to Run It"
+        in deeper_heading
+    )
 
-    same_level = patch_section_in_doc(doc, "design-sec2", "## 2. Components\n\nRenamed prose[^1].")
+    same_level = patch_section_in_doc(
+        doc, "design-sec2", [("pkt", "## 2. Components\n\nRenamed prose[^1].")]
+    )
     assert same_level == (
         "<!-- SECTION:design-sec2:START -->\n"
         "## 2. Components & Modules\n\n"
+        "<!-- SLICE:pkt:START -->\n"
         "Renamed prose[^1].\n"
+        "<!-- SLICE:pkt:END -->\n"
         "<!-- SECTION:design-sec2:END -->\n"
     )
 
@@ -774,7 +903,10 @@ def test_assemble_keeps_skeleton_heading_when_draft_omits_it(tmp_path):
     assert code == 0
 
     content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    assert "## 2. Components & Modules\n\nComponents prose without its own heading[^1]." in content
+    assert (
+        "## 2. Components & Modules\n\n<!-- SLICE:prose:START -->\n"
+        "Components prose without its own heading[^1].\n<!-- SLICE:prose:END -->"
+    ) in content
 
 
 def test_assemble_undefined_draft_reference_cannot_bind_existing_citation(tmp_path):
