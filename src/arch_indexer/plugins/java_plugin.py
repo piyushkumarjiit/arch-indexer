@@ -56,6 +56,11 @@ DECLARATION_KINDS = {
 }
 
 
+def _is_auth_annotation(annotation: str) -> bool:
+    """Whether an annotation guards its declaration (Spring security annotations)."""
+    return bool(re.match(r"@(PreAuthorize|Secured|RolesAllowed)\b", annotation))
+
+
 def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str, list[str]]:
     """Extract visibility and annotations from Java modifiers node."""
     visibility = "package"
@@ -385,28 +390,13 @@ class JavaPlugin(LanguagePlugin):
     ) -> None:
         """Extract imports, call references, and Spring annotations."""
         file_imports: dict[str, str] = {}
-        class_base_path = ""
 
-        # Find class-level @RequestMapping path if present
-        base_path_stack: list[Node] = [root]
-        while base_path_stack:
-            n = base_path_stack.pop()
-            if n.type in DECLARATION_KINDS:
-                _, annotations = _get_modifiers_and_annotations(n, source_bytes)
-                for ann in annotations:
-                    ann_match = re.search(
-                        r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
-                    )
-                    if ann_match:
-                        path = _annotation_path(ann_match.group(1) or "")
-                        if path:
-                            class_base_path = path.rstrip("/")
-            base_path_stack.extend(reversed(n.children))
-
-        walk_stack: list[tuple[Node, str]] = [(root, "")]
+        walk_stack: list[tuple[Node, str, str, list[str]]] = [(root, "", "", [])]
         while walk_stack:
-            node, current_class = walk_stack.pop()
+            node, current_class, current_base_path, current_auth = walk_stack.pop()
             child_class = current_class
+            child_base_path = current_base_path
+            child_auth = current_auth
 
             # 1. Imports
             if node.type == "import_declaration":
@@ -443,6 +433,19 @@ class JavaPlugin(LanguagePlugin):
                 c_name = _get_node_text(name_node, source_bytes) if name_node else ""
                 prefix = current_class or pkg_name
                 child_class = f"{prefix}.{c_name}" if prefix else c_name
+                _, declarations = _get_modifiers_and_annotations(node, source_bytes)
+                child_base_path = ""
+                child_auth = []
+                for ann in declarations:
+                    ann_match = re.search(
+                        r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
+                    )
+                    if ann_match:
+                        path = _annotation_path(ann_match.group(1) or "")
+                        if path:
+                            child_base_path = path.rstrip("/")
+                    if _is_auth_annotation(ann):
+                        child_auth.append(ann)
 
             # 3. Method Calls
             elif node.type == "method_invocation":
@@ -511,18 +514,16 @@ class JavaPlugin(LanguagePlugin):
                         route_path = _annotation_path(ann_args)
 
                         full_route = (
-                            f"{class_base_path}/{route_path.lstrip('/')}"
+                            f"{current_base_path}/{route_path.lstrip('/')}"
                             if route_path
-                            else class_base_path
+                            else current_base_path
                         )
                         if not full_route:
                             full_route = "/"
 
-                        # Auth symbols (@PreAuthorize, @Secured)
-                        auth_symbols = []
-                        for other_ann in annotations:
-                            if "@PreAuthorize" in other_ann or "@Secured" in other_ann:
-                                auth_symbols.append(other_ann)
+                        auth_symbols = [
+                            ann for ann in [*current_auth, *annotations] if _is_auth_annotation(ann)
+                        ]
 
                         entrypoints.append(
                             {
@@ -537,4 +538,7 @@ class JavaPlugin(LanguagePlugin):
                             }
                         )
 
-            walk_stack.extend((child, child_class) for child in reversed(node.children))
+            walk_stack.extend(
+                (child, child_class, child_base_path, child_auth)
+                for child in reversed(node.children)
+            )

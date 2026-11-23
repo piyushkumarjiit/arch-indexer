@@ -390,6 +390,60 @@ public class OrderController {
         assert eps_by_method["DELETE"]["route_or_trigger"] == "/api/orders/{id}"
 
 
+def test_java_class_annotations_scope_to_declaring_controller(tmp_path: Path):
+    """Class-level Spring mappings and guards apply to that class's handlers only.
+
+    Oracle: Spring's own semantics - ``@RequestMapping`` on a controller prefixes the
+    paths of its methods, a class-level ``@PreAuthorize``/``@Secured``/
+    ``@RolesAllowed`` guards every handler of that class, and neither leaks into a
+    sibling or nested controller that declares its own mapping and guards.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "Controllers.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api")
+@PreAuthorize("hasRole('USER')")
+public class OuterController {
+    @GetMapping("/items")
+    public void listItems() {}
+
+    @PostMapping("/items")
+    @Secured("ROLE_ADMIN")
+    public void createItem() {}
+
+    @RestController
+    @RequestMapping("/admin")
+    @RolesAllowed("ROLE_ADMIN")
+    static class AdminController {
+        @GetMapping("/users")
+        public void listUsers() {}
+    }
+}
+""",
+    )
+
+    routes = {e["name"]: e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "http"}
+    assert routes == {
+        "listItems": "/api/items",
+        "createItem": "/api/items",
+        "listUsers": "/admin/users",
+    }
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth["listItems"] == ["@PreAuthorize(\"hasRole('USER')\")"]
+    assert auth["createItem"] == [
+        "@PreAuthorize(\"hasRole('USER')\")",
+        '@Secured("ROLE_ADMIN")',
+    ]
+    assert auth["listUsers"] == ['@RolesAllowed("ROLE_ADMIN")']
+
+
 def test_python_main_single_quotes_and_login_required():
     code = b"""
 from flask import Flask
