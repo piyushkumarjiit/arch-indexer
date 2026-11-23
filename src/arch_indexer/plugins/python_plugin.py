@@ -638,9 +638,10 @@ class PythonPlugin(LanguagePlugin):
 
                     for dec in decorators:
                         # FastAPI / Flask HTTP routes:
-                        # e.g. @app.get('/...'), @router.post(...), @bp.route(...)
+                        # e.g. @app.get('/...'), @users_router.post(...), @auth_bp.route(...)
                         http_match = re.search(
-                            r"@(?:app|router|bp|api)\.(get|post|put|delete|patch|options|head|route|api_route)\s*\(([^)]*)\)",
+                            r"@[\w.]+\.(get|post|put|delete|patch|options|head|route|api_route)"
+                            r"\s*\(([^)]*)\)",
                             dec,
                         )
                         if http_match:
@@ -685,8 +686,10 @@ class PythonPlugin(LanguagePlugin):
                                 }
                             )
 
-                        # Click / Typer CLI: @click.command(), @click.group(), @app.command()
-                        elif re.search(r"@(click\.(?:command|group)|app\.command)\b", dec):
+                        # Click / Typer CLI: @click.command(), @click.group(), @cli.command()
+                        elif re.search(
+                            r"@(?:click\.(?:command|group)|[\w.]+\.(?:command|group))\b", dec
+                        ):
                             entrypoints.append(
                                 {
                                     "kind": "cli",

@@ -26,6 +26,10 @@ TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 # Only the global fetch callees are HTTP calls; other ``*.fetch`` methods are unrelated.
 GLOBAL_FETCH_CALLEES = ("fetch", "window.fetch", "globalThis.fetch", "self.fetch")
 
+# Calls that build an Express app/router; their bound names register routes.
+EXPRESS_FACTORY_CALLEES = ("express", "express.Router", "Router")
+EXPRESS_ROUTE_CALLEE = re.compile(r"^([\w$.]+)\.(get|post|put|delete|patch|options|all|use)$")
+
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
@@ -102,38 +106,68 @@ def _require_bound_names(declarator: Node, source_bytes: bytes) -> list[str]:
     return names
 
 
-def _imported_local_names(node: Node, source_bytes: bytes) -> list[str]:
-    """Return the local names bound by a TypeScript/JavaScript import statement."""
-    names: list[str] = []
+def _namespace_alias(node: Node, source_bytes: bytes) -> str:
+    """Return the local alias bound by an ``import * as x`` clause."""
+    for child in node.children:
+        if child.type == "identifier":
+            return _get_node_text(child, source_bytes)
+    return ""
 
-    def add_named_imports(container: Node) -> None:
-        for spec in container.children:
-            if spec.type == "import_specifier":
-                name_node = spec.child_by_field_name("name")
-                alias_node = spec.child_by_field_name("alias")
-                names.append(_get_node_text(alias_node or name_node or spec, source_bytes))
 
-    def add_namespace_import(namespace: Node) -> None:
-        for child in namespace.children:
-            if child.type == "identifier":
-                names.append(_get_node_text(child, source_bytes))
-
+def _import_specifiers(node: Node, source_bytes: bytes) -> tuple[list[Node], str]:
+    """Return the named/default specifier nodes and namespace alias of an import."""
+    specifiers: list[Node] = []
+    namespace_alias = ""
     clause = node.child_by_field_name("clause") or node
     for child in clause.children:
-        if child.type == "import_clause":
-            for item in child.children:
-                if item.type == "named_imports":
-                    add_named_imports(item)
-                elif item.type == "identifier":
-                    names.append(_get_node_text(item, source_bytes))
-                elif item.type == "namespace_import":
-                    add_namespace_import(item)
-        elif child.type == "named_imports":
-            add_named_imports(child)
-        elif child.type == "identifier":
-            names.append(_get_node_text(child, source_bytes))
-        elif child.type == "namespace_import":
-            add_namespace_import(child)
+        items = child.children if child.type == "import_clause" else (child,)
+        for item in items:
+            if item.type == "named_imports":
+                specifiers.extend(x for x in item.children if x.type == "import_specifier")
+            elif item.type == "identifier":
+                specifiers.append(item)
+            elif item.type == "namespace_import":
+                namespace_alias = namespace_alias or _namespace_alias(item, source_bytes)
+    return specifiers, namespace_alias
+
+
+def _express_receiver_name(declarator: Node, source_bytes: bytes) -> str | None:
+    """Return the name bound to an ``express()`` or ``Router()`` result, if any."""
+    name_node = declarator.child_by_field_name("name")
+    value = declarator.child_by_field_name("value")
+    if name_node is None or name_node.type != "identifier" or value is None:
+        return None
+    if value.type != "call_expression":
+        return None
+    fn_node = value.child_by_field_name("function")
+    if fn_node is None:
+        return None
+    if _get_node_text(fn_node, source_bytes).strip() not in EXPRESS_FACTORY_CALLEES:
+        return None
+    return _get_node_text(name_node, source_bytes)
+
+
+def _is_express_receiver(receiver: str, tracked: set[str]) -> bool:
+    """Whether a call receiver is an Express app/router instance."""
+    if receiver in tracked:
+        return True
+    local_name = receiver.rsplit(".", 1)[-1].lower()
+    return local_name.endswith(("app", "router"))
+
+
+def _imported_local_names(node: Node, source_bytes: bytes) -> list[str]:
+    """Return the local names bound by a TypeScript/JavaScript import statement."""
+    specifiers, namespace_alias = _import_specifiers(node, source_bytes)
+    names: list[str] = []
+    for spec in specifiers:
+        if spec.type == "import_specifier":
+            name_node = spec.child_by_field_name("name")
+            alias_node = spec.child_by_field_name("alias")
+            names.append(_get_node_text(alias_node or name_node or spec, source_bytes))
+        else:
+            names.append(_get_node_text(spec, source_bytes))
+    if namespace_alias:
+        names.append(namespace_alias)
     return names
 
 
@@ -519,6 +553,7 @@ class TypeScriptPlugin(LanguagePlugin):
         """Extract imports, call references, Express entrypoints, and fetch/axios callers."""
         file_imports: dict[str, str] = {}
         bound_names: set[str] = set()
+        express_receivers: set[str] = set()
         curr_dir = os.path.dirname(rel_path)
 
         stack: list[Node] = [root]
@@ -565,64 +600,38 @@ class TypeScriptPlugin(LanguagePlugin):
 
                         mod_key = _module_name(resolved_path)
 
-                        # Extract imported specifiers
-                        spec_nodes = []
-                        namespace_alias = ""
-                        clause = node.child_by_field_name("clause") or node
-                        for c in clause.children:
-                            if c.type == "import_clause":
-                                for sc in c.children:
-                                    if sc.type == "named_imports":
-                                        spec_nodes.extend(
-                                            [x for x in sc.children if x.type == "import_specifier"]
-                                        )
-                                    elif sc.type == "identifier":
-                                        spec_nodes.append(sc)
-                                    elif sc.type == "namespace_import":
-                                        for nsc in sc.children:
-                                            if nsc.type == "identifier":
-                                                namespace_alias = _get_node_text(nsc, source_bytes)
-                            elif c.type == "named_imports":
-                                spec_nodes.extend(
-                                    [x for x in c.children if x.type == "import_specifier"]
-                                )
-                            elif c.type == "namespace_import":
-                                for nsc in c.children:
-                                    if nsc.type == "identifier":
-                                        namespace_alias = _get_node_text(nsc, source_bytes)
+                        spec_nodes, namespace_alias = _import_specifiers(node, source_bytes)
 
-                        if spec_nodes:
-                            for sp in spec_nodes:
-                                name_node = sp.child_by_field_name("name")
-                                alias_node = sp.child_by_field_name("alias")
-                                sym_name = _get_node_text(name_node or sp, source_bytes)
-                                local_name = (
-                                    _get_node_text(alias_node, source_bytes)
-                                    if alias_node
-                                    else sym_name
+                        for sp in spec_nodes:
+                            name_node = sp.child_by_field_name("name")
+                            alias_node = sp.child_by_field_name("alias")
+                            sym_name = _get_node_text(name_node or sp, source_bytes)
+                            local_name = (
+                                _get_node_text(alias_node, source_bytes) if alias_node else sym_name
+                            )
+                            fq = f"{mod_key}.{sym_name}"
+                            if target_matched:
+                                references.append(
+                                    {
+                                        "symbol_fqname": fq,
+                                        "file_path": rel_path,
+                                        "line": line,
+                                        "col": col,
+                                        "ref_kind": "import",
+                                    }
                                 )
-                                fq = f"{mod_key}.{sym_name}"
-                                if target_matched:
-                                    references.append(
-                                        {
-                                            "symbol_fqname": fq,
-                                            "file_path": rel_path,
-                                            "line": line,
-                                            "col": col,
-                                            "ref_kind": "import",
-                                        }
-                                    )
-                                    file_imports[local_name] = fq
-                                else:
-                                    unresolved_refs.append(
-                                        {
-                                            "file_path": rel_path,
-                                            "line": line,
-                                            "raw_symbol": fq,
-                                            "language": "typescript",
-                                        }
-                                    )
-                        else:
+                                file_imports[local_name] = fq
+                            else:
+                                unresolved_refs.append(
+                                    {
+                                        "file_path": rel_path,
+                                        "line": line,
+                                        "raw_symbol": fq,
+                                        "language": "typescript",
+                                    }
+                                )
+
+                        if not spec_nodes:
                             if target_matched:
                                 references.append(
                                     {
@@ -633,8 +642,6 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "ref_kind": "import",
                                     }
                                 )
-                                if namespace_alias:
-                                    file_imports[namespace_alias] = mod_key
                             else:
                                 unresolved_refs.append(
                                     {
@@ -644,6 +651,9 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "language": "typescript",
                                     }
                                 )
+
+                        if namespace_alias and target_matched:
+                            file_imports[namespace_alias] = mod_key
                     else:
                         # Third-party external import
                         unresolved_refs.append(
@@ -658,6 +668,9 @@ class TypeScriptPlugin(LanguagePlugin):
             elif node.type == "variable_declarator":
                 # CommonJS bindings shadow repo-level names just like ES imports.
                 bound_names.update(_require_bound_names(node, source_bytes))
+                express_receiver = _express_receiver_name(node, source_bytes)
+                if express_receiver:
+                    express_receivers.add(express_receiver)
 
             # 2. Calls & Entrypoints
             elif node.type == "call_expression":
@@ -693,11 +706,13 @@ class TypeScriptPlugin(LanguagePlugin):
 
                     # 3. Express route entrypoint detection:
                     # app.get('/path', ...), router.post('/path', ...), app.use(...)
-                    express_match = re.search(
-                        r"(?:app|router)\.(get|post|put|delete|patch|options|all|use)$", fn_text
-                    )
-                    if express_match and args_node:
-                        http_method = express_match.group(1).upper()
+                    express_match = EXPRESS_ROUTE_CALLEE.match(fn_text)
+                    if (
+                        express_match
+                        and args_node
+                        and _is_express_receiver(express_match.group(1), express_receivers)
+                    ):
+                        http_method = express_match.group(2).upper()
                         arg_nodes = [
                             c
                             for c in args_node.children

@@ -799,3 +799,86 @@ def test_reused_definition_records_rebuild_import_map(tmp_path: Path):
     b_imports = {r["symbol_fqname"] for r in res_b.references if r["ref_kind"] == "import"}
     assert b_imports == set()
     assert [u["raw_symbol"] for u in res_b.unresolved_refs] == ["utils"]
+
+
+def test_python_route_receivers_are_not_allowlisted(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "routes.py",
+        b"""
+@users_router.get("/users")
+def list_users(): pass
+
+@auth_bp.route("/login", methods=["POST"])
+def login(): pass
+
+@main.route("/")
+def index(): pass
+""",
+    )
+    http = {(e["name"], e["method"], e["route_or_trigger"]) for e in res.entrypoints}
+    assert http == {
+        ("list_users", "GET", "/users"),
+        ("login", "POST", "/login"),
+        ("index", "GET", "/"),
+    }
+
+
+def test_python_click_subcommands_are_recorded(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "cli.py",
+        b"""
+@click.group()
+def cli(): pass
+
+@cli.command()
+def build(): pass
+
+@users_app.command()
+def create_user(): pass
+""",
+    )
+    cli_entries = {e["name"]: e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "cli"}
+    assert cli_entries == {"cli": "cli", "build": "build", "create_user": "create_user"}
+
+
+def test_typescript_express_receivers_are_tracked(tmp_path: Path):
+    res = _run_single_file(
+        TypeScriptPlugin(),
+        tmp_path,
+        "routes.ts",
+        b"""
+import express from 'express';
+import { Router } from 'express';
+const app = express();
+const userRouter = express.Router();
+const api = Router();
+const cache = new Map();
+userRouter.get('/users', listUsers);
+api.post('/items', createItem);
+app.use('/static', express.static('public'));
+cache.get('/key', fallback);
+""",
+    )
+    http = {(e["method"], e["route_or_trigger"]) for e in res.entrypoints if e["kind"] == "http"}
+    assert http == {("GET", "/users"), ("POST", "/items"), ("ALL", "/static")}
+
+
+def test_typescript_mixed_default_and_namespace_import(tmp_path: Path):
+    (tmp_path / "utils.ts").write_text(
+        "export default function main() { return 1; }\nexport function helper() { return 2; }\n"
+    )
+    (tmp_path / "app.ts").write_text("import main, * as u from './utils';\nmain();\nu.helper();\n")
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[tmp_path / "utils.ts", tmp_path / "app.ts"],
+    )
+    res = TypeScriptPlugin().index_unit_tier2(unit)
+    calls = {r["symbol_fqname"] for r in res.references if r["ref_kind"] == "call"}
+    assert calls == {"utils.main", "utils.helper"}
