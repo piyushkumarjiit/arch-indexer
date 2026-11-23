@@ -188,7 +188,10 @@ class RuntimeStatus:
 
 
 def check_host_runtimes() -> dict[str, RuntimeStatus]:
-    """Check host runtime environments (Python >=3.10, Node >=18, Java >=17, mvn)."""
+    """Check host runtimes against the pinned minimum versions in toolchain.toml."""
+    runtime_cfg = load_toolchain_manifest()["runtimes"]
+    node_min = runtime_cfg["node_min_version"]
+    java_min = runtime_cfg["java_min_version"]
     runtimes: dict[str, RuntimeStatus] = {}
 
     # Python
@@ -213,34 +216,34 @@ def check_host_runtimes() -> dict[str, RuntimeStatus]:
             m = re.search(r"v?(\d+)\.(\d+)", raw)
             if m:
                 major = int(m.group(1))
-                ok = major >= 18
+                ok = major >= int(node_min.split(".")[0])
                 runtimes["node"] = RuntimeStatus(
                     name="node",
                     available=ok,
                     version=raw,
-                    min_version="18.0.0",
-                    message="OK" if ok else f"Node {raw} < 18.0.0",
+                    min_version=node_min,
+                    message="OK" if ok else f"Node {raw} < {node_min}",
                 )
             else:
                 runtimes["node"] = RuntimeStatus(
                     name="node",
                     available=False,
                     version=raw,
-                    min_version="18.0.0",
+                    min_version=node_min,
                     message=f"Unable to parse Node version from {raw}",
                 )
         except (subprocess.SubprocessError, OSError) as e:
             runtimes["node"] = RuntimeStatus(
                 name="node",
                 available=False,
-                min_version="18.0.0",
+                min_version=node_min,
                 message=f"Failed to execute node: {e}",
             )
     else:
         runtimes["node"] = RuntimeStatus(
             name="node",
             available=False,
-            min_version="18.0.0",
+            min_version=node_min,
             message="node executable not found in PATH",
         )
 
@@ -255,33 +258,33 @@ def check_host_runtimes() -> dict[str, RuntimeStatus]:
             m = re.search(r'version "(?:1\.)?(\d+)', raw)
             if m:
                 major = int(m.group(1))
-                ok = major >= 17
+                ok = major >= int(java_min.split(".")[0])
                 runtimes["java"] = RuntimeStatus(
                     name="java",
                     available=ok,
                     version=f"{major}",
-                    min_version="17",
-                    message="OK" if ok else f"Java {major} < 17",
+                    min_version=java_min,
+                    message="OK" if ok else f"Java {major} < {java_min}",
                 )
             else:
                 runtimes["java"] = RuntimeStatus(
                     name="java",
                     available=False,
-                    min_version="17",
+                    min_version=java_min,
                     message=f"Unable to parse Java version: {raw.splitlines()[0] if raw else ''}",
                 )
         except (subprocess.SubprocessError, OSError) as e:
             runtimes["java"] = RuntimeStatus(
                 name="java",
                 available=False,
-                min_version="17",
+                min_version=java_min,
                 message=f"Failed to execute java: {e}",
             )
     else:
         runtimes["java"] = RuntimeStatus(
             name="java",
             available=False,
-            min_version="17",
+            min_version=java_min,
             message="java executable not found in PATH",
         )
 
@@ -355,6 +358,17 @@ def compute_file_sha256(file_path: Path) -> str:
     return h.hexdigest()
 
 
+def _lock_tool_entry(cfg: dict[str, Any], install_path: Path) -> dict[str, Any]:
+    keys = ("package", "module", "version", "install_type")
+    entry = {key: cfg[key] for key in keys if key in cfg}
+    entry["path"] = str(install_path)
+    return entry
+
+
+def _scip_java_launcher_path(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
+    return get_java_tools_dir(cache_dir) / f"{cfg['filename']}-{cfg['version']}"
+
+
 def _launcher_help_ok(launcher: Path) -> bool:
     try:
         res = subprocess.run(
@@ -399,7 +413,7 @@ def _install_scip_java(tools_cfg: dict[str, Any], cache_dir: Path) -> Path:
     if not (coursier_jar.is_file() and compute_file_sha256(coursier_jar) == expected_sha256):
         _download_verified(coursier_cfg["url"], expected_sha256, coursier_jar)
 
-    launcher = java_dir / scip_java_cfg["filename"]
+    launcher = _scip_java_launcher_path(scip_java_cfg, cache_dir)
     launcher.unlink(missing_ok=True)
     bootstrap = subprocess.run(
         [
@@ -477,7 +491,7 @@ def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> To
         )
 
     if tool_name == "scip-java":
-        launcher = get_java_tools_dir(cache_dir) / tool_info["filename"]
+        launcher = _scip_java_launcher_path(tool_info, cache_dir)
         if launcher.is_file() and _launcher_help_ok(launcher):
             return ToolStatus(
                 name=tool_name,
@@ -493,7 +507,7 @@ def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> To
             pinned_version=pinned_version,
             installed=False,
             install_path=launcher if launcher.is_file() else None,
-            message="Launcher missing or failed --help",
+            message="Launcher for pinned version missing or failed --help",
         )
 
     return ToolStatus(
@@ -588,15 +602,18 @@ def ensure_toolchain(
     - Never downloads JDK/Maven; requires host java for scip-java
     - Updates <cache>/tools/manifest.lock.json
     """
+    manifest = load_toolchain_manifest()
+    tools_cfg = manifest["tools"]
+    java_min = manifest["runtimes"]["java_min_version"]
+
     if fetch_runtime:
         raise RuntimeError(
             "--fetch-runtime is not supported yet: portable JDK/Maven download is disabled; "
-            "install host java >= 17 and mvn instead."
+            f"install host java >= {java_min} and mvn instead."
         )
 
     repo = Path(repo_path).resolve()
     c_dir = get_cache_dir(cache_dir)
-    tools_cfg = load_toolchain_manifest()["tools"]
 
     active_langs = detect_languages(repo)
     lock_data = get_installed_manifest_lock(c_dir)
@@ -606,22 +623,27 @@ def ensure_toolchain(
     installed_now: list[str] = []
     skipped_existing: list[str] = []
     warnings: list[str] = []
+    lock_dirty = False
 
     # 1-2. Node tools -> scip-python, scip-typescript (one npm install keeps both)
-    node_installs: list[tuple[str, str, str]] = []
+    node_installs: list[tuple[str, dict[str, Any]]] = []
     for lang, tool_name in (("python", "scip-python"), ("typescript", "scip-typescript")):
         if lang not in active_langs:
             continue
-        if check_tool_status(tool_name, cache_dir=c_dir).installed:
-            skipped_existing.append(tool_name)
-            continue
         cfg = tools_cfg[tool_name]
-        node_installs.append((tool_name, cfg["package"], cfg["version"]))
+        status = check_tool_status(tool_name, cache_dir=c_dir)
+        if status.installed:
+            skipped_existing.append(tool_name)
+            if tool_name not in lock_data["tools"] and status.install_path is not None:
+                lock_data["tools"][tool_name] = _lock_tool_entry(cfg, status.install_path)
+                lock_dirty = True
+            continue
+        node_installs.append((tool_name, cfg))
 
     if node_installs:
         npm_cmd = shutil.which("npm")
         if not npm_cmd or not shutil.which("node"):
-            names = ", ".join(tool_name for tool_name, _, _ in node_installs)
+            names = ", ".join(tool_name for tool_name, _ in node_installs)
             warnings.append(
                 f"npm or node not found; {names} will not be installed and Tier 1 "
                 "Python/TypeScript indexing will fall back to Tier 2 tree-sitter."
@@ -629,7 +651,7 @@ def ensure_toolchain(
         else:
             node_dir = get_node_tools_dir(c_dir)
             node_dir.mkdir(parents=True, exist_ok=True)
-            targets = [f"{pkg}@{ver}" for _, pkg, ver in node_installs]
+            targets = [f"{cfg['package']}@{cfg['version']}" for _, cfg in node_installs]
             res = subprocess.run(
                 [npm_cmd, "install", "--prefix", str(node_dir), *targets],
                 capture_output=True,
@@ -641,16 +663,18 @@ def ensure_toolchain(
                     f"Failed to install {', '.join(targets)}: {res.stderr or res.stdout}"
                 )
 
-            for tool_name, pkg, ver in node_installs:
+            for tool_name, cfg in node_installs:
                 bin_path = node_dir / "node_modules" / ".bin" / tool_name
                 lock_data["tools"][tool_name] = {
-                    "package": pkg,
-                    "version": ver,
-                    "install_type": "npm",
-                    "path": str(bin_path),
+                    **_lock_tool_entry(cfg, bin_path),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                 }
+                lock_dirty = True
                 installed_now.append(tool_name)
+
+    if lock_dirty:
+        save_manifest_lock(lock_data, cache_dir=c_dir)
+        lock_dirty = False
 
     # 3. Java -> scip-java
     if "java" in active_langs:
@@ -658,8 +682,8 @@ def ensure_toolchain(
         java_available = runtimes.get("java", RuntimeStatus("java", False)).available
         if not java_available:
             warnings.append(
-                "Host java >= 17 is absent; scip-java will not be installed and Java indexing "
-                "will fall back to Tier 2 tree-sitter."
+                f"Host java >= {java_min} is absent; scip-java will not be installed and Java "
+                "indexing will fall back to Tier 2 tree-sitter."
             )
         else:
             if not runtimes.get("mvn", RuntimeStatus("mvn", False)).available:
@@ -667,22 +691,25 @@ def ensure_toolchain(
                     "Host mvn is absent; scip-java Maven builds may fall back to Tier 2 "
                     "tree-sitter."
                 )
+            scip_java_cfg = tools_cfg["scip-java"]
             status = check_tool_status("scip-java", cache_dir=c_dir)
             if status.installed:
                 skipped_existing.append("scip-java")
+                if "scip-java" not in lock_data["tools"] and status.install_path is not None:
+                    lock_data["tools"]["scip-java"] = _lock_tool_entry(
+                        scip_java_cfg, status.install_path
+                    )
+                    lock_dirty = True
             else:
                 launcher = _install_scip_java(tools_cfg, c_dir)
-                scip_java_cfg = tools_cfg["scip-java"]
                 lock_data["tools"]["scip-java"] = {
-                    "version": scip_java_cfg["version"],
-                    "module": scip_java_cfg["module"],
-                    "install_type": "coursier-bootstrap",
-                    "path": str(launcher),
+                    **_lock_tool_entry(scip_java_cfg, launcher),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                 }
+                lock_dirty = True
                 installed_now.append("scip-java")
 
-    if installed_now:
+    if lock_dirty:
         save_manifest_lock(lock_data, cache_dir=c_dir)
 
     return {

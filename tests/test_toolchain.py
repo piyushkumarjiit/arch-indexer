@@ -24,6 +24,8 @@ from arch_indexer.toolchain import (
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+RUNTIMES = {"node_min_version": "18.0.0", "java_min_version": "17"}
+
 NODE_MANIFEST = {
     "tools": {
         "scip-python": {
@@ -36,7 +38,8 @@ NODE_MANIFEST = {
             "version": "0.6.2",
             "install_type": "npm",
         },
-    }
+    },
+    "runtimes": RUNTIMES,
 }
 
 
@@ -274,6 +277,35 @@ def test_check_host_runtimes():
     assert "mvn" in runtimes
 
 
+def test_check_host_runtimes_uses_manifest_minimums():
+    manifest = {
+        "tools": {},
+        "runtimes": {"node_min_version": "99.0.0", "java_min_version": "99"},
+    }
+
+    def which(name):
+        return f"/usr/bin/{name}" if name in ("node", "java", "mvn") else None
+
+    def run(cmd, *args, **kwargs):
+        if Path(cmd[0]).name == "node":
+            return subprocess.CompletedProcess(cmd, 0, "v20.0.0\n", "")
+        if Path(cmd[0]).name == "java":
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        return subprocess.CompletedProcess(cmd, 0, "Apache Maven 3.9.9\n", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("shutil.which", side_effect=which),
+        patch("subprocess.run", side_effect=run),
+    ):
+        runtimes = check_host_runtimes()
+
+    assert runtimes["node"].available is False
+    assert runtimes["node"].min_version == "99.0.0"
+    assert runtimes["java"].available is False
+    assert runtimes["java"].min_version == "99"
+
+
 def test_tool_status_missing(tmp_path):
     cache = tmp_path / "cache"
     status = check_tool_status("scip-python", cache_dir=cache)
@@ -296,7 +328,7 @@ def test_tool_status_scip_java_verifies_launcher(tmp_path):
     cache = tmp_path / "cache"
     java_dir = cache / "tools" / "java"
     java_dir.mkdir(parents=True)
-    launcher = java_dir / "scip-java"
+    launcher = java_dir / "scip-java-0.10.2"
     launcher.write_text("#!/bin/sh\n")
     launcher.chmod(0o755)
 
@@ -336,7 +368,10 @@ def test_toolchain_ensure_installs_missing_and_skips_existing(tmp_path):
     cache = tmp_path / "cache"
 
     coursier_bytes = b"coursier-launcher-jar"
-    manifest_mock = {"tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)}}
+    manifest_mock = {
+        "tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)},
+        "runtimes": RUNTIMES,
+    }
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
@@ -355,7 +390,7 @@ def test_toolchain_ensure_installs_missing_and_skips_existing(tmp_path):
 
         java_dir = cache / "tools" / "java"
         assert (java_dir / "coursier.jar").read_bytes() == coursier_bytes
-        assert (java_dir / "scip-java").is_file()
+        assert (java_dir / "scip-java-0.10.2").is_file()
 
         lock_data = json.loads((cache / "tools" / "manifest.lock.json").read_text())
         assert lock_data["tools"]["scip-python"]["version"] == "0.6.8"
@@ -366,6 +401,104 @@ def test_toolchain_ensure_installs_missing_and_skips_existing(tmp_path):
         res2 = ensure_toolchain(repo, cache_dir=cache)
         assert res2["installed"] == []
         assert set(res2["skipped"]) == {"scip-python", "scip-typescript", "scip-java"}
+
+
+def test_scip_java_pin_bump_reinstalls(tmp_path):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+    java_dir = cache / "tools" / "java"
+    java_dir.mkdir(parents=True)
+    legacy_launcher = java_dir / "scip-java"
+    legacy_launcher.write_text("#!/bin/sh\n")
+    legacy_launcher.chmod(0o755)
+
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest_mock = {"tools": _java_tools(coursier_bytes), "runtimes": RUNTIMES}
+    manifest_mock["tools"]["scip-java"]["version"] = "0.10.3"
+
+    bootstrap_cmds = []
+
+    def run(cmd, *args, **kwargs):
+        if "bootstrap" in cmd:
+            bootstrap_cmds.append(cmd)
+            launcher = Path(cmd[cmd.index("-o") + 1])
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch("arch_indexer.toolchain.check_host_runtimes", return_value=_runtimes()),
+        patch("subprocess.run", side_effect=run),
+        patch("shutil.which", side_effect=_which),
+        patch("urllib.request.urlopen", return_value=io.BytesIO(coursier_bytes)),
+    ):
+        assert check_tool_status("scip-java", cache_dir=cache).installed is False
+        res = ensure_toolchain(repo, cache_dir=cache)
+
+    assert "scip-java" in res["installed"]
+    assert (java_dir / "scip-java-0.10.3").is_file()
+    assert len(bootstrap_cmds) == 1
+    assert "com.sourcegraph:scip-java_2.13:0.10.3" in bootstrap_cmds[0]
+
+
+def test_lock_saved_when_scip_java_install_fails(tmp_path):
+    repo = FIXTURES_DIR / "mixed"
+    cache = tmp_path / "cache"
+
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest_mock = {
+        "tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)},
+        "runtimes": RUNTIMES,
+    }
+
+    def run(cmd, *args, **kwargs):
+        if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
+            _fake_npm_install(cmd)
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
+        if "bootstrap" in cmd:
+            return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="offline")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch("arch_indexer.toolchain.check_host_runtimes", return_value=_runtimes()),
+        patch("subprocess.run", side_effect=run),
+        patch("shutil.which", side_effect=_which),
+        patch("urllib.request.urlopen", return_value=io.BytesIO(coursier_bytes)),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to bootstrap scip-java"):
+            ensure_toolchain(repo, cache_dir=cache)
+
+    lock_data = json.loads((cache / "tools" / "manifest.lock.json").read_text())
+    assert lock_data["tools"]["scip-python"]["version"] == "0.6.8"
+    assert lock_data["tools"]["scip-typescript"]["version"] == "0.6.2"
+    assert "scip-java" not in lock_data["tools"]
+
+
+def test_ensure_records_skipped_tools_when_lock_missing(tmp_path):
+    cache = tmp_path / "cache"
+    lock_path = cache / "tools" / "manifest.lock.json"
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=NODE_MANIFEST),
+        patch("subprocess.run", side_effect=_fake_node_subprocess_run),
+        patch("shutil.which", side_effect=_which),
+    ):
+        ensure_toolchain(FIXTURES_DIR / "python", cache_dir=cache)
+        lock_path.unlink()
+        res = ensure_toolchain(FIXTURES_DIR / "python", cache_dir=cache)
+
+    assert res["installed"] == []
+    assert res["skipped"] == ["scip-python"]
+    lock_data = json.loads(lock_path.read_text())
+    bin_path = cache / "tools" / "node" / "node_modules" / ".bin" / "scip-python"
+    assert lock_data["tools"]["scip-python"] == {
+        "package": "@sourcegraph/scip-python",
+        "version": "0.6.8",
+        "install_type": "npm",
+        "path": str(bin_path),
+    }
 
 
 def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
@@ -389,7 +522,10 @@ def test_toolchain_ensure_warns_when_npm_missing(tmp_path):
     cache = tmp_path / "cache"
 
     coursier_bytes = b"coursier-launcher-jar"
-    manifest_mock = {"tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)}}
+    manifest_mock = {
+        "tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)},
+        "runtimes": RUNTIMES,
+    }
 
     def which(name):
         return "/usr/bin/java" if name == "java" else None
@@ -406,13 +542,13 @@ def test_toolchain_ensure_warns_when_npm_missing(tmp_path):
     assert any("npm or node not found" in warning for warning in res["warnings"])
     assert res["installed"] == ["scip-java"]
     assert not (cache / "tools" / "node" / "node_modules" / ".bin" / "scip-python").exists()
-    assert (cache / "tools" / "java" / "scip-java").is_file()
+    assert (cache / "tools" / "java" / "scip-java-0.10.2").is_file()
 
 
 def test_toolchain_ensure_skips_scip_java_when_java_absent(tmp_path):
     repo = FIXTURES_DIR / "java_maven"
     cache = tmp_path / "cache"
-    manifest_mock = {"tools": _java_tools(b"coursier-launcher-jar")}
+    manifest_mock = {"tools": _java_tools(b"coursier-launcher-jar"), "runtimes": RUNTIMES}
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
