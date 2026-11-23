@@ -163,7 +163,6 @@
           kind: "module",
           label: "root",
           path: "",
-          tier: "scip",
           fileCount: 0,
           symbolCount: 0,
           children: [],
@@ -224,7 +223,6 @@
           symbolCount: 0,
           children: [], // will contain file IDs
           files: new Set(),
-          tier: node.tier || "scip",
         };
         dirMap.set(dirId, dirNode);
         nodeLookup.set(dirId, dirNode);
@@ -251,7 +249,6 @@
           moduleId: modId,
           symbolCount: 0,
           children: [], // will contain leaf symbol IDs
-          tier: node.tier || "scip",
         };
         fileMap.set(fileId, fileNodeObj);
         nodeLookup.set(fileId, fileNodeObj);
@@ -339,6 +336,32 @@
   }
 
   /**
+   * Check whether a leaf node (symbol, data store, external sink) passes the filters.
+   */
+  function leafPassesFilters(node, activeFilters) {
+    if (!node) return false;
+    if (activeFilters.modules && activeFilters.modules.size > 0) {
+      if (node.moduleId && !activeFilters.modules.has(node.moduleId)) return false;
+    }
+    if (
+      activeFilters.kinds &&
+      activeFilters.kinds.size > 0 &&
+      !activeFilters.kinds.has(node.kind)
+    ) {
+      return false;
+    }
+    if (activeFilters.tiers && activeFilters.tiers.size > 0 && node.tier) {
+      const canonical = node.tier === "treesitter" ? "tree-sitter" : node.tier;
+      const matchesTier =
+        activeFilters.tiers.has(node.tier) ||
+        activeFilters.tiers.has(canonical) ||
+        (canonical === "tree-sitter" && activeFilters.tiers.has("treesitter"));
+      if (!matchesTier) return false;
+    }
+    return true;
+  }
+
+  /**
    * Get visible nodes and aggregated edges for a given zoom level and scope.
    */
   function getHierarchyScope(hierarchy, level, scopeId, filters) {
@@ -346,6 +369,28 @@
     const nodeLookup = hierarchy.nodeLookup;
     let nodeIds = [];
     let boundaryNodeIds = new Set();
+
+    const passesLeaf = (node) => leafPassesFilters(node, activeFilters);
+
+    const passingLeafCache = new Map();
+    function hasPassingLeaf(node) {
+      if (!node) return false;
+      if (passingLeafCache.has(node.id)) return passingLeafCache.get(node.id);
+      let result;
+      if (
+        node.level === "symbol" ||
+        node.kind === "datastore" ||
+        node.kind === "external_sink"
+      ) {
+        result = passesLeaf(node);
+      } else {
+        result = (node.children || []).some((childId) =>
+          hasPassingLeaf(nodeLookup.get(childId))
+        );
+      }
+      passingLeafCache.set(node.id, result);
+      return result;
+    }
 
     if (level === "system") {
       // Root level: modules + data stores + external sinks + frontend callers
@@ -357,21 +402,21 @@
         nodeIds.push(...modNode.children);
       }
       // Include connected data stores and external sinks as boundary context
-      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds);
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
     } else if (level === "file_group") {
       // Drilled into a directory: show file children
       const dirNode = nodeLookup.get(scopeId);
       if (dirNode && dirNode.children) {
         nodeIds.push(...dirNode.children);
       }
-      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds);
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
     } else if (level === "file") {
       // Drilled into a file: show symbol/endpoint children
       const fileNode = nodeLookup.get(scopeId);
       if (fileNode && fileNode.children) {
         nodeIds.push(...fileNode.children);
       }
-      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds);
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
     } else if (level === "symbol") {
       // Focus on symbol and its 1-hop upstream and downstream neighbors
       nodeIds.push(scopeId);
@@ -389,34 +434,9 @@
       }
     });
 
-    // Apply filters
     let visibleNodes = nodeIds
       .map((id) => nodeLookup.get(id))
-      .filter((n) => Boolean(n))
-      .filter((n) => {
-        if (activeFilters.modules && activeFilters.modules.size > 0) {
-          const modId = n.moduleId || (n.kind === "module" ? n.id : null);
-          if (modId && !activeFilters.modules.has(modId)) return false;
-        }
-        if (activeFilters.kinds && activeFilters.kinds.size > 0) {
-          // Keep intermediate structural aggregate containers (file_group, file)
-          // which are needed for hierarchical drill-down navigation and do not have leaf kind checkboxes.
-          if (n.kind !== "file_group" && n.kind !== "file") {
-            if (!activeFilters.kinds.has(n.kind)) return false;
-          }
-        }
-        if (activeFilters.tiers && activeFilters.tiers.size > 0) {
-          if (n.tier) {
-            const canonical = n.tier === "treesitter" ? "tree-sitter" : n.tier;
-            const matchesTier =
-              activeFilters.tiers.has(n.tier) ||
-              activeFilters.tiers.has(canonical) ||
-              (canonical === "tree-sitter" && activeFilters.tiers.has("treesitter"));
-            if (!matchesTier) return false;
-          }
-        }
-        return true;
-      });
+      .filter((n) => hasPassingLeaf(n));
 
     // Create a Set of visible IDs for fast lookup
     const visibleIdSet = new Set(visibleNodes.map((n) => n.id));
@@ -426,9 +446,14 @@
     const edgeMap = new Map();
 
     rawEdges.forEach((edge) => {
+      if (
+        !hasPassingLeaf(nodeLookup.get(edge.source)) ||
+        !hasPassingLeaf(nodeLookup.get(edge.target))
+      ) {
+        return;
+      }
       const srcMapped = mapToVisible(hierarchy, edge.source, visibleIdSet);
       const tgtMapped = mapToVisible(hierarchy, edge.target, visibleIdSet);
-
       if (srcMapped && tgtMapped && srcMapped !== tgtMapped) {
         const edgeKey = `${srcMapped}->${tgtMapped}`;
         if (!edgeMap.has(edgeKey)) {
@@ -480,7 +505,7 @@
   /**
    * Helper to collect data stores and sinks connected to descendants of a scope node.
    */
-  function collectConnectedSinksAndStores(hierarchy, scopeId, boundarySet) {
+  function collectConnectedSinksAndStores(hierarchy, scopeId, boundarySet, leafPasses) {
     const scopeNode = hierarchy.nodeLookup.get(scopeId);
     if (!scopeNode) return;
 
@@ -496,22 +521,25 @@
     }
     collectLeafs(scopeNode);
 
-    // For each leaf, check outgoing/incoming edges to datastores or sinks
+    const addBoundary = (id) => {
+      const boundary = hierarchy.nodeLookup.get(id);
+      if (
+        boundary &&
+        (boundary.kind === "datastore" || boundary.kind === "external_sink") &&
+        leafPasses(boundary)
+      ) {
+        boundarySet.add(id);
+      }
+    };
+
+    // For each passing leaf, check outgoing/incoming edges to datastores or sinks
     descendantIds.forEach((lid) => {
+      const leaf = hierarchy.nodeLookup.get(lid);
+      if (!leafPasses(leaf)) return;
       const outs = hierarchy.outgoingEdges.get(lid) || [];
-      outs.forEach((e) => {
-        const tgt = hierarchy.nodeLookup.get(e.target);
-        if (tgt && (tgt.kind === "datastore" || tgt.kind === "external_sink")) {
-          boundarySet.add(e.target);
-        }
-      });
+      outs.forEach((e) => addBoundary(e.target));
       const ins = hierarchy.incomingEdges.get(lid) || [];
-      ins.forEach((e) => {
-        const src = hierarchy.nodeLookup.get(e.source);
-        if (src && (src.kind === "datastore" || src.kind === "external_sink")) {
-          boundarySet.add(e.source);
-        }
-      });
+      ins.forEach((e) => addBoundary(e.source));
     });
   }
 
@@ -976,7 +1004,7 @@
       label: node.label || node.id,
       kind: node.kind,
       level: node.level,
-      tier: node.tier || "scip",
+      tier: node.tier || null,
       citation,
       file: node.file,
       line: node.line,

@@ -378,6 +378,74 @@ function runTests() {
   );
   state.filters.tiers.clear();
 
+  // 8b. Filters must evaluate the leaves behind each container and aggregated edge
+  console.log("Checking filters apply to aggregated containers and edges...");
+  state.filters.tiers = new Set(["tree-sitter"]);
+  state.goToBreadcrumb(0);
+  const tsSystemView = state.getCurrentView();
+  const tsNodeIds = tsSystemView.nodes.map((n) => n.id);
+  assert(
+    tsNodeIds.includes("mod:root"),
+    "mod:root must stay visible while its only leaf (fe:checkout_page) is tree-sitter"
+  );
+  for (const scipOnlyModule of ["mod:auth", "mod:orders", "mod:billing"]) {
+    assert(
+      !tsNodeIds.includes(scipOnlyModule),
+      `${scipOnlyModule} must be hidden when all of its leaves are scip-tier`
+    );
+  }
+  assert(
+    !tsSystemView.edges.some((e) => e.source === "mod:root"),
+    "An edge whose target leaf is filtered out must not be aggregated"
+  );
+  state.filters.tiers.clear();
+
+  state.filters.kinds = new Set([
+    "entrypoint",
+    "service",
+    "module",
+    "datastore",
+    "external_sink",
+  ]);
+  state.goToBreadcrumb(0);
+  const noFrontendView = state.getCurrentView();
+  const noFrontendIds = noFrontendView.nodes.map((n) => n.id);
+  assert(
+    !noFrontendIds.includes("mod:root"),
+    "mod:root must disappear when its only leaf kind (frontend_caller) is unchecked"
+  );
+  assert(
+    noFrontendIds.includes("mod:orders"),
+    "A module with passing leaves must stay visible under the kind filter"
+  );
+  assert(
+    !noFrontendView.edges.some((e) => e.source === "mod:root"),
+    "Edges from filtered-out leaves must not be aggregated"
+  );
+
+  state.filters.kinds = new Set(["entrypoint", "module", "datastore", "external_sink"]);
+  state.drillDown("mod:orders");
+  const noServiceView = state.getCurrentView();
+  const noServiceIds = noServiceView.nodes.map((n) => n.id);
+  assert(
+    noServiceIds.includes("dir:src/orders"),
+    "A directory with a passing entrypoint leaf must stay visible"
+  );
+  assert(
+    !noServiceIds.includes("dir:src/orders/services"),
+    "A directory whose only leaves are filtered-out services must be hidden"
+  );
+  assert(
+    !noServiceIds.includes("ds:postgres:orders"),
+    "A boundary store reached only through filtered-out leaves must not be added"
+  );
+  assert.strictEqual(
+    noServiceView.edges.length,
+    0,
+    "Edges between filtered-out leaves must not be aggregated"
+  );
+  state.filters.kinds.clear();
+
   // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
   console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
   const pythonExe = process.env.ARCH_VIEWER_PYTHON || "python3";
