@@ -172,7 +172,7 @@ _FLOW_LINK_RE = re.compile(r"<?(?:-{2,}[->xo]|={2,}[=>xo]|-\.+-[>xo]?|~{3,})")
 # Optional 'o'/'x' head at the start of a bidirectional link: 'o--o', 'x--x'.
 _FLOW_LINK_HEAD_RE = re.compile(r"[ox](?=--|==|-\.)")
 # Openers of inline-text links: '-- text -->', '== text ==>', '-. text .->'.
-_FLOW_INLINE_OPEN_RE = re.compile(r"<?(--|==|-\.)(?=\s)")
+_FLOW_INLINE_OPEN_RE = re.compile(r"<?(--|==|-\.)")
 # Closer accepted for each inline-text opener.
 _FLOW_INLINE_CLOSE_RES: dict[str, re.Pattern[str]] = {
     "--": re.compile(r"-{2,}[->xo]"),
@@ -532,8 +532,9 @@ _SEQ_KEYWORDS = frozenset(
 )
 _SEQ_DECLARATION_KEYWORDS = frozenset({"participant", "actor", "create"})
 # Message: <actor><arrow>[+|-]<actor>[: free text]. Actor names exclude the
-# characters Mermaid reserves for arrows and separators.
-_SEQ_ACTOR = r"[^<>\-=:,;\s][^<>\-=:,;]*?"
+# characters Mermaid reserves for arrows and separators; a hyphen is an
+# ordinary character unless it starts an arrow.
+_SEQ_ACTOR = r"[^<>\-=:,;\s](?:[^<>\-=:,;]|-(?![-x).<>]))*?"
 _SEQ_MESSAGE_RE = re.compile(
     rf"^(?P<src>{_SEQ_ACTOR})\s*"
     r"(?P<arrow><<-->>|<<->>|-->>|->>|--x|-x|--\)|-\)|-->|->)"
