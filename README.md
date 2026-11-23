@@ -17,6 +17,19 @@ Every technical claim in the generated documents is traceable to the code throug
 
 Indexing, querying, graphing, assembly and validation run offline; only toolchain installation uses the network.
 
+## Install and try the first slice
+
+```bash
+pip install -e .   # add "[dev]" to also install pytest and ruff
+
+arch-indexer toolchain status --repo /path/to/repo
+arch-indexer toolchain ensure --repo /path/to/repo   # the only command that uses the network
+```
+
+This slice implements language detection and pinned indexer installation (`toolchain status` and `toolchain ensure`). The `index`, `query`, `plan`, `assemble`, `check-citations` and `check-mermaid` commands are not implemented yet: they print an error and exit `1`.
+
+`ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime is reported as a warning and that language falls back to Tier 2 tree-sitter indexing. `--fetch-runtime` is rejected for now: install the host runtimes instead (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)).
+
 ## Status
 
-Early development. The working specification lives with the project's maintainers and will be added to this repository as the implementation lands.
+Early development. The first implementation slice (toolchain management) is in place. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands it specifies beyond that slice are not implemented yet.
