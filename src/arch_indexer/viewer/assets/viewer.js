@@ -249,11 +249,11 @@
     viewportEl.appendChild(defs);
 
     const edgesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    edgesGroup.className = "edges-layer";
+    edgesGroup.setAttribute("class", "edges-layer");
     viewportEl.appendChild(edgesGroup);
 
     const nodesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    nodesGroup.className = "nodes-layer";
+    nodesGroup.setAttribute("class", "nodes-layer");
     viewportEl.appendChild(nodesGroup);
 
     // Determine trace highlights

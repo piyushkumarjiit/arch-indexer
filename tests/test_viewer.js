@@ -514,6 +514,22 @@ function testBrowserController(graphJsonText) {
     return el;
   }
 
+  // SVG elements expose className as a read-only SVGAnimatedString, so assigning
+  // to el.className throws in a real browser. Mirror that contract in the DOM stub.
+  function createMockSvgElement(tag) {
+    const el = createMockElement(tag);
+    Object.defineProperty(el, "className", {
+      configurable: true,
+      get() {
+        return { baseVal: el.attributes["class"] || "" };
+      },
+      set() {
+        throw new TypeError("Cannot set property className of an SVG element");
+      },
+    });
+    return el;
+  }
+
   // Pre-create required DOM elements
   createMockElement("div", "repo-title");
   createMockElement("div", "search-input");
@@ -580,7 +596,7 @@ function testBrowserController(graphJsonText) {
   global.document = {
     getElementById(id) { return elements.get(id) || null; },
     createElement(tag) { return createMockElement(tag); },
-    createElementNS(ns, tag) { return createMockElement(tag); },
+    createElementNS(ns, tag) { return createMockSvgElement(tag); },
     addEventListener(evt, h) {
       if (!listeners.has(evt)) listeners.set(evt, []);
       listeners.get(evt).push(h);
