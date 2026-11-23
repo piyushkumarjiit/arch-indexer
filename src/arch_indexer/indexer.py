@@ -4,6 +4,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from arch_indexer.checks.citations import (
+    CANONICAL_DOCS,
+    check_citations,
+    relocate_citations,
+)
 from arch_indexer.config import DEFAULT_CHUNK_FILES, RepoCachePaths
 from arch_indexer.plugins.base import (
     FallbackSignal,
@@ -16,12 +21,33 @@ from arch_indexer.plugins.infra_scanner import InfraScanner
 from arch_indexer.plugins.java_plugin import JavaPlugin
 from arch_indexer.plugins.python_plugin import PythonPlugin
 from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
+from arch_indexer.storage.state import (
+    RepoSnapshot,
+    compute_delta,
+    compute_impacted_sections,
+    moved_symbol_moves,
+    read_json,
+    write_json,
+)
 from arch_indexer.store import IndexStore
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
 EXIT_DELTA_DETECTED: int = 2
+EXIT_VALIDATION_FAILED: int = 3
 EXIT_TOOLCHAIN_MISSING: int = 4
+
+
+def _read_doc_texts(target_repo: Path, docs_dir: str) -> dict[str, str | None]:
+    """Read every canonical document (None when it does not exist yet)."""
+    doc_texts: dict[str, str | None] = {}
+    for doc_name in CANONICAL_DOCS:
+        doc_rel = f"{docs_dir}/{doc_name}"
+        doc_path = target_repo / doc_rel
+        doc_texts[doc_rel] = (
+            doc_path.read_text(encoding="utf-8", errors="replace") if doc_path.is_file() else None
+        )
+    return doc_texts
 
 
 def run_index(
@@ -155,7 +181,79 @@ def run_index(
         # Print one-line summary to stdout
         print(store.format_summary())
 
-    # Spec 5.2/7.2: without a previous state.json (or with --force-full) this is a
-    # first run, which exits DELTA_DETECTED. This task never writes state.json, so
-    # delta computation is a later task and every run reports a first run.
+        # Spec 5.1: snapshot the freshly indexed tables and diff them against state.json.
+        current = RepoSnapshot.from_store(store)
+        previous_state = read_json(cache_paths.state_json)
+        previous = None if force_full else RepoSnapshot.from_state(previous_state)
+        delta = compute_delta(previous, current)
+
+        # Spec 5.3: deleted files are purged from every table. The index was just rebuilt
+        # from disk, but purging keeps the guarantee explicit and idempotent.
+        store.purge_files(delta.deleted_files)
+
+    module_by_file = {
+        path: record["module"] for path, record in current.files.items() if record.get("module")
+    }
+    doc_texts = _read_doc_texts(target_repo, docs_dir)
+    report = compute_impacted_sections(
+        docs_dir=docs_dir,
+        doc_texts=doc_texts,
+        delta=delta,
+        previous_state=previous_state,
+        module_by_file=module_by_file,
+    )
+
+    write_json(cache_paths.index_delta_json, delta.to_payload(cache_paths.repo_id))
+    write_json(cache_paths.impacted_sections_json, report.to_payload(delta, docs_dir=docs_dir))
+    write_json(
+        cache_paths.state_json,
+        current.to_state_payload(
+            repo_id=cache_paths.repo_id,
+            module_sections=report.module_sections,
+            diagram_hashes=report.diagram_hashes,
+        ),
+    )
+
+    print(delta.format_summary())
+    if report.sections:
+        print(f"Impacted sections: {len(report.sections)}")
+
+    # Spec 5.4: a move-only delta is repaired with zero tokens when asked to.
+    if auto_relocate_citations and not delta.is_first_run and delta.is_move_only():
+        relocated = relocate_citations(target_repo, moved_symbol_moves(delta), docs_dir=docs_dir)
+        errors, _notes = check_citations(repo=target_repo, docs_dir=docs_dir, cache_dir=cache_dir)
+        if errors:
+            for error in errors:
+                sys.stderr.write(f"{error.format_line()}\n")
+            sys.stderr.write("Error: citation relocation did not resolve every citation failure\n")
+            return EXIT_VALIDATION_FAILED
+
+        # Re-read the relocated docs so state.json records the repaired section map.
+        repaired = compute_impacted_sections(
+            docs_dir=docs_dir,
+            doc_texts=_read_doc_texts(target_repo, docs_dir),
+            delta=delta,
+            previous_state=previous_state,
+            module_by_file=module_by_file,
+        )
+        write_json(
+            cache_paths.state_json,
+            current.to_state_payload(
+                repo_id=cache_paths.repo_id,
+                module_sections=repaired.module_sections,
+                diagram_hashes=repaired.diagram_hashes,
+            ),
+        )
+        print(
+            f"Relocated citations in {len(relocated)} document(s): "
+            f"{', '.join(relocated) if relocated else 'none'}"
+        )
+        return EXIT_OK
+
+    # Spec 5.2/7.2: first run (or --force-full) and any real delta exit DELTA_DETECTED.
+    # Impacted sections alone (e.g. a changed AUTO-DIAGRAM block) also need workers.
+    if delta.is_first_run:
+        return EXIT_DELTA_DETECTED
+    if delta.is_empty() and not report.sections:
+        return EXIT_OK
     return EXIT_DELTA_DETECTED

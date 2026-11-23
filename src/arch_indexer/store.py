@@ -308,6 +308,55 @@ class IndexStore:
             if unresolved_refs:
                 self._insert_unresolved_refs(unresolved_refs)
 
+    def get_file_records(self) -> list[dict[str, Any]]:
+        """Return every indexed file record in deterministic path order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT path, language, sha256, line_count, module, tier, fallback_reason
+            FROM files
+            ORDER BY path
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_symbol_records(self) -> list[dict[str, Any]]:
+        """Return every indexed symbol record in deterministic order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT fqname, name, kind, file_path, start_line, end_line, body_sha256
+            FROM symbols
+            ORDER BY file_path, start_line, end_line, fqname, kind
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def purge_files(self, paths: Iterable[str]) -> list[str]:
+        """Delete every row referencing the given file paths from all index tables (spec 5.3).
+
+        Returns the sorted list of purged paths. Safe to call with an empty list and
+        idempotent, so a deleted file can never remain indexed in any table.
+        """
+        purged = sorted({str(path) for path in paths if path})
+        if not purged:
+            return []
+        statements = (
+            ("files", "path"),
+            ("symbols", "file_path"),
+            ("references", "file_path"),
+            ("entrypoints", "file_path"),
+            ("infra_artifacts", "file_path"),
+            ("unresolved_refs", "file_path"),
+        )
+        with self.conn:
+            for table, column in statements:
+                self.conn.executemany(
+                    f'DELETE FROM "{table}" WHERE {column} = ?',
+                    [(path,) for path in purged],
+                )
+        return purged
+
     def get_summary(self) -> dict[str, Any]:
         """Collect index summary metrics."""
         cursor = self.conn.cursor()
