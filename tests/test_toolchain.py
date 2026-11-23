@@ -466,9 +466,9 @@ def test_lock_saved_when_scip_java_install_fails(tmp_path):
         patch("subprocess.run", side_effect=run),
         patch("shutil.which", side_effect=_which),
         patch("urllib.request.urlopen", return_value=io.BytesIO(coursier_bytes)),
+        pytest.raises(RuntimeError, match="Failed to bootstrap scip-java"),
     ):
-        with pytest.raises(RuntimeError, match="Failed to bootstrap scip-java"):
-            ensure_toolchain(repo, cache_dir=cache)
+        ensure_toolchain(repo, cache_dir=cache)
 
     lock_data = json.loads((cache / "tools" / "manifest.lock.json").read_text())
     assert lock_data["tools"]["scip-python"]["version"] == "0.6.8"
@@ -650,9 +650,11 @@ def test_download_verified_removes_partial_file_on_failure(tmp_path):
         assert timeout is not None
         raise OSError("connection stalled")
 
-    with patch("arch_indexer.toolchain.urllib.request.urlopen", side_effect=failing_urlopen):
-        with pytest.raises(OSError, match="connection stalled"):
-            _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
+    with (
+        patch("arch_indexer.toolchain.urllib.request.urlopen", side_effect=failing_urlopen),
+        pytest.raises(OSError, match="connection stalled"),
+    ):
+        _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
 
     assert not dest.exists()
 
@@ -660,12 +662,14 @@ def test_download_verified_removes_partial_file_on_failure(tmp_path):
 def test_download_verified_removes_file_on_checksum_mismatch(tmp_path):
     dest = tmp_path / "coursier.jar"
 
-    with patch(
-        "arch_indexer.toolchain.urllib.request.urlopen",
-        return_value=io.BytesIO(b"tampered"),
+    with (
+        patch(
+            "arch_indexer.toolchain.urllib.request.urlopen",
+            return_value=io.BytesIO(b"tampered"),
+        ),
+        pytest.raises(ValueError, match="Checksum mismatch"),
     ):
-        with pytest.raises(ValueError, match="Checksum mismatch"):
-            _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
+        _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
 
     assert not dest.exists()
 

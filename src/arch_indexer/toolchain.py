@@ -382,9 +382,7 @@ def _scip_java_launcher_path(cfg: dict[str, Any], cache_dir: str | Path | None) 
 
 def _launcher_help_ok(launcher: Path) -> bool:
     try:
-        res = subprocess.run(
-            [str(launcher), "--help"], capture_output=True, text=True, check=False
-        )
+        res = subprocess.run([str(launcher), "--help"], capture_output=True, text=True, check=False)
     except (subprocess.SubprocessError, OSError):
         return False
     return res.returncode == 0
@@ -404,8 +402,7 @@ def _download_verified(url: str, expected_sha256: str, dest: Path) -> None:
     if actual_sha256 != expected_sha256:
         dest.unlink(missing_ok=True)
         raise ValueError(
-            f"Checksum mismatch downloading {url}: expected {expected_sha256}, "
-            f"got {actual_sha256}"
+            f"Checksum mismatch downloading {url}: expected {expected_sha256}, got {actual_sha256}"
         )
 
 
@@ -446,9 +443,7 @@ def _install_scip_java(tools_cfg: dict[str, Any], cache_dir: Path) -> Path:
     )
     if bootstrap.returncode != 0:
         launcher.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Failed to bootstrap scip-java: {bootstrap.stderr or bootstrap.stdout}"
-        )
+        raise RuntimeError(f"Failed to bootstrap scip-java: {bootstrap.stderr or bootstrap.stdout}")
     if not _launcher_help_ok(launcher):
         launcher.unlink(missing_ok=True)
         raise RuntimeError("Bootstrapped scip-java launcher failed to run --help")

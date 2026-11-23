@@ -114,7 +114,8 @@ All external tools and parsers are pinned to exact versions:
 | :--- | :--- | :--- | :--- |
 | `@sourcegraph/scip-python` | `0.6.8` | `<cache>/tools/node` | Tier 1 Python indexer |
 | `@sourcegraph/scip-typescript` | `0.6.2` | `<cache>/tools/node` | Tier 1 TypeScript indexer |
-| `scip-java` | `0.10.2` *(pin exact verified tag + SHA-256)* | `<cache>/tools/java` | Tier 1 Java/Maven indexer |
+| `scip-java` | `0.10.2` (coursier bootstrap of `com.sourcegraph:scip-java_2.13`) | `<cache>/tools/java` | Tier 1 Java/Maven indexer |
+| `coursier` | `2.1.27` (launcher verified by SHA-256) | `<cache>/tools/java` | Bootstraps the `scip-java` launcher |
 | `protobuf` | `5.29.3` | `arch-indexer` venv | Parse `index.scip` binary directly (no `scip` CLI needed) |
 | `tree-sitter` | `0.23.2` | `arch-indexer` venv | Tier 2 fallback parser runtime |
 | `tree-sitter-python` | `0.23.6` | `arch-indexer` venv | Tier 2 Python grammar |
@@ -283,7 +284,7 @@ Generated as a **single self-contained HTML file** with inline CSS and vanilla J
 ### 7.1 Commands
 ```bash
 # 1. Toolchain management (ONLY command allowed network access)
-arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>]
+arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>] [--fetch-runtime]
 arch-indexer toolchain status --repo <path>
 
 # 2. Deterministic indexing, delta detection, graph & viewer export
