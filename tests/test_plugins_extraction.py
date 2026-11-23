@@ -538,14 +538,14 @@ public class FqController {
 
 
 def test_java_jsr250_method_guard_overrides_class_jsr250_guard(tmp_path: Path):
-    """JSR-250 guards form one override family: the method annotation wins.
+    """JSR-250 annotations form one override family: the method annotation wins.
 
     Oracle: Spring's ``Jsr250AuthorizationManager`` reads the JSR-250 annotation
     from the method when present and only falls back to the class annotation, so
     ``@PermitAll`` makes a handler public inside an ``@RolesAllowed`` controller
-    and ``@DenyAll``/``@RolesAllowed`` replace it outright. A method JSR-250
-    annotation does not displace a Spring ``@Secured`` class guard, whose own
-    interceptor still applies.
+    and ``@DenyAll``/``@RolesAllowed`` replace its roles outright. ``@PermitAll``
+    only grants access, so it is not recorded as an auth symbol, while
+    ``@DenyAll`` and ``@RolesAllowed`` are.
     """
     res = _run_single_file(
         JavaPlugin(),
@@ -564,6 +564,10 @@ public class Jsr250Controller {
     @PermitAll
     public void health() {}
 
+    @GetMapping("/qualified-health")
+    @jakarta.annotation.security.PermitAll
+    public void qualifiedHealth() {}
+
     @GetMapping("/blocked")
     @jakarta.annotation.security.DenyAll
     public void blocked() {}
@@ -579,10 +583,40 @@ public class Jsr250Controller {
     )
 
     auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
-    assert auth["health"] == ["@PermitAll"]
+    assert auth["health"] == []
+    assert auth["qualifiedHealth"] == []
     assert auth["blocked"] == ["@jakarta.annotation.security.DenyAll"]
     assert auth["users"] == ['@RolesAllowed("USER")']
     assert auth["admin"] == ['@RolesAllowed("ADMIN")']
+
+
+def test_java_permitall_in_unguarded_controller_is_not_an_auth_symbol(tmp_path: Path):
+    """An explicitly public handler records no auth symbol.
+
+    Oracle: ``@PermitAll`` grants access to everyone, so a handler that carries
+    only ``@PermitAll`` is unauthenticated; recording it would make DESIGN's
+    Security section report a public endpoint as protected.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "PublicController.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api")
+public class PublicController {
+    @GetMapping("/health")
+    @PermitAll
+    public void health() {}
+}
+""",
+    )
+
+    assert json.loads(res.entrypoints[0]["auth_symbols_json"]) == []
 
 
 def test_java_jsr250_guard_does_not_override_spring_secured_guard(tmp_path: Path):
@@ -590,7 +624,7 @@ def test_java_jsr250_guard_does_not_override_spring_secured_guard(tmp_path: Path
 
     Oracle: Spring evaluates the ``@Secured`` interceptor independently of the
     JSR-250 manager, so ``@PermitAll`` on a handler of a ``@Secured`` controller
-    does not make it public; both annotations describe the endpoint.
+    does not make it public, and the permit-all grant itself is not a guard.
     """
     res = _run_single_file(
         JavaPlugin(),
@@ -612,10 +646,7 @@ public class SecuredController {
 """,
     )
 
-    assert json.loads(res.entrypoints[0]["auth_symbols_json"]) == [
-        '@Secured("ROLE_ADMIN")',
-        "@PermitAll",
-    ]
+    assert json.loads(res.entrypoints[0]["auth_symbols_json"]) == ['@Secured("ROLE_ADMIN")']
 
 
 def test_python_main_single_quotes_and_login_required():

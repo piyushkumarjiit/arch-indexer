@@ -63,7 +63,7 @@ _JSR250_AUTH_NAMES = frozenset({"RolesAllowed", "PermitAll", "DenyAll"})
 
 
 def _auth_annotation_name(annotation: str) -> str | None:
-    """The simple name of a guarding annotation, bare or package-qualified."""
+    """The simple name of an authorization annotation, bare or package-qualified."""
     match = _AUTH_ANNOTATION_RE.match(annotation)
     return match.group(1) if match else None
 
@@ -75,8 +75,14 @@ def _auth_override_key(annotation: str) -> str | None:
 
 
 def _is_auth_annotation(annotation: str) -> bool:
-    """Whether an annotation guards its declaration (Spring security annotations)."""
+    """Whether an annotation states the authorization of its declaration."""
     return _auth_annotation_name(annotation) is not None
+
+
+def _is_guard_annotation(annotation: str) -> bool:
+    """Whether an annotation restricts access rather than granting it to all."""
+    name = _auth_annotation_name(annotation)
+    return name is not None and name != "PermitAll"
 
 
 def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str, list[str]]:
@@ -462,7 +468,7 @@ class JavaPlugin(LanguagePlugin):
                         path = _annotation_path(ann_match.group(1) or "")
                         if path:
                             child_base_path = path.rstrip("/")
-                    if _is_auth_annotation(ann):
+                    if _is_guard_annotation(ann):
                         child_auth.append(ann)
 
             # 3. Method Calls
@@ -505,6 +511,7 @@ class JavaPlugin(LanguagePlugin):
                 _, annotations = _get_modifiers_and_annotations(node, source_bytes)
 
                 method_auth = [ann for ann in annotations if _is_auth_annotation(ann)]
+                method_guards = [ann for ann in method_auth if _is_guard_annotation(ann)]
                 overridden_guards = {_auth_override_key(ann) for ann in method_auth}
                 auth_symbols = [
                     *(
@@ -512,7 +519,7 @@ class JavaPlugin(LanguagePlugin):
                         for ann in current_auth
                         if _auth_override_key(ann) not in overridden_guards
                     ),
-                    *method_auth,
+                    *method_guards,
                 ]
 
                 for ann in annotations:
