@@ -4,6 +4,8 @@ import io
 import json
 
 from arch_indexer.checks.mermaid import (
+    CODE_AUTO_DIAGRAM_ERROR,
+    CODE_AUTO_DIAGRAM_MISMATCH,
     CODE_EMPTY_BODY,
     CODE_INVALID_ARROW,
     CODE_INVALID_HEADER,
@@ -323,3 +325,167 @@ def test_invalid_repo_dir_returns_1(tmp_path):
     code = run_check_mermaid(tmp_path / "nonexistent", out=out, err=err)
     assert code == 1
     assert "does not exist" in err.getvalue()
+
+
+def test_mermaid_valid_syntaxes_from_review():
+    # 1. Chaining operator &
+    assert _validate_snippet("flowchart TD\n  A --> B & C\n") == []
+
+    # 2. Class shorthand :::class
+    assert _validate_snippet("flowchart TD\n  A:::hot --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A[Label]:::hot --> B:::cold\n") == []
+
+    # 3. Trailing semicolon / statement separator
+    assert _validate_snippet("flowchart TD\n  A --> B;\n") == []
+    assert _validate_snippet("flowchart TD\n  A --> B; C --> D;\n") == []
+
+    # 4. Header with semicolon
+    assert _validate_snippet("graph TD;\n  A --> B\n") == []
+    assert _validate_snippet("flowchart LR;\n  A --> B\n") == []
+
+    # 5. linkStyle keyword skipped
+    assert _validate_snippet("flowchart TD\n  A --> B\n  linkStyle 0 stroke:#f00\n") == []
+
+    # 6. Hyphen in label
+    assert _validate_snippet("flowchart TD\n  A -- re-try --> B\n") == []
+
+    # 7. Subgraph titles: free text and quoted
+    assert _validate_snippet("flowchart TD\n  subgraph Service Layer\n    A --> B\n  end\n") == []
+    assert _validate_snippet('flowchart TD\n  subgraph "Service Layer"\n    A --> B\n  end\n') == []
+
+    # 8. Asymmetric shape opener >
+    assert _validate_snippet("flowchart TD\n  A>flag] --> B\n") == []
+
+    # 9. Cross arrow --x
+    assert _validate_snippet("flowchart TD\n  A --x B\n") == []
+
+
+def test_mermaid_exact_case_headers(tmp_path):
+    # Valid exact headers
+    assert _validate_snippet("flowchart LR\n  A --> B\n") == []
+    assert _validate_snippet("graph TD\n  A --> B\n") == []
+    assert _validate_snippet("sequenceDiagram\n  Alice->>Bob: Hello\n") == []
+    assert _validate_snippet("classDiagram\n  class Animal\n") == []
+    assert _validate_snippet("erDiagram\n  CUSTOMER ||--o{ ORDER : places\n") == []
+    assert _validate_snippet("stateDiagram-v2\n  [*] --> State1\n") == []
+
+    # Case-insensitive headers should fail INVALID_HEADER
+    errs = _validate_snippet("Flowchart TD\n  A --> B\n")
+    assert any(e.code == CODE_INVALID_HEADER for e in errs)
+
+    errs = _validate_snippet("Graph LR\n  A --> B\n")
+    assert any(e.code == CODE_INVALID_HEADER for e in errs)
+
+    # stateDiagram without -v2 should fail INVALID_HEADER
+    errs = _validate_snippet("stateDiagram\n  [*] --> S1\n")
+    assert any(e.code == CODE_INVALID_HEADER for e in errs)
+
+
+def test_auto_diagram_hook_failure_reported(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Architecture Overview\n\n"
+        "<!-- AUTO-DIAGRAM:module-overview:START -->\n"
+        "```mermaid\n"
+        "flowchart LR\n"
+        "  ModuleA --> ModuleB\n"
+        "```\n"
+        "<!-- AUTO-DIAGRAM:module-overview:END -->\n",
+        encoding="utf-8",
+    )
+
+    import arch_indexer.checks.mermaid as mermaid_mod
+
+    monkeypatch.setattr(
+        mermaid_mod,
+        "verify_auto_diagram",
+        lambda diagram_id, mermaid_code, repo_path, graph_path=None: (
+            False,
+            "Diagram does not match graph.json hash",
+        ),
+    )
+
+    errors, _ = check_mermaid(repo)
+    assert len(errors) == 1
+    assert errors[0].code == CODE_AUTO_DIAGRAM_MISMATCH
+    assert "Diagram does not match graph.json hash" in errors[0].message
+
+    out = io.StringIO()
+    code = run_check_mermaid(repo, out=out)
+    assert code == 3
+    assert "AUTO_DIAGRAM_MISMATCH" in out.getvalue()
+
+
+def test_auto_diagram_markers_validation(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    # Case 1: END without START
+    design1 = docs / "DESIGN.md"
+    design1.write_text(
+        "<!-- AUTO-DIAGRAM:mod:END -->\n",
+        encoding="utf-8",
+    )
+    errors, _ = check_mermaid(repo)
+    assert any(e.code == CODE_AUTO_DIAGRAM_ERROR for e in errors)
+    assert any("without matching START" in e.message for e in errors)
+
+    # Case 2: START with no mermaid block before END
+    design1.write_text(
+        "<!-- AUTO-DIAGRAM:mod:START -->\n<!-- AUTO-DIAGRAM:mod:END -->\n",
+        encoding="utf-8",
+    )
+    errors, _ = check_mermaid(repo)
+    assert any(e.code == CODE_AUTO_DIAGRAM_ERROR for e in errors)
+    assert any("contains no mermaid block" in e.message for e in errors)
+
+    # Case 3: Unclosed START (missing END)
+    design1.write_text(
+        "<!-- AUTO-DIAGRAM:mod:START -->\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+        encoding="utf-8",
+    )
+    errors, _ = check_mermaid(repo)
+    assert any(e.code == CODE_AUTO_DIAGRAM_ERROR for e in errors)
+    assert any("missing matching END" in e.message for e in errors)
+
+    # Case 4: Multiple mermaid blocks inside one AUTO-DIAGRAM
+    design1.write_text(
+        "<!-- AUTO-DIAGRAM:mod:START -->\n"
+        "```mermaid\n"
+        "flowchart TD\n"
+        "  A --> B\n"
+        "```\n"
+        "```mermaid\n"
+        "flowchart TD\n"
+        "  C --> D\n"
+        "```\n"
+        "<!-- AUTO-DIAGRAM:mod:END -->\n",
+        encoding="utf-8",
+    )
+    errors, _ = check_mermaid(repo)
+    assert any(e.code == CODE_AUTO_DIAGRAM_ERROR for e in errors)
+    assert any("must wrap exactly one mermaid block" in e.message for e in errors)
+
+
+def test_form_feed_in_mermaid_document(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    # Form feed character before the mermaid block
+    design.write_text(
+        "# Heading\x0cSection\n\n```mermaid\nflowchart LR\n  A --> B\n```\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_mermaid(repo)
+    assert errors == []

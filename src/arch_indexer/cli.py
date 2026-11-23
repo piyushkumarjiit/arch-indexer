@@ -197,6 +197,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
     )
     cite_parser.add_argument(
+        "--file",
+        action="append",
+        dest="files",
+        default=None,
+        help="Check only specified file(s) instead of canonical docs (repeatable)",
+    )
+    cite_parser.add_argument(
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
     cite_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
@@ -210,7 +217,6 @@ def build_parser() -> argparse.ArgumentParser:
     mermaid_parser.add_argument(
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
-    mermaid_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     return parser
 
@@ -261,6 +267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 docs_dir=args.docs_dir,
                 output_format=args.format,
                 cache_dir=args.cache_dir,
+                files=args.files,
             )
         except Exception as e:
             sys.stderr.write(f"Error checking citations: {e}\n")
@@ -272,7 +279,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo=args.repo,
                 docs_dir=args.docs_dir,
                 output_format=args.format,
-                cache_dir=args.cache_dir,
             )
         except Exception as e:
             sys.stderr.write(f"Error checking mermaid diagrams: {e}\n")

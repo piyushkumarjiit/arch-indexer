@@ -9,7 +9,7 @@ from typing import TextIO
 
 from arch_indexer.config import DEFAULT_DOCS_DIR
 
-# Error codes per spec section 8.3
+# Error codes per spec section 8.3 and review requirements
 CODE_INVALID_HEADER: str = "INVALID_HEADER"
 CODE_EMPTY_BODY: str = "EMPTY_BODY"
 CODE_UNBALANCED_SUBGRAPH: str = "UNBALANCED_SUBGRAPH"
@@ -17,39 +17,25 @@ CODE_UNBALANCED_QUOTES: str = "UNBALANCED_QUOTES"
 CODE_UNBALANCED_DELIMITERS: str = "UNBALANCED_DELIMITERS"
 CODE_INVALID_NODE_ID: str = "INVALID_NODE_ID"
 CODE_INVALID_ARROW: str = "INVALID_ARROW"
+CODE_AUTO_DIAGRAM_MISMATCH: str = "AUTO_DIAGRAM_MISMATCH"
+CODE_AUTO_DIAGRAM_ERROR: str = "AUTO_DIAGRAM_ERROR"
 
 # Canonical documents checked in target repo (spec section 8.1 & 8.3)
 CANONICAL_DOCS: tuple[str, ...] = ("DESIGN.md", "USER_GUIDE.md")
 
-# Supported diagram headers per spec section 8.3
+# Supported diagram headers per spec section 8.3 and Firstmate simplify-unrequired decision
+# Exact case-sensitive match; direction and optional ';' may follow.
 DIAGRAM_HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
-    "flowchart": re.compile(r"^flowchart(?:\s+(?:TD|TB|BT|RL|LR))?\s*$", re.IGNORECASE),
-    "graph": re.compile(r"^graph(?:\s+(?:TD|TB|BT|RL|LR))?\s*$", re.IGNORECASE),
-    "sequenceDiagram": re.compile(r"^sequenceDiagram\s*$", re.IGNORECASE),
-    "classDiagram": re.compile(r"^classDiagram\s*$", re.IGNORECASE),
-    "erDiagram": re.compile(r"^erDiagram\s*$", re.IGNORECASE),
-    "stateDiagram-v2": re.compile(r"^stateDiagram(?:-v2)?\s*$", re.IGNORECASE),
+    "flowchart": re.compile(r"^flowchart(?:\s+(?:TD|TB|BT|RL|LR))?\s*;?\s*$"),
+    "graph": re.compile(r"^graph(?:\s+(?:TD|TB|BT|RL|LR))?\s*;?\s*$"),
+    "sequenceDiagram": re.compile(r"^sequenceDiagram\s*;?\s*$"),
+    "classDiagram": re.compile(r"^classDiagram\s*;?\s*$"),
+    "erDiagram": re.compile(r"^erDiagram\s*;?\s*$"),
+    "stateDiagram-v2": re.compile(r"^stateDiagram-v2\s*;?\s*$"),
 }
 
 # Node ID character validation (alphanumeric, underscore, hyphen)
 VALID_NODE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
-
-# Valid flowchart arrow tokens
-VALID_FLOWCHART_ARROWS: tuple[str, ...] = (
-    "-->",
-    "---",
-    "-.-",
-    "-.->",
-    "==>",
-    "===",
-    "<-->",
-    "<-.->",
-    "<==>",
-    "--o",
-    "--x",
-    "o--o",
-    "x--x",
-)
 
 # Regex to detect malformed arrows in flowchart / graph diagrams
 MALFORMED_FLOWCHART_ARROW_RES: tuple[re.Pattern[str], ...] = (
@@ -62,8 +48,6 @@ MALFORMED_FLOWCHART_ARROW_RES: tuple[re.Pattern[str], ...] = (
     # Sequence diagram arrows mistakenly used in flowchart
     re.compile(r"(?<![-.\w])->>(?!>)"),
     re.compile(r"(?<![-.\w])-->>(?!>)"),
-    re.compile(r"(?<![-.\w])-x(?![-.\w])"),
-    re.compile(r"(?<![-.\w])--x(?![-.\w])"),
 )
 
 # Regex to detect invalid arrows in sequenceDiagram
@@ -95,16 +79,16 @@ INVALID_STATE_ARROW_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?<![-.\w])-\.->(?!>)"),
 )
 
-
 # Regex to split flowchart lines by valid edge arrows (including text labels)
+# Allows hyphens and other label characters in '-- text -->' and other labeled arrows
 FLOWCHART_ARROW_SPLIT_RE = re.compile(
     r"\s*(?:"
-    r"--\s+[^-\n]+\s+-->|"
-    r"--\s+[^-\n]+\s+---|"
-    r"-\.\s+[^\.\n]+\s+\.->|"
-    r"-\.\s+[^\.\n]+\s+\.-|"
-    r"==\s+[^=\n]+\s+==>|"
-    r"==\s+[^=\n]+\s+===|"
+    r"--\s+[^\n]+?\s+-->|"
+    r"--\s+[^\n]+?\s+---|"
+    r"-\.\s+[^\n]+?\s+\.->|"
+    r"-\.\s+[^\n]+?\s+\.-|"
+    r"==\s+[^\n]+?\s+==>|"
+    r"==\s+[^\n]+?\s+===|"
     r"(?:-->|---|-.->|-.-|==>|===|<-->|<-.->|<==>|--o|--x|o--o|x--x)(?:\|[^|\n]+\|)?"
     r")\s*"
 )
@@ -129,6 +113,16 @@ class MermaidError:
 
     def format_line(self) -> str:
         return f"{self.code}: {self.document}:{self.line}: {self.message}"
+
+
+def _split_lines(text: str) -> list[str]:
+    """Split text strictly on newline boundaries (\n and \r\n), preserving form feeds."""
+    text = text.replace("\r\n", "\n")
+    if not text:
+        return []
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
 
 
 def verify_auto_diagram(
@@ -182,11 +176,35 @@ def _strip_comments_and_quotes(line: str) -> tuple[str, bool]:
     return "".join(res), in_quote
 
 
+def _split_tokens_outside_brackets(text: str, seps: str = "&;") -> list[str]:
+    """Split text on delimiter characters (e.g. '&' or ';') only when outside brackets."""
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in ("(", "[", "{"):
+            depth += 1
+        elif ch in (")", "]", "}") and depth > 0:
+            depth -= 1
+        if depth == 0 and ch in seps:
+            token = "".join(current).strip()
+            if token:
+                tokens.append(token)
+            current = []
+        else:
+            current.append(ch)
+    token = "".join(current).strip()
+    if token:
+        tokens.append(token)
+    return tokens
+
+
 def _validate_brackets_in_line(
     line_without_comments: str,
     doc_rel: str,
     doc_line: int,
     ignore_curly: bool = False,
+    allow_asymmetric: bool = False,
 ) -> MermaidError | None:
     """Validate balanced bracket delimiters ([...], (...), {...}) in a single line."""
     stack: list[tuple[str, int]] = []
@@ -195,6 +213,8 @@ def _validate_brackets_in_line(
 
     pairs = {"(": ")", "[": "]", "{": "}"}
     closers = {")": "(", "]": "[", "}": "{"}
+
+    arrow_chars = ("-", "=", ".", "<", ">")
 
     for col, ch in enumerate(line_without_comments):
         if ch == "\\" and in_quote:
@@ -219,6 +239,18 @@ def _validate_brackets_in_line(
         if ignore_curly and ch in ("{", "}"):
             continue
 
+        if allow_asymmetric and ch == ">":
+            # Asymmetric shape opener 'A>flag]' - check if '>' is part of edge arrow
+            prev_arrow = col > 0 and line_without_comments[col - 1] in arrow_chars
+            next_arrow = (
+                col + 1 < len(line_without_comments)
+                and line_without_comments[col + 1] in arrow_chars
+            )
+            if prev_arrow or next_arrow:
+                continue
+            stack.append((">", col))
+            continue
+
         if ch in pairs:
             stack.append((ch, col))
         elif ch in closers:
@@ -231,13 +263,16 @@ def _validate_brackets_in_line(
                 )
             expected_opener = closers[ch]
             last_opener, opener_col = stack.pop()
-            if last_opener != expected_opener:
+            if ch == "]" and last_opener in ("[", ">"):
+                # ']' closes both '[' and '>' asymmetric shape
+                pass
+            elif last_opener != expected_opener:
                 return MermaidError(
                     code=CODE_UNBALANCED_DELIMITERS,
                     document=doc_rel,
                     line=doc_line,
                     message=(
-                        f"Mismatched delimiter: expected '{pairs[last_opener]}', "
+                        f"Mismatched delimiter: expected '{pairs.get(last_opener, ']')}', "
                         f"got '{ch}' at column {col + 1} (opened at column {opener_col + 1})"
                     ),
                 )
@@ -350,7 +385,7 @@ def validate_mermaid_block(
             if re.match(r"^subgraph\b", stripped):
                 subgraph_depth += 1
                 subgraph_starts.append(line_no)
-            elif re.match(r"^end\s*$", stripped):
+            elif re.match(r"^end\s*;?\s*$", stripped):
                 if subgraph_depth <= 0:
                     errors.append(
                         MermaidError(
@@ -386,6 +421,7 @@ def validate_mermaid_block(
             doc_rel=doc_rel,
             doc_line=line_no,
             ignore_curly=multi_line_curly,
+            allow_asymmetric=diagram_type in ("flowchart", "graph"),
         )
         if err is not None:
             errors.append(err)
@@ -450,57 +486,91 @@ def validate_mermaid_block(
             if has_arrow_err:
                 continue
 
-            # Check node IDs
-            # Skip keywords
-            if (
-                line_content.startswith("subgraph")
-                or line_content == "end"
-                or line_content.startswith("style ")
-                or line_content.startswith("class ")
-                or line_content.startswith("classDef ")
-                or line_content.startswith("click ")
-                or line_content.startswith("direction ")
-            ):
-                if line_content.startswith("subgraph"):
-                    # Check subgraph id
-                    after_sub = line_content[8:].strip()
-                    if after_sub:
-                        sg_id = _extract_flowchart_node_id(after_sub)
-                        if sg_id and not VALID_NODE_ID_RE.match(sg_id):
+            # Split line into statements separated by ';' outside brackets
+            statements = _split_tokens_outside_brackets(line_content, seps=";")
+            for stmt in statements:
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+
+                # Skip keywords and directives
+                if (
+                    stmt.startswith("subgraph")
+                    or stmt == "end"
+                    or stmt.startswith("style ")
+                    or stmt.startswith("class ")
+                    or stmt.startswith("classDef ")
+                    or stmt.startswith("click ")
+                    or stmt.startswith("direction ")
+                    or stmt.startswith("linkStyle ")
+                ):
+                    if stmt.startswith("subgraph"):
+                        after_sub = stmt[8:].strip()
+                        if after_sub:
+                            # Accept free-text or quoted subgraph titles (e.g.
+                            # 'subgraph Service Layer' or 'subgraph "Service Layer"').
+                            # If bracketed like 'sg1 [Service Layer]', check the node id.
+                            if after_sub.startswith('"') or after_sub.startswith("'"):
+                                pass
+                            elif "[" in after_sub:
+                                sg_id = after_sub[: after_sub.find("[")].strip()
+                                if sg_id and not VALID_NODE_ID_RE.match(sg_id):
+                                    errors.append(
+                                        MermaidError(
+                                            code=CODE_INVALID_NODE_ID,
+                                            document=doc_rel,
+                                            line=line_no,
+                                            message=(
+                                                f"Invalid subgraph ID '{sg_id}': must contain only "
+                                                "letters, numbers, underscores, and hyphens"
+                                            ),
+                                        )
+                                    )
+                            elif " " not in after_sub:
+                                sg_id = _extract_flowchart_node_id(after_sub)
+                                if sg_id and not VALID_NODE_ID_RE.match(sg_id):
+                                    errors.append(
+                                        MermaidError(
+                                            code=CODE_INVALID_NODE_ID,
+                                            document=doc_rel,
+                                            line=line_no,
+                                            message=(
+                                                f"Invalid subgraph ID '{sg_id}': must contain only "
+                                                "letters, numbers, underscores, and hyphens"
+                                            ),
+                                        )
+                                    )
+                    continue
+
+                # Split statement by known valid arrows to extract node expressions
+                parts = FLOWCHART_ARROW_SPLIT_RE.split(stmt)
+                for part in parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    # Split on '&' outside brackets (e.g. 'A --> B & C')
+                    tokens = _split_tokens_outside_brackets(part, seps="&")
+                    for token in tokens:
+                        token = token.strip()
+                        if not token:
+                            continue
+                        # Strip class shorthand ':::className'
+                        token = re.sub(r":::[a-zA-Z0-9_\-]+", "", token).strip()
+                        node_id = _extract_flowchart_node_id(token)
+                        if not node_id:
+                            continue
+                        if not VALID_NODE_ID_RE.match(node_id):
                             errors.append(
                                 MermaidError(
                                     code=CODE_INVALID_NODE_ID,
                                     document=doc_rel,
                                     line=line_no,
                                     message=(
-                                        f"Invalid subgraph ID '{sg_id}': must contain only "
+                                        f"Invalid node ID '{node_id}': must contain only "
                                         "letters, numbers, underscores, and hyphens"
                                     ),
                                 )
                             )
-                continue
-
-            # Split line by known valid arrows to extract node expressions
-            parts = FLOWCHART_ARROW_SPLIT_RE.split(line_content)
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-                node_id = _extract_flowchart_node_id(part)
-                if not node_id:
-                    continue
-                if not VALID_NODE_ID_RE.match(node_id):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_NODE_ID,
-                            document=doc_rel,
-                            line=line_no,
-                            message=(
-                                f"Invalid node ID '{node_id}': must contain only "
-                                "letters, numbers, underscores, and hyphens"
-                            ),
-                        )
-                    )
 
         elif diagram_type == "sequenceDiagram":
             for invalid_re in INVALID_SEQUENCE_ARROW_RES:
@@ -561,16 +631,19 @@ def check_document_mermaid(
     repo_path: Path,
     doc_path: Path,
     doc_rel: str,
+    graph_path: Path | None = None,
 ) -> list[MermaidError]:
     """Parse and validate all fenced mermaid blocks in a markdown document."""
     errors: list[MermaidError] = []
     content = doc_path.read_text(encoding="utf-8", errors="replace")
-    lines = content.splitlines()
+    lines = _split_lines(content)
 
     in_mermaid = False
     current_block: list[str] = []
     block_start_line = 0
     active_auto_diagram_id: str | None = None
+    auto_diagram_start_line: int = 0
+    blocks_in_auto_diagram = 0
 
     auto_start_re = re.compile(r"<!--\s*AUTO-DIAGRAM:(?P<id>[^:]+):START\s*-->")
     auto_end_re = re.compile(r"<!--\s*AUTO-DIAGRAM:(?P<id>[^:]+):END\s*-->")
@@ -581,12 +654,63 @@ def check_document_mermaid(
 
         start_match = auto_start_re.search(stripped)
         if start_match:
-            active_auto_diagram_id = start_match.group("id").strip()
+            new_id = start_match.group("id").strip()
+            if active_auto_diagram_id is not None:
+                errors.append(
+                    MermaidError(
+                        code=CODE_AUTO_DIAGRAM_ERROR,
+                        document=doc_rel,
+                        line=line_no,
+                        message=(
+                            f"Nested or unclosed AUTO-DIAGRAM marker: '{active_auto_diagram_id}' "
+                            f"was not closed before '{new_id}'"
+                        ),
+                    )
+                )
+            active_auto_diagram_id = new_id
+            auto_diagram_start_line = line_no
+            blocks_in_auto_diagram = 0
             continue
 
         end_match = auto_end_re.search(stripped)
         if end_match:
-            active_auto_diagram_id = None
+            end_id = end_match.group("id").strip()
+            if active_auto_diagram_id is None:
+                errors.append(
+                    MermaidError(
+                        code=CODE_AUTO_DIAGRAM_ERROR,
+                        document=doc_rel,
+                        line=line_no,
+                        message=f"Found AUTO-DIAGRAM END marker '{end_id}' without matching START",
+                    )
+                )
+            elif active_auto_diagram_id != end_id:
+                errors.append(
+                    MermaidError(
+                        code=CODE_AUTO_DIAGRAM_ERROR,
+                        document=doc_rel,
+                        line=line_no,
+                        message=(
+                            f"Mismatched AUTO-DIAGRAM marker: START '{active_auto_diagram_id}', "
+                            f"but END was '{end_id}'"
+                        ),
+                    )
+                )
+                active_auto_diagram_id = None
+            else:
+                if blocks_in_auto_diagram == 0:
+                    errors.append(
+                        MermaidError(
+                            code=CODE_AUTO_DIAGRAM_ERROR,
+                            document=doc_rel,
+                            line=line_no,
+                            message=(
+                                f"AUTO-DIAGRAM marker '{active_auto_diagram_id}' "
+                                "contains no mermaid block"
+                            ),
+                        )
+                    )
+                active_auto_diagram_id = None
             continue
 
         if stripped.startswith("```mermaid"):
@@ -597,13 +721,41 @@ def check_document_mermaid(
 
         if in_mermaid and stripped.startswith("```"):
             in_mermaid = False
-            # Call AUTO-DIAGRAM hook if block was marked
+            # Check AUTO-DIAGRAM hook if block was marked
             if active_auto_diagram_id is not None:
-                verify_auto_diagram(
-                    diagram_id=active_auto_diagram_id,
-                    mermaid_code="\n".join(current_block),
-                    repo_path=repo_path,
-                )
+                blocks_in_auto_diagram += 1
+                if blocks_in_auto_diagram > 1:
+                    errors.append(
+                        MermaidError(
+                            code=CODE_AUTO_DIAGRAM_ERROR,
+                            document=doc_rel,
+                            line=block_start_line,
+                            message=(
+                                f"AUTO-DIAGRAM marker '{active_auto_diagram_id}' must wrap exactly "
+                                "one mermaid block"
+                            ),
+                        )
+                    )
+                else:
+                    ok, msg = verify_auto_diagram(
+                        diagram_id=active_auto_diagram_id,
+                        mermaid_code="\n".join(current_block),
+                        repo_path=repo_path,
+                        graph_path=graph_path,
+                    )
+                    if not ok:
+                        errors.append(
+                            MermaidError(
+                                code=CODE_AUTO_DIAGRAM_MISMATCH,
+                                document=doc_rel,
+                                line=block_start_line,
+                                message=(
+                                    msg
+                                    or f"AUTO-DIAGRAM '{active_auto_diagram_id}' does not match "
+                                    "graph.json"
+                                ),
+                            )
+                        )
 
             # Validate syntax of mermaid block
             block_errors = validate_mermaid_block(
@@ -629,14 +781,25 @@ def check_document_mermaid(
             )
         )
 
+    if active_auto_diagram_id is not None:
+        errors.append(
+            MermaidError(
+                code=CODE_AUTO_DIAGRAM_ERROR,
+                document=doc_rel,
+                line=auto_diagram_start_line,
+                message=(
+                    f"Unclosed AUTO-DIAGRAM marker '{active_auto_diagram_id}' "
+                    "(missing matching END)"
+                ),
+            )
+        )
+
     return errors
 
 
 def check_mermaid(
     repo: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
-    cache_dir: str | Path | None = None,
-    out: TextIO | None = None,
 ) -> tuple[list[MermaidError], list[str]]:
     """Check all Mermaid diagram blocks across canonical documents in target repository.
 
@@ -644,6 +807,7 @@ def check_mermaid(
     """
     repo_path = Path(repo).resolve()
     target_docs_dir = repo_path / docs_dir
+    graph_path = target_docs_dir / "graph.json"
     notes: list[str] = []
     errors: list[MermaidError] = []
 
@@ -658,6 +822,7 @@ def check_mermaid(
             repo_path=repo_path,
             doc_path=doc_path,
             doc_rel=doc_rel,
+            graph_path=graph_path,
         )
         errors.extend(doc_errors)
 
@@ -670,7 +835,6 @@ def run_check_mermaid(
     repo: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
     output_format: str = "text",
-    cache_dir: str | Path | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
@@ -689,8 +853,6 @@ def run_check_mermaid(
     errors, notes = check_mermaid(
         repo=repo_path,
         docs_dir=docs_dir,
-        cache_dir=cache_dir,
-        out=stdout,
     )
 
     if output_format == "json":

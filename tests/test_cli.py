@@ -204,6 +204,42 @@ def test_cli_check_citations_dispatch(tmp_path):
     code_err = main(["check-citations", str(repo), "--docs-dir", "docs"])
     assert code_err == 3
 
+    # With --file pointing to clean draft: exit 0
+    draft = docs / "draft.md"
+    src = repo / "app.py"
+    src.write_text("def hello(): pass\n", encoding="utf-8")
+    draft.write_text("Hello [^1].\n\n[^1]: `app.py:1` — `hello`\n", encoding="utf-8")
+    code_draft = main(["check-citations", str(repo), "--file", "docs/draft.md"])
+    assert code_draft == 0
+
+
+def test_cli_check_citations_multiple_files(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    src = repo / "app.py"
+    src.write_text("def fn1(): pass\ndef fn2(): pass\n", encoding="utf-8")
+
+    draft1 = docs / "d1.md"
+    draft1.write_text("D1 [^1].\n\n[^1]: `app.py:1` — `fn1`\n", encoding="utf-8")
+
+    draft2 = docs / "d2.md"
+    draft2.write_text("D2 [^1].\n\n[^1]: `app.py:2` — `fn2`\n", encoding="utf-8")
+
+    code = main(
+        [
+            "check-citations",
+            str(repo),
+            "--file",
+            "docs/d1.md",
+            "--file",
+            "docs/d2.md",
+        ]
+    )
+    assert code == 0
+
 
 def test_cli_check_mermaid_dispatch(tmp_path):
     repo = tmp_path / "repo"

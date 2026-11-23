@@ -5,18 +5,20 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
 from arch_indexer.config import DEFAULT_DOCS_DIR, RepoCachePaths
 
-# Standard error codes per spec section 8.2
+# Standard error codes per spec section 8.2 and review requirements
 CODE_MISSING_FILE: str = "MISSING_FILE"
 CODE_LINE_OUT_OF_RANGE: str = "LINE_OUT_OF_RANGE"
 CODE_SYMBOL_MISMATCH: str = "SYMBOL_MISMATCH"
 CODE_DANGLING_FOOTNOTE: str = "DANGLING_FOOTNOTE"
 CODE_INVALID_FORMAT: str = "INVALID_FORMAT"
+CODE_DUPLICATE_FOOTNOTE: str = "DUPLICATE_FOOTNOTE"
 
 # Maximum distance in lines to classify a shifted symbol as drift rather than mismatch
 DEFAULT_DRIFT_WINDOW: int = 100
@@ -59,12 +61,22 @@ class CitationError:
         return f"{self.code}: {self.document} [^{self.footnote_id}]"
 
 
+def _split_lines(text: str) -> list[str]:
+    """Split text strictly on newline boundaries (\n and \r\n), preserving form feeds."""
+    text = text.replace("\r\n", "\n")
+    if not text:
+        return []
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
+
+
 def _strip_fenced_blocks_and_comments(text: str) -> str:
     """Strip fenced code blocks and HTML comments so prose references are cleanly parsed."""
     # Strip HTML comments <!-- ... -->
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     # Replace contents of fenced code blocks with blank lines to preserve line count
-    lines = text.splitlines()
+    lines = _split_lines(text)
     cleaned: list[str] = []
     in_fence = False
     for line in lines:
@@ -136,8 +148,9 @@ def _find_drift_in_index(
 
 
 def _literal_match_on_line(line_text: str, symbol: str) -> bool:
-    """Check if symbol appears literally on line (exact substring or token)."""
-    return symbol in line_text
+    """Check if symbol appears literally on line as a token with identifier boundaries."""
+    pattern = rf"(?<![\w]){re.escape(symbol)}(?![\w])"
+    return bool(re.search(pattern, line_text))
 
 
 def _find_literal_drift(
@@ -147,7 +160,9 @@ def _find_literal_drift(
     max_drift: int = DEFAULT_DRIFT_WINDOW,
 ) -> int | None:
     """Find closest line in file where symbol appears literally within max_drift."""
-    candidates = [idx for idx, text in enumerate(lines, 1) if idx != line and symbol in text]
+    pattern = rf"(?<![\w]){re.escape(symbol)}(?![\w])"
+    regex = re.compile(pattern)
+    candidates = [idx for idx, text in enumerate(lines, 1) if idx != line and regex.search(text)]
     if not candidates:
         return None
     closest = min(candidates, key=lambda c: abs(c - line))
@@ -167,26 +182,43 @@ def check_document_citations(
     errors: list[CitationError] = []
     content = doc_path.read_text(encoding="utf-8", errors="replace")
 
-    # 1. Parse footnote definitions
-    definitions: dict[str, tuple[str, str, int, str]] = {}  # id -> (raw_body, file, line, symbol)
-    malformed_defs: dict[str, str] = {}  # id -> raw_body
+    # Clean text to strip HTML comments and fenced code blocks so lines and definitions
+    # inside fenced blocks or comments are excluded from citation processing.
+    cleaned_content = _strip_fenced_blocks_and_comments(content)
+    cleaned_lines = _split_lines(cleaned_content)
 
-    lines = content.splitlines()
-    for line in lines:
+    # 1. Parse footnote definitions from cleaned text
+    definitions: list[tuple[str, str, str, int, str]] = []  # (fn_id, raw_body, file, line, symbol)
+    defined_ids: set[str] = set()
+    malformed_defs: set[str] = set()
+
+    for line in cleaned_lines:
         def_match = FOOTNOTE_DEF_RE.match(line)
         if not def_match:
             continue
         fn_id = def_match.group("id").strip()
         body = def_match.group("body").strip()
 
+        if fn_id in defined_ids:
+            errors.append(
+                CitationError(
+                    code=CODE_DUPLICATE_FOOTNOTE,
+                    document=doc_rel,
+                    footnote_id=fn_id,
+                    citation=body,
+                    message=f"Duplicate footnote definition for [^{fn_id}]",
+                )
+            )
+        defined_ids.add(fn_id)
+
         strict_match = STRICT_CITATION_RE.match(body)
         if strict_match:
             target_file = strict_match.group("file").strip()
             line_no = int(strict_match.group("line"))
             symbol = strict_match.group("symbol").strip()
-            definitions[fn_id] = (body, target_file, line_no, symbol)
+            definitions.append((fn_id, body, target_file, line_no, symbol))
         else:
-            malformed_defs[fn_id] = body
+            malformed_defs.add(fn_id)
             errors.append(
                 CitationError(
                     code=CODE_INVALID_FORMAT,
@@ -200,18 +232,18 @@ def check_document_citations(
                 )
             )
 
-    # 2. Extract referenced footnote markers from prose
-    cleaned_prose = _strip_fenced_blocks_and_comments(content)
-    prose_lines = cleaned_prose.splitlines()
+    # 2. Extract referenced footnote markers from prose (ignoring inline code spans)
     referenced_ids: set[str] = set()
-    for pline in prose_lines:
+    for pline in cleaned_lines:
         if FOOTNOTE_DEF_RE.match(pline):
             continue
-        for m in FOOTNOTE_REF_RE.finditer(pline):
+        # Strip inline code spans so regexes like `[^a-z]` are not treated as footnotes
+        pline_no_inline_code = re.sub(r"(`+).*?\1", "", pline)
+        for m in FOOTNOTE_REF_RE.finditer(pline_no_inline_code):
             referenced_ids.add(m.group("id").strip())
 
     # 3. Detect dangling footnote markers (referenced but not defined)
-    all_defined_ids = set(definitions.keys()) | set(malformed_defs.keys())
+    all_defined_ids = defined_ids | malformed_defs
     for ref_id in referenced_ids:
         if ref_id not in all_defined_ids:
             errors.append(
@@ -225,23 +257,34 @@ def check_document_citations(
             )
 
     # 4. Verify each well-formed citation
-    for fn_id, (raw_citation, target_file_rel, target_line, symbol) in definitions.items():
-        target_path = (repo_path / target_file_rel).resolve()
+    resolved_repo = repo_path.resolve()
+    for fn_id, raw_citation, target_file_rel, target_line, symbol in definitions:
+        # Check target file stays inside repo (prevent path escapes like '../' or '/etc/...')
+        is_safe = False
+        target_path: Path | None = None
+        try:
+            p = Path(target_file_rel)
+            if not p.is_absolute():
+                candidate = (repo_path / target_file_rel).resolve()
+                if candidate.is_relative_to(resolved_repo) and candidate.is_file():
+                    is_safe = True
+                    target_path = candidate
+        except Exception:
+            is_safe = False
 
-        # Check target file exists within repo
-        if not target_path.is_file():
+        if not is_safe or target_path is None:
             errors.append(
                 CitationError(
                     code=CODE_MISSING_FILE,
                     document=doc_rel,
                     footnote_id=fn_id,
                     citation=raw_citation,
-                    message=f"Cited file '{target_file_rel}' does not exist",
+                    message=f"Cited file '{target_file_rel}' does not exist in repository",
                 )
             )
             continue
 
-        file_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        file_lines = _split_lines(target_path.read_text(encoding="utf-8", errors="replace"))
         total_lines = len(file_lines)
 
         # Check line number range (1 <= line <= total_lines)
@@ -322,10 +365,12 @@ def check_citations(
     repo: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
     cache_dir: str | Path | None = None,
+    files: Sequence[str | Path] | None = None,
     out: TextIO | None = None,
 ) -> tuple[list[CitationError], list[str]]:
     """Check citations across canonical documentation files in target repository.
 
+    If `files` is provided, only those files are checked instead of DESIGN.md and USER_GUIDE.md.
     Returns (errors, notes).
     """
     repo_path = Path(repo).resolve()
@@ -347,20 +392,38 @@ def check_citations(
     if conn is None:
         notes.append("Note: index.db not found; falling back to literal symbol verification.")
 
-    for doc_name in CANONICAL_DOCS:
-        doc_path = target_docs_dir / doc_name
-        doc_rel = f"{docs_dir}/{doc_name}"
-        if not doc_path.is_file():
-            notes.append(f"Note: {doc_rel} not found, skipping.")
-            continue
+    if files:
+        for f in files:
+            f_path = Path(f)
+            resolved_f = repo_path / f_path if not f_path.is_absolute() else f_path
 
-        doc_errors = check_document_citations(
-            repo_path=repo_path,
-            doc_path=doc_path,
-            doc_rel=doc_rel,
-            index_db_conn=conn,
-        )
-        errors.extend(doc_errors)
+            if not resolved_f.is_file():
+                notes.append(f"Note: {f} not found, skipping.")
+                continue
+
+            doc_rel = str(f)
+            doc_errors = check_document_citations(
+                repo_path=repo_path,
+                doc_path=resolved_f,
+                doc_rel=doc_rel,
+                index_db_conn=conn,
+            )
+            errors.extend(doc_errors)
+    else:
+        for doc_name in CANONICAL_DOCS:
+            doc_path = target_docs_dir / doc_name
+            doc_rel = f"{docs_dir}/{doc_name}"
+            if not doc_path.is_file():
+                notes.append(f"Note: {doc_rel} not found, skipping.")
+                continue
+
+            doc_errors = check_document_citations(
+                repo_path=repo_path,
+                doc_path=doc_path,
+                doc_rel=doc_rel,
+                index_db_conn=conn,
+            )
+            errors.extend(doc_errors)
 
     if conn is not None:
         conn.close()
@@ -379,6 +442,7 @@ def run_check_citations(
     docs_dir: str = DEFAULT_DOCS_DIR,
     output_format: str = "text",
     cache_dir: str | Path | None = None,
+    files: Sequence[str | Path] | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
@@ -398,6 +462,7 @@ def run_check_citations(
         repo=repo_path,
         docs_dir=docs_dir,
         cache_dir=cache_dir,
+        files=files,
         out=stdout,
     )
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from arch_indexer.checks.citations import (
     CODE_DANGLING_FOOTNOTE,
+    CODE_DUPLICATE_FOOTNOTE,
     CODE_INVALID_FORMAT,
     CODE_LINE_OUT_OF_RANGE,
     CODE_MISSING_FILE,
@@ -343,3 +344,156 @@ def test_invalid_repo_directory_exits_1(tmp_path):
     code = run_check_citations(tmp_path / "nonexistent_dir", out=out, err=err)
     assert code == 1
     assert "does not exist" in err.getvalue()
+
+
+def test_path_escape_outside_repo_fails(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    # Create an outside file
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("secret_line\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "Ref 1 [^1] and Ref 2 [^2].\n\n"
+        "[^1]: `../outside.txt:1` — `secret_line`\n"
+        "[^2]: `/etc/hostname:1` — `localhost`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert len(errors) == 2
+    assert all(e.code == CODE_MISSING_FILE for e in errors)
+    assert {e.footnote_id for e in errors} == {"1", "2"}
+
+
+def test_substring_match_requires_token_boundary(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    src = repo / "app.py"
+    # Line 1 has create_order_v2, not create_order
+    src.write_text("def create_order_v2():\n    pass\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "Calls create_order [^1].\n\n[^1]: `app.py:1` — `create_order`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert len(errors) == 1
+    assert errors[0].code == CODE_SYMBOL_MISMATCH
+
+
+def test_duplicate_footnote_definition_detected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    src = repo / "app.py"
+    src.write_text("def valid_fn():\n    pass\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "Ref [^4].\n\n[^4]: `nope.py:1` — `x`\n[^4]: `app.py:1` — `valid_fn`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    codes = [e.code for e in errors]
+    assert CODE_DUPLICATE_FOOTNOTE in codes
+    assert CODE_MISSING_FILE in codes
+
+
+def test_fenced_code_block_citations_ignored(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Documentation with code example\n\n"
+        "Here is an example citation:\n\n"
+        "```markdown\n"
+        "[^9]: `nope.py:1` — `x`\n"
+        "```\n\n"
+        "No real footnotes here.\n",
+        encoding="utf-8",
+    )
+
+    errors, notes = check_citations(repo)
+    assert errors == []
+
+
+def test_inline_code_regex_not_dangling_footnote(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    src = repo / "app.py"
+    src.write_text("def start():\n    pass\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "Use regex `[^a-z]` to match characters and call start [^1].\n\n"
+        "[^1]: `app.py:1` — `start`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []
+
+
+def test_splitlines_form_feed_preserves_line_count(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    src = repo / "service.py"
+    # Form feed character (\x0c) inside line 1 - should remain on line 1
+    src.write_text("def header():\x0cpass\ndef target_func():\n    pass\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "Calls target [^1].\n\n[^1]: `service.py:2` — `target_func`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []
+
+
+def test_check_citations_file_flag(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+
+    src = repo / "app.py"
+    src.write_text("def packet_func():\n    pass\n", encoding="utf-8")
+
+    draft_file = drafts / "worker-1.md"
+    draft_file.write_text(
+        "# Draft\n\nWorker section [^1].\n\n[^1]: `app.py:1` — `packet_func`\n",
+        encoding="utf-8",
+    )
+
+    out = io.StringIO()
+    code = run_check_citations(
+        repo,
+        files=["docs/.drafts/worker-1.md"],
+        out=out,
+    )
+    assert code == 0
+    # Canonical docs were skipped without failing
+    assert "DESIGN.md" not in out.getvalue()
