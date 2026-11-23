@@ -585,3 +585,72 @@ export function unrelated(): number {
     assert code == EXIT_ERROR
     assert out == ""
     assert "no traceable symbol" in err
+
+
+def test_flow_trace_labels_library_sinks_by_qualified_suffix(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+import sqlalchemy
+from kafka import KafkaProducer
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/jobs")
+def publish():
+    sqlalchemy.create_engine("sqlite://")
+    KafkaProducer(bootstrap_servers="localhost")
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:10 app.main.publish",
+        "1 app/main.py:11 [datastore] app.main.publish -> sqlalchemy.create_engine",
+        "1 app/main.py:12 [datastore] app.main.publish -> KafkaProducer",
+    ]
+
+
+def test_flow_trace_does_not_label_qualified_library_open_as_datastore(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+from PIL import Image
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/preview")
+def preview():
+    return Image.open("photo.png")
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:9 app.main.preview",
+        "1 app/main.py:10 app.main.preview -> Image.open",
+    ]

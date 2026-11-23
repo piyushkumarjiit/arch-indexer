@@ -2,11 +2,13 @@
 
 This is the single source of truth for the call targets that ``query flow-trace``
 marks as data stores or external sinks. A symbol matches a pattern when its
-lower-case fully-qualified name equals the pattern or, for dotted patterns, ends
-with ``.<pattern>``, so ``db.session.execute`` matches ``session.execute``. A bare
-built-in pattern matches only the exact name, so builtin ``open`` matches but
-``PIL.Image.open`` does not. Patterns are intentionally specific: a wrong class
-is more harmful than an unlabelled edge.
+lower-case fully-qualified name equals the pattern or ends with ``.<pattern>``,
+so ``db.session.execute`` matches ``session.execute`` and
+``sqlalchemy.create_engine`` matches ``create_engine``. The names in
+``GLOBAL_CALLABLE_SYMBOLS`` denote language-global callables instead, so they
+match only the exact name: builtin ``open`` is a sink but ``PIL.Image.open`` is
+not. Patterns are intentionally specific: a wrong class is more harmful than an
+unlabelled edge.
 """
 
 from __future__ import annotations
@@ -124,12 +126,14 @@ EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
 DATA_STORE = "datastore"
 EXTERNAL_SINK = "external-sink"
 
+GLOBAL_CALLABLE_SYMBOLS: frozenset[str] = frozenset({"axios", "fetch", "got", "open"})
+
 
 def _matches(fqname: str, pattern: str) -> bool:
-    """True when fqname is exactly pattern or, for dotted patterns, ends with ``.pattern``."""
+    """True when fqname is exactly pattern or ends with ``.pattern`` (case-insensitive)."""
     lowered = fqname.lower()
     pattern = pattern.lower()
-    if "." not in pattern:
+    if pattern in GLOBAL_CALLABLE_SYMBOLS:
         return lowered == pattern
     return lowered == pattern or lowered.endswith(f".{pattern}")
 
