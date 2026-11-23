@@ -32,6 +32,26 @@
     return idx >= 0 ? filePath.substring(idx + 1) : filePath;
   }
 
+  const FILTER_KINDS = [
+    "entrypoint",
+    "service",
+    "module",
+    "datastore",
+    "external_sink",
+    "frontend_caller",
+  ];
+
+  const FILTER_TIERS = ["scip", "tree-sitter"];
+
+  function isBoundaryKind(node) {
+    const kind = (node && node.kind) || "";
+    return kind === "datastore" || kind === "external_sink";
+  }
+
+  function isLeafNode(node) {
+    return Boolean(node) && (node.level === "symbol" || isBoundaryKind(node));
+  }
+
   /**
    * Build complete 5-level hierarchy tree and lookup tables from graph data.
    * Levels: system -> module -> file_group (directory) -> file -> symbol/endpoint
@@ -185,7 +205,7 @@
 
     nodes.forEach((node) => {
       // Data stores or external sinks embedded in nodes array
-      if (node.kind === "datastore" || node.kind === "external_sink") {
+      if (isBoundaryKind(node)) {
         if (!nodeLookup.has(node.id)) {
           nodeLookup.set(node.id, {
             ...node,
@@ -340,23 +360,33 @@
    */
   function leafPassesFilters(node, activeFilters) {
     if (!node) return false;
-    if (activeFilters.modules && activeFilters.modules.size > 0) {
+    if (activeFilters.modules) {
+      if (activeFilters.modules.size === 0) return false;
       if (node.moduleId && !activeFilters.modules.has(node.moduleId)) return false;
     }
-    if (
-      activeFilters.kinds &&
-      activeFilters.kinds.size > 0 &&
-      !activeFilters.kinds.has(node.kind)
-    ) {
+    if (activeFilters.kinds) {
+      if (activeFilters.kinds.size === 0 || !activeFilters.kinds.has(node.kind)) return false;
+    }
+    if (activeFilters.tiers) {
+      if (activeFilters.tiers.size === 0) return false;
+      if (node.tier && !activeFilters.tiers.has(node.tier)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Check whether every filter group holds all of its selectable values.
+   */
+  function areAllFilterGroupsSelected(hierarchy, activeFilters) {
+    if (activeFilters.modules) {
+      const selected = activeFilters.modules;
+      if (!hierarchy.modules.every((mod) => selected.has(mod.id))) return false;
+    }
+    if (activeFilters.kinds && !FILTER_KINDS.every((kind) => activeFilters.kinds.has(kind))) {
       return false;
     }
-    if (activeFilters.tiers && activeFilters.tiers.size > 0 && node.tier) {
-      const canonical = node.tier === "treesitter" ? "tree-sitter" : node.tier;
-      const matchesTier =
-        activeFilters.tiers.has(node.tier) ||
-        activeFilters.tiers.has(canonical) ||
-        (canonical === "tree-sitter" && activeFilters.tiers.has("treesitter"));
-      if (!matchesTier) return false;
+    if (activeFilters.tiers && !FILTER_TIERS.every((tier) => activeFilters.tiers.has(tier))) {
+      return false;
     }
     return true;
   }
@@ -371,25 +401,28 @@
     let boundaryNodeIds = new Set();
 
     const passesLeaf = (node) => leafPassesFilters(node, activeFilters);
+    const allGroupsSelected = areAllFilterGroupsSelected(hierarchy, activeFilters);
 
-    const filtersActive = Boolean(
-      (activeFilters.modules && activeFilters.modules.size > 0) ||
-        (activeFilters.kinds && activeFilters.kinds.size > 0) ||
-        (activeFilters.tiers && activeFilters.tiers.size > 0)
-    );
+    const leafPresenceCache = new Map();
+    function hasLeaves(node) {
+      if (!node) return false;
+      if (leafPresenceCache.has(node.id)) return leafPresenceCache.get(node.id);
+      const result = isLeafNode(node)
+        ? true
+        : (node.children || []).some((childId) => hasLeaves(nodeLookup.get(childId)));
+      leafPresenceCache.set(node.id, result);
+      return result;
+    }
 
     const passingLeafCache = new Map();
     function hasPassingLeaf(node) {
       if (!node) return false;
-      if (!filtersActive) return true;
       if (passingLeafCache.has(node.id)) return passingLeafCache.get(node.id);
       let result;
-      if (
-        node.level === "symbol" ||
-        node.kind === "datastore" ||
-        node.kind === "external_sink"
-      ) {
+      if (isLeafNode(node)) {
         result = passesLeaf(node);
+      } else if (!hasLeaves(node)) {
+        result = allGroupsSelected;
       } else {
         result = (node.children || []).some((childId) =>
           hasPassingLeaf(nodeLookup.get(childId))
@@ -530,11 +563,7 @@
 
     const addBoundary = (id) => {
       const boundary = hierarchy.nodeLookup.get(id);
-      if (
-        boundary &&
-        (boundary.kind === "datastore" || boundary.kind === "external_sink") &&
-        leafPasses(boundary)
-      ) {
+      if (boundary && isBoundaryKind(boundary) && leafPasses(boundary)) {
         boundarySet.add(id);
       }
     };
@@ -592,13 +621,7 @@
 
     const isTarget = (id) => {
       const n = nodeMap.get(id);
-      return (
-        n &&
-        (n.kind === "datastore" ||
-          n.kind === "external_sink" ||
-          id.startsWith("ds:") ||
-          id.startsWith("ext:"))
-      );
+      return Boolean(n) && isBoundaryKind(n);
     };
 
     // 1. Forward BFS from entrypointId tracking shortest path tree via parent pointers
@@ -746,10 +769,10 @@
 
   /**
    * Deterministic layered layout algorithm by kind:
-   * Layer 0: Frontend (frontend_caller, fe:*)
-   * Layer 1: Entrypoints (entrypoint, ep:*)
-   * Layer 2: Services / Modules / Files / File Groups (sym:*, mod:*, dir:*, file:*)
-   * Layer 3: Data Stores & External Sinks (datastore, external_sink, ds:*, ext:*)
+   * Layer 0: Frontend (frontend_caller)
+   * Layer 1: Entrypoints (entrypoint)
+   * Layer 2: Services / Modules / Files / File Groups
+   * Layer 3: Data Stores & External Sinks (datastore, external_sink)
    */
   function computeLayeredLayout(nodes, edges, options) {
     const opts = options || {};
@@ -764,27 +787,10 @@
     const layers = [[], [], [], []];
 
     function getLayerIndex(node) {
-      const k = (node.kind || "").toLowerCase();
-      const id = node.id || "";
-
-      if (k === "frontend_caller" || id.startsWith("fe:")) return 0;
-      if (k === "entrypoint" || id.startsWith("ep:")) return 1;
-      if (
-        k === "datastore" ||
-        k === "external_sink" ||
-        k === "sql" ||
-        k === "nosql" ||
-        k === "cache" ||
-        k === "queue" ||
-        k === "filesystem" ||
-        k === "http_api" ||
-        k === "webhook" ||
-        k === "smtp" ||
-        id.startsWith("ds:") ||
-        id.startsWith("ext:")
-      ) {
-        return 3;
-      }
+      const kind = (node.kind || "").toLowerCase();
+      if (kind === "frontend_caller") return 0;
+      if (kind === "entrypoint") return 1;
+      if (isBoundaryKind(node)) return 3;
       return 2; // default: services, modules, directories, files
     }
 
@@ -1039,9 +1045,9 @@
       this.selectedNodeId = null;
       this.breadcrumbs = [{ level: "system", id: "system", label: this.hierarchy.systemNode.label }];
       this.filters = {
-        modules: new Set(),
-        kinds: new Set(),
-        tiers: new Set(),
+        modules: new Set(this.hierarchy.modules.map((mod) => mod.id)),
+        kinds: new Set(FILTER_KINDS),
+        tiers: new Set(FILTER_TIERS),
       };
       this.trace = null;
     }
@@ -1258,5 +1264,7 @@
     searchNodes,
     getNodeDetails,
     ViewerState,
+    FILTER_KINDS,
+    FILTER_TIERS,
   };
 });

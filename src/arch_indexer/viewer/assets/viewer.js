@@ -69,6 +69,14 @@
     const kindsContainer = document.getElementById("filter-kinds");
     const tiersContainer = document.getElementById("filter-tiers");
 
+    function selectedValues(container) {
+      return new Set(
+        Array.from(container.querySelectorAll("input"))
+          .filter((input) => input.checked)
+          .map((input) => input.value)
+      );
+    }
+
     if (modulesContainer) {
       modulesContainer.innerHTML = "";
       state.hierarchy.modules.forEach((mod) => {
@@ -78,7 +86,7 @@
         const input = document.createElement("input");
         input.type = "checkbox";
         input.value = mod.id;
-        input.checked = true;
+        input.checked = state.filters.modules.has(mod.id);
 
         const span = document.createElement("span");
         span.textContent = mod.name || mod.label || mod.id;
@@ -92,45 +100,23 @@
         label.appendChild(count);
 
         input.addEventListener("change", () => {
-          rebuildModuleFilters();
+          state.filters.modules = selectedValues(modulesContainer);
           render();
         });
         modulesContainer.appendChild(label);
       });
     }
 
-    function rebuildModuleFilters() {
-      const inputs = modulesContainer.querySelectorAll("input");
-      const unchecked = Array.from(inputs).some((i) => !i.checked);
-      if (!unchecked) {
-        state.filters.modules.clear();
-      } else {
-        state.filters.modules = new Set(
-          Array.from(inputs)
-            .filter((i) => i.checked)
-            .map((i) => i.value)
-        );
-      }
-    }
-
     if (kindsContainer) {
-      const kinds = [
-        "entrypoint",
-        "service",
-        "module",
-        "datastore",
-        "external_sink",
-        "frontend_caller",
-      ];
       kindsContainer.innerHTML = "";
-      kinds.forEach((k) => {
+      ArchViewerLogic.FILTER_KINDS.forEach((k) => {
         const label = document.createElement("label");
         label.className = "filter-item";
 
         const input = document.createElement("input");
         input.type = "checkbox";
         input.value = k;
-        input.checked = true;
+        input.checked = state.filters.kinds.has(k);
 
         const span = document.createElement("span");
         span.textContent = k.replace("_", " ");
@@ -139,17 +125,7 @@
         label.appendChild(span);
 
         input.addEventListener("change", () => {
-          const inputs = kindsContainer.querySelectorAll("input");
-          const unchecked = Array.from(inputs).some((i) => !i.checked);
-          if (!unchecked) {
-            state.filters.kinds.clear();
-          } else {
-            state.filters.kinds = new Set(
-              Array.from(inputs)
-                .filter((i) => i.checked)
-                .map((i) => i.value)
-            );
-          }
+          state.filters.kinds = selectedValues(kindsContainer);
           render();
         });
         kindsContainer.appendChild(label);
@@ -157,16 +133,15 @@
     }
 
     if (tiersContainer) {
-      const tiers = ["scip", "tree-sitter"];
       tiersContainer.innerHTML = "";
-      tiers.forEach((t) => {
+      ArchViewerLogic.FILTER_TIERS.forEach((t) => {
         const label = document.createElement("label");
         label.className = "filter-item";
 
         const input = document.createElement("input");
         input.type = "checkbox";
         input.value = t;
-        input.checked = true;
+        input.checked = state.filters.tiers.has(t);
 
         const span = document.createElement("span");
         span.textContent = t === "scip" ? "SCIP" : t === "tree-sitter" ? "Tree-sitter" : t;
@@ -175,17 +150,7 @@
         label.appendChild(span);
 
         input.addEventListener("change", () => {
-          const inputs = tiersContainer.querySelectorAll("input");
-          const unchecked = Array.from(inputs).some((i) => !i.checked);
-          if (!unchecked) {
-            state.filters.tiers.clear();
-          } else {
-            state.filters.tiers = new Set(
-              Array.from(inputs)
-                .filter((i) => i.checked)
-                .map((i) => i.value)
-            );
-          }
+          state.filters.tiers = selectedValues(tiersContainer);
           render();
         });
         tiersContainer.appendChild(label);
@@ -235,6 +200,17 @@
     if (!viewportEl) return;
 
     viewportEl.innerHTML = "";
+
+    if (view.nodes.length === 0) {
+      const message = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      message.setAttribute("x", "40");
+      message.setAttribute("y", "80");
+      message.setAttribute("fill", "#64748b");
+      message.setAttribute("font-size", "16");
+      message.textContent = "No nodes match the selected filters.";
+      viewportEl.appendChild(message);
+      return;
+    }
 
     // 1. Defs (markers for arrowheads)
     const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
@@ -363,13 +339,6 @@
       g.addEventListener("dblclick", (e) => {
         e.stopPropagation();
         if (state.drillDown(node.id)) {
-          if (window.history && window.history.replaceState) {
-            window.history.replaceState(
-              null,
-              "",
-              window.location.pathname + window.location.search + "#drill=" + encodeURIComponent(node.id)
-            );
-          }
           render();
         }
       });
@@ -421,6 +390,14 @@
         <span class="detail-label">Label</span>
         <span class="detail-value" style="font-weight:600">${escapeHtml(details.label)}</span>
       </div>
+      ${
+        details.symbol
+          ? `<div class="detail-row">
+              <span class="detail-label">Symbol</span>
+              <span class="detail-value detail-mono">${escapeHtml(details.symbol)}</span>
+            </div>`
+          : ""
+      }
       ${
         details.citation
           ? `<div class="detail-row">
@@ -475,13 +452,6 @@
     if (drillBtn) {
       drillBtn.addEventListener("click", () => {
         if (state.drillDown(details.id)) {
-          if (window.history && window.history.replaceState) {
-            window.history.replaceState(
-              null,
-              "",
-              window.location.pathname + window.location.search + "#drill=" + encodeURIComponent(details.id)
-            );
-          }
           render();
         }
       });
@@ -509,6 +479,16 @@
     const content = document.getElementById("inspector-content");
     if (!panel || !content) return;
 
+    const underlying = edge.underlying || [];
+    const citations = Array.from(
+      new Set(
+        underlying
+          .map((u) => (u.file && u.line ? `${u.file}:${u.line}` : ""))
+          .filter((citation) => citation)
+      )
+    );
+    const tiers = Array.from(new Set(underlying.map((u) => u.tier).filter((tier) => tier)));
+
     content.innerHTML = `
       <div class="detail-row">
         <span class="detail-label">Edge Connection</span>
@@ -522,6 +502,22 @@
         <span class="detail-label">Underlying Calls</span>
         <span class="detail-value">${edge.count || 1}</span>
       </div>
+      ${
+        citations.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Citation</span>
+              <span class="detail-value detail-mono">${escapeHtml(citations.join(", "))}</span>
+            </div>`
+          : ""
+      }
+      ${
+        tiers.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Indexing Tier</span>
+              <span class="detail-value">${escapeHtml(tiers.join(", "))}</span>
+            </div>`
+          : ""
+      }
       <div class="detail-row">
         <div class="links-list">
           <div class="link-item" data-id="${escapeHtml(edge.source)}"><span>Source: ${escapeHtml(edge.source)}</span></div>
@@ -562,7 +558,11 @@
 
     const stepText = document.getElementById("trace-step-text");
     if (stepText && currentStep) {
-      stepText.textContent = `Step ${activeTraceStep + 1} of ${steps.length}: ${currentStep.label} (${currentStep.kind}) ${currentStep.fileLine ? `[${currentStep.fileLine}]` : ""}`;
+      const authText =
+        currentStep.auth && currentStep.auth.length > 0
+          ? ` Auth: ${currentStep.auth.join(", ")}`
+          : "";
+      stepText.textContent = `Step ${activeTraceStep + 1} of ${steps.length}: ${currentStep.label} (${currentStep.kind}) ${currentStep.fileLine ? `[${currentStep.fileLine}]` : ""}${authText}`;
     }
 
     bar.classList.add("active");
@@ -776,18 +776,7 @@
 
   function handleHashChange() {
     const hash = window.location.hash;
-    if (hash && hash.startsWith("#drill=")) {
-      const raw = hash.substring(7);
-      let drillId = raw;
-      try {
-        drillId = decodeURIComponent(raw);
-      } catch (e) {
-        drillId = raw;
-      }
-      if (state && state.drillDown(drillId)) {
-        render();
-      }
-    } else if (hash && hash.startsWith("#node=")) {
+    if (hash && hash.startsWith("#node=")) {
       const raw = hash.substring(6);
       let nodeId = raw;
       try {

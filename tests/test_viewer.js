@@ -20,6 +20,8 @@ const {
   computeLayeredLayout,
   getNodeDetails,
   ViewerState,
+  FILTER_KINDS,
+  FILTER_TIERS,
 } = ArchViewerLogic;
 
 function runTests() {
@@ -140,6 +142,15 @@ function runTests() {
   // 2. Test Drill-down & Breadcrumbs
   console.log("Checking drill-down and breadcrumb navigation...");
   const state = new ViewerState(graph);
+  const allModuleIds = (hierarchy) => new Set(hierarchy.modules.map((mod) => mod.id));
+  const fullFilters = (hierarchy) => ({
+    modules: allModuleIds(hierarchy),
+    kinds: new Set(FILTER_KINDS),
+    tiers: new Set(FILTER_TIERS),
+  });
+  const resetFilters = () => {
+    state.filters = fullFilters(state.hierarchy);
+  };
   assert.strictEqual(state.currentLevel, "system");
   assert.strictEqual(state.breadcrumbs.length, 1);
   assert.strictEqual(state.breadcrumbs[0].id, "system");
@@ -315,6 +326,54 @@ function runTests() {
   assert.strictEqual(xById.get("mod:m"), xById.get("sym:svc_a"), "Modules must share the services column");
   assert.strictEqual(xById.get("ds:db"), xById.get("ext:api"), "Stores and sinks must share one column");
 
+  // SPEC 6.1 gives every node an explicit kind; ID prefixes and raw store kinds carry no meaning.
+  const kindLayout = computeLayeredLayout([
+    { id: "custom:entry", kind: "entrypoint" },
+    { id: "ep:not_entry", kind: "service" },
+    { id: "ds:raw_store_kind", kind: "sql" },
+    { id: "custom:sink", kind: "external_sink" },
+  ], []);
+  const kindX = new Map(kindLayout.nodes.map((n) => [n.id, n.x]));
+  assert.strictEqual(
+    kindX.get("ep:not_entry"),
+    kindX.get("ds:raw_store_kind"),
+    "A service and an unknown raw store kind must share the services column"
+  );
+  assert(
+    kindX.get("custom:entry") < kindX.get("ep:not_entry"),
+    "The entrypoint kind must classify a node regardless of its ID prefix"
+  );
+  assert(
+    kindX.get("custom:sink") > kindX.get("ep:not_entry"),
+    "The external_sink kind must classify a node regardless of its ID prefix"
+  );
+
+  // Trace sink detection must also rely on node.kind, not the ds:/ext: ID prefix.
+  const kindOnlyTraceGraph = {
+    nodes: [
+      { id: "ep:e", kind: "entrypoint", label: "E", file: "a.py", line: 1, tier: "scip" },
+      { id: "ds:lookalike", kind: "service", label: "Lookalike", file: "a.py", line: 2, tier: "scip" },
+      { id: "sym:real", kind: "service", label: "Real", file: "a.py", line: 3, tier: "scip" },
+    ],
+    edges: [
+      { source: "ep:e", target: "ds:lookalike", kind: "calls", file: "a.py", line: 4, tier: "scip" },
+      { source: "ds:lookalike", target: "sym:real", kind: "calls", file: "a.py", line: 5, tier: "scip" },
+      { source: "sym:real", target: "store:no-prefix", kind: "writes", file: "a.py", line: 6, tier: "scip" },
+    ],
+    data_stores: [{ id: "store:no-prefix", kind: "sql", label: "Store", evidence: ["a.py:7"] }],
+    external_sinks: [],
+  };
+  const kindOnlyTrace = traceFlow(kindOnlyTraceGraph, "ep:e");
+  assert.deepStrictEqual(
+    kindOnlyTrace.reachableSinks.map((sink) => sink.id),
+    ["store:no-prefix"],
+    "Only nodes whose kind is datastore or external_sink may be treated as trace sinks"
+  );
+  assert(
+    kindOnlyTrace.reachableNodes.includes("ds:lookalike"),
+    "A service node with a ds: ID prefix must stay an intermediate step, not a sink"
+  );
+
   // System view: modules must precede stores and sinks
   state.goToBreadcrumb(0);
   const sysView = state.getCurrentView();
@@ -347,7 +406,7 @@ function runTests() {
   // Directory (file_group) nodes must NOT be dropped by unchecking leaf kinds
   const dirNodeCount = modViewFiltered.nodes.filter((n) => n.kind === "file_group").length;
   assert(dirNodeCount > 0, "Module drill-down must contain file_group directories when kind filter is active");
-  state.filters.kinds.clear();
+  resetFilters();
 
   // 7. Test Module Filter Re-check
   console.log("Checking module filter re-check behavior...");
@@ -357,7 +416,7 @@ function runTests() {
   let viewExcluded = state.getCurrentView();
   assert(!viewExcluded.nodes.some((n) => n.id === "mod:orders"), "mod:orders must be excluded");
   // Re-check mod:orders (all modules included)
-  state.filters.modules.clear();
+  state.filters.modules = allModuleIds(state.hierarchy);
   let viewRestored = state.getCurrentView();
   assert(viewRestored.nodes.some((n) => n.id === "mod:orders"), "mod:orders must be restored on re-check");
 
@@ -376,7 +435,7 @@ function runTests() {
     sysTierView.nodes.some((n) => n.id === "ds:postgres:orders"),
     "Data store must remain visible when filtering code tiers"
   );
-  state.filters.tiers.clear();
+  resetFilters();
 
   // 8b. Filters must evaluate the leaves behind each container and aggregated edge
   console.log("Checking filters apply to aggregated containers and edges...");
@@ -398,7 +457,7 @@ function runTests() {
     !tsSystemView.edges.some((e) => e.source === "mod:root"),
     "An edge whose target leaf is filtered out must not be aggregated"
   );
-  state.filters.tiers.clear();
+  resetFilters();
 
   state.filters.kinds = new Set([
     "entrypoint",
@@ -444,10 +503,54 @@ function runTests() {
     0,
     "Edges between filtered-out leaves must not be aggregated"
   );
-  state.filters.kinds.clear();
+  resetFilters();
 
-  // 8c. Unfiltered views must show every declared module, including leafless ones
-  console.log("Checking unfiltered views keep declared modules without flow nodes...");
+  // 8c. Explicit filter selections: all values selected = no restriction,
+  // none selected = the group excludes everything
+  console.log("Checking explicit filter selection semantics...");
+  state.goToBreadcrumb(0);
+  state.filters = fullFilters(state.hierarchy);
+  const allSelectedView = state.getCurrentView();
+  const allSelectedIds = new Set(allSelectedView.nodes.map((n) => n.id));
+  for (const childId of state.hierarchy.systemNode.children) {
+    assert(
+      allSelectedIds.has(childId),
+      `Selecting every filter value must show the declared entry ${childId}`
+    );
+  }
+  assert(state.filters.modules.size > 0, "The module filter must list selectable modules");
+
+  for (const group of ["modules", "kinds", "tiers"]) {
+    state.filters = fullFilters(state.hierarchy);
+    state.filters[group] = new Set();
+    const emptyGroupView = state.getCurrentView();
+    assert.strictEqual(
+      emptyGroupView.nodes.length,
+      0,
+      `An empty ${group} selection must exclude every node`
+    );
+    assert.strictEqual(
+      emptyGroupView.edges.length,
+      0,
+      `An empty ${group} selection must exclude every edge`
+    );
+  }
+
+  state.filters = fullFilters(state.hierarchy);
+  state.filters.tiers = new Set(["treesitter"]);
+  const aliasTierView = state.getCurrentView();
+  assert(
+    !aliasTierView.nodes.some((n) => n.id === "mod:root"),
+    "The non-canonical 'treesitter' value must not match tree-sitter nodes"
+  );
+  assert(
+    aliasTierView.nodes.some((n) => n.id === "ds:postgres:orders"),
+    "Nodes without a code tier are not excluded by a code-tier selection"
+  );
+  resetFilters();
+
+  // 8d. Unfiltered views must show every declared module, including leafless ones
+  console.log("Checking declared modules without flow nodes...");
   const leaflessGraph = JSON.parse(JSON.stringify(graph));
   leaflessGraph.modules.push({
     id: "mod:utils",
@@ -458,22 +561,37 @@ function runTests() {
     tier: "scip",
   });
   const leaflessHierarchy = buildHierarchy(leaflessGraph);
-  const unfilteredScope = getHierarchyScope(leaflessHierarchy, "system", "system", {
-    modules: new Set(),
-    kinds: new Set(),
-    tiers: new Set(),
-  });
+  const unfilteredScope = getHierarchyScope(
+    leaflessHierarchy,
+    "system",
+    "system",
+    fullFilters(leaflessHierarchy)
+  );
   const unfilteredIds = new Set(unfilteredScope.nodes.map((n) => n.id));
   for (const childId of leaflessHierarchy.systemNode.children) {
     assert(
       unfilteredIds.has(childId),
-      `An unfiltered system view must show the declared entry ${childId}`
+      `A fully selected system view must show the declared entry ${childId}`
     );
   }
   assert(
     unfilteredIds.has("mod:utils"),
-    "A declared module with no flow nodes must stay visible when no filters are active"
+    "A declared module with no flow nodes must stay visible when every group is fully selected"
   );
+
+  const restrictedFilters = fullFilters(leaflessHierarchy);
+  restrictedFilters.tiers = new Set(["scip"]);
+  const restrictedScope = getHierarchyScope(
+    leaflessHierarchy,
+    "system",
+    "system",
+    restrictedFilters
+  );
+  assert(
+    !restrictedScope.nodes.some((n) => n.id === "mod:utils"),
+    "A module with no leaves must be hidden unless every filter group is fully selected"
+  );
+  resetFilters();
 
   // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
   console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
@@ -674,16 +792,6 @@ function testBrowserController(graphJsonText) {
       pathname: "/index.html",
       search: "",
     },
-    history: {
-      replaceState(state, title, url) {
-        if (url && url.includes("#")) {
-          currentHash = url.substring(url.indexOf("#"));
-        } else {
-          currentHash = "";
-        }
-        // replaceState does NOT fire hashchange
-      },
-    },
     addEventListener(evt, h) {
       if (!windowListeners.has(evt)) windowListeners.set(evt, []);
       windowListeners.get(evt).push(h);
@@ -719,6 +827,24 @@ function testBrowserController(graphJsonText) {
       return;
     }
     for (const ch of node.children) findNode(ch);
+  }
+  function findSvgEdge(node) {
+    if (node.attributes && node.attributes.class && node.attributes.class.includes("svg-edge")) {
+      return node;
+    }
+    for (const ch of node.children) {
+      const found = findSvgEdge(ch);
+      if (found) return found;
+    }
+    return null;
+  }
+  function findText(node, text) {
+    if (node.textContent === text) return node;
+    for (const ch of node.children) {
+      const found = findText(ch, text);
+      if (found) return found;
+    }
+    return null;
   }
   findNode(viewport);
   assert(modOrdersNode, "mod:orders SVG node should be rendered in viewport");
@@ -774,15 +900,39 @@ function testBrowserController(graphJsonText) {
     "Navigating to the current #node= target must still focus it"
   );
 
-  // Deep links must rebuild an absolute breadcrumb trail instead of appending
+  // The removed #drill= route must be ignored; only #node= drives navigation
+  state.goToBreadcrumb(0);
+  global.window.location.hash = "";
   global.window.location.hash = "#drill=" + encodeURIComponent("file:src/orders/services/order_service.py");
   viewerController.handleHashChange();
-  assert.strictEqual(state.currentLevel, "file");
-  assert.strictEqual(state.currentScope, "file:src/orders/services/order_service.py");
+  assert.strictEqual(state.currentLevel, "system", "The removed #drill= route must not navigate");
   assert.deepStrictEqual(
     state.breadcrumbs.map((c) => c.id),
-    ["system", "mod:orders", "dir:src/orders/services", "file:src/orders/services/order_service.py"],
-    "Reloading a file deep link must rebuild the full ancestor trail"
+    ["system"],
+    "The removed #drill= route must not rebuild a breadcrumb trail"
+  );
+
+  // Node inspector must show the SPEC 6.3 fields: symbol, file:line, tier, edges
+  viewer.selectNode("ep:POST:/api/orders");
+  const inspectorContent = elements.get("inspector-content");
+  assert(inspectorContent.innerHTML.includes("create_order"), "Node inspector must show the symbol");
+  assert(
+    inspectorContent.innerHTML.includes("src/orders/routes.py:42"),
+    "Node inspector must show file:line"
+  );
+  assert(inspectorContent.innerHTML.includes("scip"), "Node inspector must show the indexing tier");
+  assert(inspectorContent.innerHTML.includes("Uses ("), "Node inspector must show outgoing edges");
+  assert(inspectorContent.innerHTML.includes("Used By ("), "Node inspector must show incoming edges");
+
+  // Edge inspector must show the underlying file:line and tier
+  const renderedEdge = findSvgEdge(viewport);
+  assert(renderedEdge, "System view must render aggregated edges");
+  renderedEdge.dispatchEvent({ type: "click" });
+  assert(inspectorContent.innerHTML.includes("Citation"), "Edge inspector must show file:line citations");
+  assert(inspectorContent.innerHTML.includes("src/"), "Edge inspector citations must cite real files");
+  assert(
+    inspectorContent.innerHTML.includes("Indexing Tier"),
+    "Edge inspector must show the indexing tier"
   );
 
   // Trace bar must clear whenever trace mode ends
@@ -790,6 +940,15 @@ function testBrowserController(graphJsonText) {
   viewer.startTrace("ep:POST:/api/orders");
   assert(traceBar.classList.contains("active"), "Trace bar must be active during trace mode");
   assert.strictEqual(state.trace.entrypointId, "ep:POST:/api/orders");
+  const traceStepText = elements.get("trace-step-text");
+  assert(
+    traceStepText.textContent.includes("jwt_required"),
+    "Trace walkthrough must show the entrypoint auth guards"
+  );
+  assert(
+    traceStepText.textContent.includes("src/orders/routes.py:42"),
+    "Trace walkthrough must show step file:line"
+  );
   const breadcrumbsEl = elements.get("breadcrumbs");
   const systemCrumb = breadcrumbsEl.children.find(
     (c) => c.className && c.className.split(" ").includes("crumb")
@@ -804,6 +963,22 @@ function testBrowserController(graphJsonText) {
   const escaped = viewerController.escapeHtml('"><script>alert(1)</script>');
   assert(!escaped.includes("<script>"), "escapeHtml must escape HTML tags");
   assert(escaped.includes("&lt;script&gt;"), "escapeHtml must encode angle brackets");
+
+  // Unchecking every value in a filter group must show an empty-state message
+  const moduleFilterInputs = elements.get("filter-modules").querySelectorAll("input");
+  moduleFilterInputs.forEach((input) => {
+    input.checked = false;
+  });
+  moduleFilterInputs[0].dispatchEvent({ type: "change" });
+  assert.strictEqual(
+    state.getCurrentView().nodes.length,
+    0,
+    "Unchecking every module must hide every node"
+  );
+  assert(
+    findText(viewport, "No nodes match the selected filters."),
+    "The viewer must show an empty-state message when no nodes match the filters"
+  );
 
   // Synthetic root module must be filterable and never silently hidden
   global.window.location.hash = "";
