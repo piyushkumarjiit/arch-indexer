@@ -4,13 +4,20 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import tree_sitter_java as tsjava
 from tree_sitter import Language, Node, Parser
 
-from arch_indexer.config import DEFAULT_CHUNK_FILES
+from arch_indexer.config import (
+    DEFAULT_CHUNK_FILES,
+    DEFAULT_UNIT_TIMEOUT_SEC,
+    RepoCachePaths,
+    get_cache_dir,
+    get_jvm_heap_mb,
+)
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
@@ -20,7 +27,13 @@ from arch_indexer.plugins.base import (
     build_fqname_prefixes,
     build_name_table,
 )
-from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, get_repo_files
+from arch_indexer.scip import ingest_scip
+from arch_indexer.toolchain import (
+    EXCLUDED_DIR_NAMES,
+    _effective_runtimes,
+    check_tool_status,
+    get_repo_files,
+)
 
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
@@ -191,11 +204,117 @@ class JavaPlugin(LanguagePlugin):
     def index_unit_tier1(
         self, unit: IndexUnit, limits: dict[str, Any]
     ) -> IndexResult | FallbackSignal:
-        """Tier 1 SCIP placeholder returning tool_unavailable per task spec."""
-        return FallbackSignal(
-            reason="tool_unavailable",
-            message="Tier 1 SCIP indexer unavailable; fallback to Tier 2",
-        )
+        """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
+        cache_dir = get_cache_dir(limits.get("cache_dir"))
+        runtimes, java_runtime, _portable = _effective_runtimes(cache_dir)
+        if not runtimes["java"].available:
+            return FallbackSignal(
+                reason="tool_unavailable",
+                message=f"Java runtime unavailable: {runtimes['java'].message}",
+            )
+        if not runtimes["mvn"].available:
+            return FallbackSignal(
+                reason="tool_unavailable",
+                message=f"Maven runtime unavailable: {runtimes['mvn'].message}",
+            )
+
+        runtime_env = java_runtime.env or None
+        tool_status = check_tool_status("scip-java", cache_dir=cache_dir, env=runtime_env)
+        if not tool_status.installed or not tool_status.install_path:
+            return FallbackSignal(
+                reason="tool_unavailable",
+                message="scip-java launcher is not installed in the cache",
+            )
+
+        scip_tmp_dir = limits.get("scip_tmp_dir")
+        if scip_tmp_dir is None:
+            scip_tmp_dir = RepoCachePaths.from_repo(
+                unit.root_dir, cache_dir_override=cache_dir
+            ).scip_tmp_dir
+        scip_tmp_dir = Path(scip_tmp_dir)
+        scip_tmp_dir.mkdir(parents=True, exist_ok=True)
+        scip_file = scip_tmp_dir / f"{unit.unit_id.replace(':', '_')}.scip"
+        scip_file.unlink(missing_ok=True)
+
+        jvm_heap_mb = get_jvm_heap_mb(limits.get("jvm_max_heap_mb"))
+        env = dict(os.environ)
+        if java_runtime.env:
+            env.update(java_runtime.env)
+        env["JAVA_TOOL_OPTIONS"] = f"-Xmx{jvm_heap_mb}m"
+        timeout = limits.get("unit_timeout_sec", DEFAULT_UNIT_TIMEOUT_SEC)
+
+        pom_path = unit.metadata.get("pom")
+        work_dir = (unit.root_dir / pom_path).parent if pom_path else unit.root_dir
+
+        cmd = [
+            str(tool_status.install_path),
+            "index",
+            "--build-tool=maven",
+            "--output",
+            str(scip_file),
+            "--",
+            "--batch-mode",
+            "clean",
+            "compile",
+            "-DskipTests",
+            "-o",
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(work_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="timeout", message=f"Timeout after {timeout}s")
+        except OSError as e:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="tool_unavailable", message=str(e))
+
+        if proc.returncode != 0:
+            scip_file.unlink(missing_ok=True)
+            out = (proc.stderr or "") + (proc.stdout or "")
+            if (
+                proc.returncode in (137, -9)
+                or "OutOfMemoryError" in out
+                or "Java heap space" in out
+            ):
+                return FallbackSignal(reason="oom_limit", message=out)
+
+            missing_patterns = (
+                "Could not find artifact",
+                "Cannot access central",
+                "in offline mode",
+                "Could not resolve dependencies",
+                "ResolutionException",
+                "ArtifactNotFoundException",
+                "Non-resolvable parent POM",
+            )
+            if any(pat in out for pat in missing_patterns):
+                return FallbackSignal(reason="maven_unresolved_artifact", message=out)
+
+            return FallbackSignal(reason="build_failure", message=out)
+
+        if not scip_file.is_file():
+            return FallbackSignal(
+                reason="build_failure",
+                message=f"scip-java exited 0 but did not produce {scip_file}",
+            )
+
+        tier2_result = self.index_unit_tier2(unit)
+        entrypoints = tier2_result.entrypoints
+
+        try:
+            return ingest_scip(scip_file, unit, entrypoints=entrypoints)
+        except Exception as e:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")
 
     def extract_definitions(
         self, unit: IndexUnit

@@ -4,13 +4,21 @@ import fnmatch
 import hashlib
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser
 
-from arch_indexer.config import DEFAULT_CHUNK_FILES
+from arch_indexer.config import (
+    DEFAULT_CHUNK_FILES,
+    DEFAULT_UNIT_TIMEOUT_SEC,
+    RepoCachePaths,
+    get_cache_dir,
+    get_node_heap_mb,
+)
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
@@ -19,7 +27,8 @@ from arch_indexer.plugins.base import (
     LanguagePlugin,
     build_name_table,
 )
-from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, get_repo_files
+from arch_indexer.scip import ingest_scip
+from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, check_tool_status, get_repo_files
 
 TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
@@ -257,11 +266,93 @@ class TypeScriptPlugin(LanguagePlugin):
     def index_unit_tier1(
         self, unit: IndexUnit, limits: dict[str, Any]
     ) -> IndexResult | FallbackSignal:
-        """Tier 1 SCIP placeholder returning tool_unavailable per task spec."""
-        return FallbackSignal(
-            reason="tool_unavailable",
-            message="Tier 1 SCIP indexer unavailable; fallback to Tier 2",
-        )
+        """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
+        cache_dir = get_cache_dir(limits.get("cache_dir"))
+        tool_status = check_tool_status("scip-typescript", cache_dir=cache_dir)
+        if not tool_status.installed or not tool_status.install_path:
+            return FallbackSignal(
+                reason="tool_unavailable",
+                message="scip-typescript is not installed in the cache",
+            )
+        node_cmd = shutil.which("node")
+        if not node_cmd:
+            return FallbackSignal(
+                reason="tool_unavailable",
+                message="node executable not found in PATH",
+            )
+
+        scip_tmp_dir = limits.get("scip_tmp_dir")
+        if scip_tmp_dir is None:
+            scip_tmp_dir = RepoCachePaths.from_repo(
+                unit.root_dir, cache_dir_override=cache_dir
+            ).scip_tmp_dir
+        scip_tmp_dir = Path(scip_tmp_dir)
+        scip_tmp_dir.mkdir(parents=True, exist_ok=True)
+        scip_file = scip_tmp_dir / f"{unit.unit_id.replace(':', '_')}.scip"
+        scip_file.unlink(missing_ok=True)
+
+        node_heap_mb = get_node_heap_mb(limits.get("node_max_heap_mb"))
+        env = dict(os.environ)
+        env["NODE_OPTIONS"] = f"--max-old-space-size={node_heap_mb}"
+        timeout = limits.get("unit_timeout_sec", DEFAULT_UNIT_TIMEOUT_SEC)
+
+        cmd = [
+            str(tool_status.install_path),
+            "index",
+            "--no-progress-bar",
+            "--cwd",
+            str(unit.root_dir),
+            "--output",
+            str(scip_file),
+        ]
+        if unit.metadata.get("tsconfig"):
+            cmd.append(unit.metadata["tsconfig"])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(unit.root_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="timeout", message=f"Timeout after {timeout}s")
+        except OSError as e:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="tool_unavailable", message=str(e))
+
+        if proc.returncode != 0:
+            scip_file.unlink(missing_ok=True)
+            out = (proc.stderr or "") + (proc.stdout or "")
+            if proc.returncode in (137, -9) or "JavaScript heap out of memory" in out:
+                return FallbackSignal(reason="oom_limit", message=out)
+
+            has_node_modules = (unit.root_dir / "node_modules").is_dir() or any(
+                (f.parent / "node_modules").is_dir() for f in unit.files
+            )
+            if not has_node_modules or "node_modules" in out or "Cannot find module" in out:
+                return FallbackSignal(reason="missing_node_modules", message=out)
+
+            return FallbackSignal(reason="build_failure", message=out)
+
+        if not scip_file.is_file():
+            return FallbackSignal(
+                reason="build_failure",
+                message=f"scip-typescript exited 0 but did not produce {scip_file}",
+            )
+
+        tier2_result = self.index_unit_tier2(unit)
+        entrypoints = tier2_result.entrypoints
+
+        try:
+            return ingest_scip(scip_file, unit, entrypoints=entrypoints)
+        except Exception as e:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")
 
     def extract_definitions(
         self, unit: IndexUnit

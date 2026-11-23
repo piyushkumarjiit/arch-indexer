@@ -136,6 +136,8 @@ def run_index(
         "node_max_heap_mb": node_max_heap_mb,
         "jvm_max_heap_mb": jvm_max_heap_mb,
         "unit_timeout_sec": unit_timeout_sec,
+        "cache_dir": cache_dir,
+        "scip_tmp_dir": cache_paths.scip_tmp_dir,
     }
 
     # Phase 2a: Resolve Tier 1 for every unit before the store is touched, so a
@@ -167,6 +169,9 @@ def run_index(
                     symbol_context=symbol_context,
                     definitions=definitions_by_unit[idx],
                 )
+                if plugin.has_tier1_indexer:
+                    for f in res.files:
+                        f["fallback_reason"] = tier1_res.reason
             else:
                 res = tier1_res
 
