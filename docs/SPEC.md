@@ -117,7 +117,7 @@ All external tools and parsers are pinned to exact versions:
 | `@sourcegraph/scip-typescript` | `0.6.2` | `<cache>/tools/node` | Tier 1 TypeScript indexer |
 | `scip-java` | `0.10.2` (coursier bootstrap of `com.sourcegraph:scip-java_2.13`) | `<cache>/tools/java` | Tier 1 Java/Maven indexer |
 | `coursier` | `2.1.27` (launcher verified by SHA-256) | `<cache>/tools/java` | Bootstraps the `scip-java` launcher |
-| Eclipse Temurin JDK | `17.0.21.1+2` (linux x64 / aarch64, SHA-256 verified) | `<cache>/runtimes` | Portable Java runtime for `--fetch-runtime` when host `java` is missing |
+| Eclipse Temurin JDK | `17.0.21.1+2` (linux x64 / aarch64, SHA-256 verified) | `<cache>/runtimes` | Portable Java runtime for `--fetch-runtime` when host `java` is missing or older than the minimum |
 | Apache Maven | `3.9.16` (binary tarball, SHA-256 verified) | `<cache>/runtimes` | Portable Maven for `--fetch-runtime` when host `mvn` is missing and the repo contains a `pom.xml` |
 | `protobuf` | `5.29.3` | `arch-indexer` venv | Parse `index.scip` binary directly (no `scip` CLI needed) |
 | `tree-sitter` | `0.23.2` | `arch-indexer` venv | Tier 2 fallback parser runtime |
