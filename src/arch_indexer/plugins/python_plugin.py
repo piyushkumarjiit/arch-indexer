@@ -78,9 +78,6 @@ FASTAPI_SECURITY_SCHEMES = frozenset(
 )
 DEPENDENCY_MARKERS = frozenset({"Depends", "Security"})
 MAX_RESOLVE_DEPTH = 8
-# How far ``Depends``/``Security`` chains are followed when deciding whether a route is
-# auth-guarded (``get_current_active_user -> get_current_user -> oauth2_scheme``).
-MAX_AUTH_DEPTH = 5
 
 TEST_DIR_NAMES = frozenset({"test", "tests"})
 
@@ -482,6 +479,7 @@ class _Resolver:
         self.root_cache = root_cache
         self.paths = {r["module"]: r["path"] for r in file_records if r.get("module")}
         self.cache: dict[str, _ModuleFacts | None] = {}
+        self.auth_cache: dict[tuple[str, str], bool] = {}
 
     def facts(self, module: str) -> _ModuleFacts | None:
         if module not in self.cache:
@@ -614,32 +612,33 @@ class _Resolver:
         self,
         module: str,
         text: str,
-        depth: int = 0,
         path: frozenset[tuple[str, str]] = frozenset(),
     ) -> bool:
         """``Depends(x)`` is auth when ``x`` is a security scheme, or a function whose
-        ``Depends``/``Security`` chain reaches one (or a ``Security(...)``) within
-        ``MAX_AUTH_DEPTH`` hops. Names are never used as evidence."""
+        ``Depends``/``Security`` chain reaches one. Names are never used as evidence."""
         if self.is_security_scheme(module, text):
             return True
-        if depth >= MAX_AUTH_DEPTH:
-            return False
         target = self.resolve(module, text)
         if target is None or target[0] != "internal":
             return False
-        # ``path`` holds the functions on the current chain only, so a cycle stops but a
-        # function first reached through a longer (depth-cut) chain is still explored.
         key = (target[1], target[2])
+        cached = self.auth_cache.get(key)
+        if cached is not None:
+            return cached
+        # ``path`` holds the functions on the current chain only, so a cycle stops.
         if key in path:
             return False
         facts = self.facts(target[1])
         function = facts.functions.get(target[2]) if facts is not None else None
         if function is None:
             return False
-        return any(
-            marker == "Security" or self.is_auth_dependency(where, dep, depth + 1, path | {key})
+        result = any(
+            marker == "Security" or self.is_auth_dependency(where, dep, path | {key})
             for marker, dep, where in self.function_dependencies(target[1], function)
         )
+        if result or not path:
+            self.auth_cache[key] = result
+        return result
 
     @staticmethod
     def fqname(target: _Target | None, fallback: str) -> str:

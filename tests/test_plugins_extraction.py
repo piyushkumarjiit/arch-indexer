@@ -1463,7 +1463,7 @@ def test_python_auth_follows_transitive_dependency_chains(tmp_path: Path):
     } <= calls
 
 
-def test_python_auth_chain_is_depth_limited_and_cycle_safe(tmp_path: Path):
+def test_python_auth_chain_follows_long_depends_and_stops_cycles(tmp_path: Path):
     res = _run_single_file(
         PythonPlugin(),
         tmp_path,
@@ -1496,5 +1496,5 @@ def cycle(x=Depends(ping)): pass
 """,
     )
     auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
-    # d2 reaches the scheme in 5 hops (d2..d6 -> scheme); d1 needs 6
-    assert auth == {"near": ["d2"], "far": [], "cycle": []}
+    # both chains reach the scheme (d2 in 5 hops, d1 in 6); the cycle still stops
+    assert auth == {"near": ["d2"], "far": ["d1"], "cycle": []}
