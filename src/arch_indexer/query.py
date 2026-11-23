@@ -262,8 +262,6 @@ def query_module_summary(conn: sqlite3.Connection, module: str) -> dict[str, Any
 
 def _normalize_entrypoint_id(entrypoint_id: str) -> int:
     raw = str(entrypoint_id).strip()
-    if raw.startswith("ep:"):
-        raw = raw[3:]
     try:
         return int(raw)
     except ValueError as exc:

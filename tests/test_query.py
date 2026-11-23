@@ -271,9 +271,7 @@ def test_flow_trace_walks_calls_and_marks_sinks(tmp_path: Path, capsys):
         "3 app/audit.py:5 [external-sink] app.audit.log_event -> requests.post",
     ]
 
-    code, out, _ = _query(
-        capsys, str(repo), "flow-trace", "ep:1", "--json", "--cache-dir", str(cache)
-    )
+    code, out, _ = _query(capsys, str(repo), "flow-trace", "1", "--json", "--cache-dir", str(cache))
     assert code == EXIT_OK
     payload = _json(out)
     assert payload["entrypoint"]["id"] == 1
@@ -308,6 +306,11 @@ def test_flow_trace_depth_bound_and_unknown_entrypoint(tmp_path: Path, capsys):
     assert code == EXIT_ERROR
     assert out == ""
     assert "invalid entrypoint id: not-an-id" in err
+
+    code, out, err = _query(capsys, str(repo), "flow-trace", "ep:1", "--cache-dir", str(cache))
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "invalid entrypoint id: ep:1" in err
 
 
 def test_query_output_is_deterministic(tmp_path: Path, capsys):
