@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
 from arch_indexer.checks.citations import (
+    CANONICAL_DOCS,
     FOOTNOTE_DEF_RE,
     FOOTNOTE_REF_RE,
     SECTION_START_RE,
@@ -24,6 +25,11 @@ AUTO_DIAGRAM_SLOT_RE = re.compile(
     r"(?P<start><!--\s*AUTO-DIAGRAM:(?P<id>[^:]+):START\s*-->)(?P<body>.*?)(?P<end><!--\s*AUTO-DIAGRAM:(?P=id):END\s*-->)",
     re.DOTALL,
 )
+HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
+
+
+class DraftFormatError(ValueError):
+    """A worker draft violates the draft file contract."""
 
 
 @dataclass
@@ -40,6 +46,9 @@ def _parse_frontmatter_value(val_str: str) -> str:
     val = val_str.strip()
     if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
         return val[1:-1].strip()
+    comment = re.search(r"\s+#", val)
+    if comment:
+        val = val[: comment.start()].strip()
     return val
 
 
@@ -50,10 +59,12 @@ def parse_draft_file(path: Path) -> DraftPacket:
 
     metadata: dict[str, str | list[str]] = {}
     body = raw_text
+    has_frontmatter = False
 
     if raw_text.startswith("---"):
         parts = raw_text.split("---", 2)
         if len(parts) >= 3:
+            has_frontmatter = True
             fm_text = parts[1]
             body = parts[2]
             lines = _split_lines(fm_text)
@@ -88,8 +99,7 @@ def parse_draft_file(path: Path) -> DraftPacket:
                         existing.append(_parse_frontmatter_value(item_val))
 
     packet_id = str(metadata.get("packet_id", path.stem))
-    target_doc_raw = str(metadata.get("target_doc", "DESIGN.md"))
-    target_doc = Path(target_doc_raw).name
+    target_doc = str(metadata.get("target_doc", ""))
 
     section_ids_raw = metadata.get("section_ids", [])
     if isinstance(section_ids_raw, str):
@@ -128,14 +138,12 @@ def parse_draft_file(path: Path) -> DraftPacket:
             if seg.startswith("`") and seg.endswith("`"):
                 rewritten.append(seg)
             else:
-
-                def sub_fn(m: re.Match[str]) -> str:
-                    old_id = m.group("id")
-                    if old_id in local_definitions:
-                        return f"[^{packet_id}__{old_id}]"
-                    return m.group(0)
-
-                rewritten.append(FOOTNOTE_REF_RE.sub(sub_fn, seg))
+                rewritten.append(
+                    FOOTNOTE_REF_RE.sub(
+                        lambda m: f"[^{packet_id}__{m.group('id')}]",
+                        seg,
+                    )
+                )
         return "".join(rewritten)
 
     rewritten_lines: list[str] = []
@@ -169,6 +177,18 @@ def parse_draft_file(path: Path) -> DraftPacket:
     if not found_any_section_marker and len(section_ids) == 1:
         sections[section_ids[0]] = rewritten_body.strip()
 
+    if not has_frontmatter:
+        raise DraftFormatError("missing YAML front-matter header")
+    if target_doc not in CANONICAL_DOCS:
+        raise DraftFormatError(
+            f"target_doc must be one of {', '.join(CANONICAL_DOCS)}, got '{target_doc}'"
+        )
+    if not section_ids:
+        raise DraftFormatError("section_ids must declare at least one section")
+    missing_sections = [sec_id for sec_id in section_ids if sec_id not in sections]
+    if missing_sections:
+        raise DraftFormatError("missing draft section(s): " + ", ".join(missing_sections))
+
     return DraftPacket(
         path=path,
         packet_id=packet_id,
@@ -189,6 +209,38 @@ def extract_existing_definitions(doc_text: str) -> dict[str, str]:
             body = m.group("body").strip()
             defs[fn_id] = body
     return defs
+
+
+def _first_heading(text: str) -> tuple[int, str] | None:
+    """Return (level, heading line) when the first non-empty line is a Markdown heading."""
+    for line in _split_lines(text):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = HEADING_RE.match(stripped)
+        return (len(m.group(1)), stripped) if m else None
+    return None
+
+
+def _retain_canonical_heading(existing: str, new_content: str) -> str:
+    """Keep the document's canonical section heading when the draft body omits it."""
+    canonical = _first_heading(existing)
+    if canonical is None:
+        return new_content
+    level, heading = canonical
+    lines = _split_lines(new_content)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = HEADING_RE.match(stripped)
+        if m and len(m.group(1)) <= level:
+            lines[idx] = heading
+            return "\n".join(lines)
+        break
+    if not new_content:
+        return heading
+    return f"{heading}\n\n{new_content}"
 
 
 def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
@@ -215,6 +267,9 @@ def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
         )
         end_match = end_marker.search(doc_text, start_match.end())
         if end_match:
+            clean_new = _retain_canonical_heading(
+                doc_text[start_match.end() : end_match.start()], clean_new
+            )
             # Preserve start marker and end marker
             before = doc_text[: start_match.end()]
             after = doc_text[end_match.start() :]
@@ -439,6 +494,18 @@ def assemble(
         stderr.write(f"Error: Drafts directory '{resolved_drafts_dir}' does not exist\n")
         return 1
 
+    target_docs_dir = (
+        (repo_path / docs_dir).resolve() if not Path(docs_dir).is_absolute() else Path(docs_dir)
+    )
+    if resolved_drafts_dir == repo_path or (
+        resolved_drafts_dir == target_docs_dir or resolved_drafts_dir in target_docs_dir.parents
+    ):
+        stderr.write(
+            f"Error: Drafts directory '{resolved_drafts_dir}' must not be the target repository "
+            f"root or overlap the docs directory '{target_docs_dir}'\n"
+        )
+        return 1
+
     # Load diagrams mapping if provided
     diagrams_map: dict[str, str] | None = None
     if diagrams is not None:
@@ -466,14 +533,17 @@ def assemble(
     for d_path in draft_files:
         try:
             packet = parse_draft_file(d_path)
-            drafts_by_doc.setdefault(packet.target_doc, []).append(packet)
+        except DraftFormatError as e:
+            stderr.write(
+                f"Error: Invalid draft '{d_path}': {e}. "
+                f"Retaining drafts in '{resolved_drafts_dir}'.\n"
+            )
+            return 3
         except Exception as e:
             stderr.write(f"Error parsing draft '{d_path}': {e}\n")
             return 1
+        drafts_by_doc.setdefault(packet.target_doc, []).append(packet)
 
-    target_docs_dir = (
-        (repo_path / docs_dir).resolve() if not Path(docs_dir).is_absolute() else Path(docs_dir)
-    )
     target_docs_dir.mkdir(parents=True, exist_ok=True)
 
     # Process each target document
@@ -499,8 +569,8 @@ def assemble(
 
         # Patch sections from each draft
         for packet in packets:
-            for sec_id, sec_content in packet.sections.items():
-                doc_text = patch_section_in_doc(doc_text, sec_id, sec_content)
+            for sec_id in packet.section_ids:
+                doc_text = patch_section_in_doc(doc_text, sec_id, packet.sections[sec_id])
 
         # Globally renumber and deduplicate footnotes
         doc_text = renumber_footnotes_in_doc(doc_text, doc_definitions)
@@ -534,12 +604,15 @@ def assemble(
         )
         return 3
 
-    # On success: delete drafts_dir
-    try:
-        shutil.rmtree(resolved_drafts_dir)
-        stdout.write(f"Assembly succeeded. Deleted drafts directory '{resolved_drafts_dir}'.\n")
-    except Exception as e:
-        stderr.write(f"Warning: Failed to delete drafts directory '{resolved_drafts_dir}': {e}\n")
+    # On success: delete only the draft files that were consumed, then the directory if empty
+    for d_path in draft_files:
+        try:
+            d_path.unlink()
+        except OSError as e:
+            stderr.write(f"Warning: Failed to delete draft '{d_path}': {e}\n")
+    with contextlib.suppress(OSError):
+        resolved_drafts_dir.rmdir()
+    stdout.write(f"Assembly succeeded. Deleted drafts from '{resolved_drafts_dir}'.\n")
 
     return 0
 

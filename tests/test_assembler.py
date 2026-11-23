@@ -3,7 +3,10 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from arch_indexer.assembler import (
+    DraftFormatError,
     assemble,
     inject_diagrams,
     parse_draft_file,
@@ -513,3 +516,230 @@ def test_assemble_cli_invocation(tmp_path):
     assert code == 0
     assert not drafts.exists()
     assert (repo / "docs" / "DESIGN.md").is_file()
+
+
+def test_assemble_refuses_drafts_dir_that_is_repo_root_or_docs_dir(tmp_path):
+    """The drafts directory must never be the repo root or the docs output directory."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Project\n\nOverview prose.\n", encoding="utf-8")
+
+    code = assemble(repo=repo, drafts_dir=".", out=io.StringIO(), err=io.StringIO())
+    assert code == 1
+    assert (repo / "README.md").is_file()
+
+    docs = repo / "docs"
+    docs.mkdir()
+    existing = docs / "DESIGN.md"
+    existing.write_text("# Technical Design Document\n\nExisting.\n", encoding="utf-8")
+
+    code = assemble(repo=repo, drafts_dir="docs", out=io.StringIO(), err=io.StringIO())
+    assert code == 1
+    assert existing.is_file()
+
+
+def test_assemble_missing_declared_section_exits_3_and_keeps_drafts(tmp_path):
+    """A draft that declares sections it does not supply is rejected, and drafts are kept."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    draft = drafts / "partial.md"
+    draft.write_text(
+        "---\n"
+        "packet_id: partial\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2, design-sec3]\n"
+        "---\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Only section two is present[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "[^1]: `src/app.py:1` — `run`\n",
+        encoding="utf-8",
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "design-sec3" in err.getvalue()
+    assert draft.is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+@pytest.mark.parametrize(
+    "draft_body",
+    [
+        "# Just prose\n\nNo front-matter here.\n",
+        "---\npacket_id: p1\ntarget_doc: DESIGN.md\n---\nSection ids are absent.\n",
+    ],
+)
+def test_assemble_rejects_drafts_without_usable_section_metadata(tmp_path, draft_body):
+    """Drafts lacking front-matter or section_ids exit 3, keep drafts, and write no docs."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    draft = drafts / "metadata-less.md"
+    draft.write_text(draft_body, encoding="utf-8")
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 3
+    assert draft.is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_parse_draft_file_strips_inline_frontmatter_comments(tmp_path):
+    """YAML inline comments are stripped from unquoted front-matter values."""
+    draft_path = tmp_path / "packet.md"
+    draft_path.write_text(
+        "---\n"
+        "packet_id: packet-7  # worker packet\n"
+        "target_doc: DESIGN.md  # or USER_GUIDE.md\n"
+        "section_ids:\n"
+        "  - design-sec2  # components\n"
+        "---\n"
+        "Section body[^1].\n\n"
+        "[^1]: `src/app.py:1` — `run`\n",
+        encoding="utf-8",
+    )
+
+    packet = parse_draft_file(draft_path)
+    assert packet.packet_id == "packet-7"
+    assert packet.target_doc == "DESIGN.md"
+    assert packet.section_ids == ["design-sec2"]
+
+
+def test_parse_draft_file_rejects_unknown_target_doc(tmp_path):
+    """Only the two canonical document names are accepted as target_doc."""
+    draft_path = tmp_path / "packet.md"
+    draft_path.write_text(
+        "---\npacket_id: p1\ntarget_doc: NOTES.md\nsection_ids: [design-sec2]\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DraftFormatError):
+        parse_draft_file(draft_path)
+
+
+def test_patch_section_in_doc_preserves_canonical_heading():
+    """Patching keeps the document's canonical heading even when the draft omits it."""
+    doc = (
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "<!-- SECTION:design-sec2:END -->\n"
+    )
+
+    prose_only = patch_section_in_doc(doc, "design-sec2", "Component prose[^1].")
+    assert "## 2. Components & Modules\n\nComponent prose[^1]." in prose_only
+
+    deeper_heading = patch_section_in_doc(doc, "design-sec2", "### How to Run It\n\nSteps[^1].")
+    assert "## 2. Components & Modules\n\n### How to Run It" in deeper_heading
+
+    same_level = patch_section_in_doc(doc, "design-sec2", "## 2. Components\n\nRenamed prose[^1].")
+    assert same_level == (
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Renamed prose[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n"
+    )
+
+
+def test_assemble_keeps_skeleton_heading_when_draft_omits_it(tmp_path):
+    """A prose-only draft must not delete the canonical heading from the generated doc."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "prose.md").write_text(
+        "---\n"
+        "packet_id: prose\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2]\n"
+        "---\n"
+        "Components prose without its own heading[^1].\n\n"
+        "[^1]: `src/app.py:1` — `run`\n",
+        encoding="utf-8",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "## 2. Components & Modules\n\nComponents prose without its own heading[^1]." in content
+
+
+def test_assemble_undefined_draft_reference_cannot_bind_existing_citation(tmp_path):
+    """An undefined draft footnote must fail the dangling gate, not reuse an old citation."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text(
+        "def common():\n    pass\n\ndef specific():\n    pass\n", encoding="utf-8"
+    )
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "first.md").write_text(
+        "---\n"
+        "packet_id: first\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2]\n"
+        "---\n"
+        "Section two calls common[^1].\n\n"
+        "[^1]: `src/app.py:1` — `common`\n",
+        encoding="utf-8",
+    )
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+
+    drafts.mkdir(parents=True)
+    orphan = drafts / "second.md"
+    orphan.write_text(
+        "---\n"
+        "packet_id: second\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec3]\n"
+        "---\n"
+        "Section three calls something undefined[^1].\n",
+        encoding="utf-8",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 3
+    assert orphan.is_file()
+
+
+def test_assemble_deletes_only_consumed_draft_files(tmp_path):
+    """Assembly removes the draft files it parsed and leaves unrelated files in place."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    draft = drafts / "packet.md"
+    draft.write_text(
+        "---\n"
+        "packet_id: packet\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2]\n"
+        "---\n"
+        "Components text[^1].\n\n"
+        "[^1]: `src/app.py:1` — `run`\n",
+        encoding="utf-8",
+    )
+    notes = drafts / "worker-notes.txt"
+    notes.write_text("scratch notes\n", encoding="utf-8")
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    assert not draft.exists()
+    assert notes.is_file()
+    assert drafts.is_dir()
