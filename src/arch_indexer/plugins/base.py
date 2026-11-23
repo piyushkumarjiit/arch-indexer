@@ -49,6 +49,11 @@ class IndexResult:
     unresolved_refs: list[dict[str, Any]] = field(default_factory=list)
     fallback_reason: str | None = None
     error_message: str | None = None
+    files: list[dict[str, Any]] = field(default_factory=list)
+    symbols: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
+    entrypoints: list[dict[str, Any]] = field(default_factory=list)
+    infra_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class LanguagePlugin(abc.ABC):
