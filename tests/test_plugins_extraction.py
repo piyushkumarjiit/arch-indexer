@@ -444,6 +444,99 @@ public class OuterController {
     assert auth["listUsers"] == ['@RolesAllowed("ROLE_ADMIN")']
 
 
+def test_java_method_guard_overrides_same_class_guard(tmp_path: Path):
+    """A method-level guard replaces the class-level guard of the same type.
+
+    Oracle: Spring Security applies the method annotation in preference to a
+    class annotation of the same type, so ``@PreAuthorize("permitAll()")`` on a
+    handler makes that handler public even when the class is ADMIN-guarded;
+    guards of a different type still stack.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "GuardedController.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api")
+@PreAuthorize("hasRole('ADMIN')")
+public class GuardedController {
+    @GetMapping("/open")
+    @PreAuthorize("permitAll()")
+    public void open() {}
+
+    @GetMapping("/admin")
+    public void adminOnly() {}
+
+    @GetMapping("/mixed")
+    @Secured("ROLE_USER")
+    public void mixed() {}
+}
+""",
+    )
+
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth["open"] == ['@PreAuthorize("permitAll()")']
+    assert auth["adminOnly"] == ["@PreAuthorize(\"hasRole('ADMIN')\")"]
+    assert auth["mixed"] == [
+        "@PreAuthorize(\"hasRole('ADMIN')\")",
+        '@Secured("ROLE_USER")',
+    ]
+
+
+def test_java_fully_qualified_guard_annotations(tmp_path: Path):
+    """Package-qualified Spring guards are recognised and override by simple name.
+
+    Oracle: ``@org.springframework...PreAuthorize`` and
+    ``@jakarta.annotation.security.RolesAllowed`` are the same guard types as
+    their short imported forms, so a handler guarded only with qualified
+    annotations is authenticated and a qualified method guard still replaces the
+    qualified class guard of the same type.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "FqController.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/fq")
+@org.springframework.security.access.prepost.PreAuthorize("hasRole('ADMIN')")
+public class FqController {
+    @GetMapping("/inherited")
+    public void inherited() {}
+
+    @GetMapping("/overridden")
+    @org.springframework.security.access.prepost.PreAuthorize("permitAll()")
+    public void overridden() {}
+
+    @GetMapping("/roles")
+    @jakarta.annotation.security.RolesAllowed("ROLE_USER")
+    public void roles() {}
+}
+""",
+    )
+
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth["inherited"] == [
+        "@org.springframework.security.access.prepost.PreAuthorize(\"hasRole('ADMIN')\")"
+    ]
+    assert auth["overridden"] == [
+        '@org.springframework.security.access.prepost.PreAuthorize("permitAll()")'
+    ]
+    assert auth["roles"] == [
+        "@org.springframework.security.access.prepost.PreAuthorize(\"hasRole('ADMIN')\")",
+        '@jakarta.annotation.security.RolesAllowed("ROLE_USER")',
+    ]
+
+
 def test_python_main_single_quotes_and_login_required():
     code = b"""
 from flask import Flask

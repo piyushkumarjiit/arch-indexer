@@ -56,9 +56,18 @@ DECLARATION_KINDS = {
 }
 
 
+_AUTH_ANNOTATION_RE = re.compile(r"@(?:[\w.]+\.)?(PreAuthorize|Secured|RolesAllowed)\b")
+
+
+def _auth_annotation_name(annotation: str) -> str | None:
+    """The simple name of a guarding annotation, bare or package-qualified."""
+    match = _AUTH_ANNOTATION_RE.match(annotation)
+    return match.group(1) if match else None
+
+
 def _is_auth_annotation(annotation: str) -> bool:
     """Whether an annotation guards its declaration (Spring security annotations)."""
-    return bool(re.match(r"@(PreAuthorize|Secured|RolesAllowed)\b", annotation))
+    return _auth_annotation_name(annotation) is not None
 
 
 def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str, list[str]]:
@@ -486,6 +495,17 @@ class JavaPlugin(LanguagePlugin):
                 m_fqname = f"{current_class}.{m_name}" if current_class else m_name
                 _, annotations = _get_modifiers_and_annotations(node, source_bytes)
 
+                method_auth = [ann for ann in annotations if _is_auth_annotation(ann)]
+                overridden_guards = {_auth_annotation_name(ann) for ann in method_auth}
+                auth_symbols = [
+                    *(
+                        ann
+                        for ann in current_auth
+                        if _auth_annotation_name(ann) not in overridden_guards
+                    ),
+                    *method_auth,
+                ]
+
                 for ann in annotations:
                     spring_match = re.search(
                         r"@(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\b(?:\((.*)\))?",
@@ -520,10 +540,6 @@ class JavaPlugin(LanguagePlugin):
                         )
                         if not full_route:
                             full_route = "/"
-
-                        auth_symbols = [
-                            ann for ann in [*current_auth, *annotations] if _is_auth_annotation(ann)
-                        ]
 
                         entrypoints.append(
                             {
