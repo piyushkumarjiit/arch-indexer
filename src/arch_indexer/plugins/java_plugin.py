@@ -512,6 +512,9 @@ class JavaPlugin(LanguagePlugin):
 
                 method_auth = [ann for ann in annotations if _is_auth_annotation(ann)]
                 method_guards = [ann for ann in method_auth if _is_guard_annotation(ann)]
+                # A method-level annotation overrides the declaring class's guard of the same
+                # family (Spring annotations by simple name, JSR-250 as one family), so
+                # method @PermitAll clears inherited guards and guards nothing itself.
                 overridden_guards = {_auth_override_key(ann) for ann in method_auth}
                 auth_symbols = [
                     *(
