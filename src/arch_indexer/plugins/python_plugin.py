@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,34 +30,69 @@ def _get_node_text(node: Node, source_bytes: bytes) -> str:
 
 PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
 
-# Calls that build a web/CLI app object; their bound names may carry routes/commands.
-APP_FACTORY_CALLEES = frozenset(
+# Known framework factories (fully qualified, after import resolution) and the kind of
+# receiver object they create. A decorator receiver must resolve to one of these.
+FRAMEWORK_FACTORIES = {
+    "fastapi.FastAPI": "fastapi",
+    "fastapi.applications.FastAPI": "fastapi",
+    "fastapi.APIRouter": "fastapi",
+    "fastapi.routing.APIRouter": "fastapi",
+    "flask.Flask": "flask",
+    "flask.app.Flask": "flask",
+    "flask.Blueprint": "flask",
+    "flask.blueprints.Blueprint": "flask",
+    "click.Group": "click",
+    "click.core.Group": "click",
+    "typer.Typer": "typer",
+    "typer.main.Typer": "typer",
+}
+# The ``click`` module itself is a valid receiver for ``@click.command()``/``@click.group()``.
+CLICK_MODULE = "click_module"
+
+HTTP_VERB_ATTRS = frozenset({"get", "post", "put", "delete", "patch", "options", "head"})
+RECEIVER_ROUTE_ATTRS = {
+    "fastapi": HTTP_VERB_ATTRS | {"route", "api_route"},
+    "flask": HTTP_VERB_ATTRS | {"route"},
+}
+RECEIVER_CLI_ATTRS = {
+    CLICK_MODULE: frozenset({"command", "group"}),
+    "click": frozenset({"command", "group"}),
+    "typer": frozenset({"command"}),
+}
+ROUTE_LIKE_ATTRS = HTTP_VERB_ATTRS | {"route", "api_route", "command", "group"}
+ROUTER_MOUNT_ATTRS = frozenset({"include_router", "register_blueprint"})
+
+# FastAPI security scheme classes; ``Depends(x)`` is auth only when ``x`` resolves to one.
+FASTAPI_SECURITY_SCHEMES = frozenset(
     {
-        "FastAPI",
-        "APIRouter",
-        "Flask",
-        "Blueprint",
-        "Typer",
-        "typer.Typer",
-        "click.Group",
-        "click.Command",
+        "OAuth2PasswordBearer",
+        "OAuth2AuthorizationCodeBearer",
+        "HTTPBearer",
+        "HTTPBasic",
+        "HTTPDigest",
+        "APIKeyHeader",
+        "APIKeyQuery",
+        "APIKeyCookie",
+        "OpenIdConnect",
     }
 )
-APP_RECEIVER_SUFFIXES = ("app", "router", "bp", "api", "blueprint")
+DEPENDENCY_MARKERS = frozenset({"Depends", "Security"})
+MAX_RESOLVE_DEPTH = 8
 
-# Python auth dependency names recognised in FastAPI ``Depends(...)`` parameters.
-AUTH_DEPENDENCY_HINTS = (
-    "auth",
-    "token",
-    "user",
-    "permission",
-    "scope",
-    "login",
-    "credential",
-    "jwt",
-    "oauth",
-    "api_key",
-)
+TEST_DIR_NAMES = frozenset({"test", "tests"})
+
+
+def _is_test_path(rel_path: str) -> bool:
+    """Whether a repository-relative Python file is test code."""
+    parts = Path(rel_path).parts
+    name = parts[-1] if parts else ""
+    if any(part in TEST_DIR_NAMES for part in parts[:-1]):
+        return True
+    return (
+        name == "conftest.py"
+        or (name.startswith("test_") and name.endswith(".py"))
+        or name.endswith("_test.py")
+    )
 
 
 def _source_root_parts(
@@ -154,16 +190,6 @@ class _ImportMap:
         return dotted
 
 
-def _auth_symbols_from_params(params_text: str) -> list[str]:
-    """Return auth dependencies declared in a route function's parameters."""
-    symbols: list[str] = []
-    for kind, name in re.findall(r"\b(Depends|Security)\s*\(\s*([A-Za-z_][\w.]*)", params_text):
-        lowered = name.lower()
-        if kind == "Security" or any(hint in lowered for hint in AUTH_DEPENDENCY_HINTS):
-            symbols.append(name)
-    return symbols
-
-
 def _resolve_relative_module(
     module_name: str, is_package: bool, level: int, relative_module: str
 ) -> str:
@@ -178,13 +204,6 @@ def _resolve_relative_module(
     return prefix or relative_module
 
 
-def _is_app_receiver(receiver: str, tracked: set[str], file_imports: dict[str, str]) -> bool:
-    """Whether a decorator receiver may be an app/router/blueprint/CLI object."""
-    if receiver in tracked or receiver in file_imports:
-        return True
-    return receiver.rsplit(".", 1)[-1].lower().endswith(APP_RECEIVER_SUFFIXES)
-
-
 def _get_decorators(node: Node, source_bytes: bytes) -> list[str]:
     """Collect decorators on a definition."""
     decorators = []
@@ -194,6 +213,352 @@ def _get_decorators(node: Node, source_bytes: bytes) -> list[str]:
             if child.type == "decorator":
                 decorators.append(_get_node_text(child, source_bytes).strip())
     return decorators
+
+
+def _split_decorator(dec: Node, source_bytes: bytes) -> tuple[str, str, Node | None] | None:
+    """Split ``@recv.attr(...)``/``@recv.attr`` into ``(receiver, attr, call_node)``."""
+    expr = next((c for c in dec.named_children if c.type != "comment"), None)
+    call_node = None
+    if expr is not None and expr.type == "call":
+        call_node = expr
+        expr = expr.child_by_field_name("function")
+    if expr is None or expr.type != "attribute":
+        return None
+    obj = expr.child_by_field_name("object")
+    attr = expr.child_by_field_name("attribute")
+    if obj is None or attr is None:
+        return None
+    receiver = re.sub(r"\s+", "", _get_node_text(obj, source_bytes))
+    if not re.fullmatch(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*", receiver):
+        return None
+    return receiver, _get_node_text(attr, source_bytes), call_node
+
+
+def _first_argument(call: Node, source_bytes: bytes, keyword: str) -> Node | None:
+    """Return a call's first positional argument, or the named keyword argument."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    for arg in args.named_children:
+        if arg.type == "keyword_argument":
+            name = arg.child_by_field_name("name")
+            if name is not None and _get_node_text(name, source_bytes) == keyword:
+                return arg.child_by_field_name("value")
+        elif arg.type != "comment":
+            return arg
+    return None
+
+
+def _dependency_calls(node: Node | None, source_bytes: bytes) -> list[tuple[str, str, Node]]:
+    """Find FastAPI ``Depends(x)``/``Security(x)`` calls under a node.
+
+    Returns ``(marker, dependency_text, call_node)``; ``dependency_text`` is empty for
+    ``Depends()`` with no explicit dependency.
+    """
+    found: list[tuple[str, str, Node]] = []
+    if node is None:
+        return found
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call":
+            fn = current.child_by_field_name("function")
+            marker = _get_node_text(fn, source_bytes).rsplit(".", 1)[-1] if fn else ""
+            if marker in DEPENDENCY_MARKERS:
+                arg = _first_argument(current, source_bytes, "dependency")
+                text = _get_node_text(arg, source_bytes).strip() if arg is not None else ""
+                found.append((marker, text, current))
+        stack.extend(reversed(current.children))
+    found.sort(key=lambda item: item[2].start_byte)
+    return found
+
+
+@dataclass
+class _FunctionFacts:
+    """Module-level function facts used for receiver and auth resolution."""
+
+    decorators: list[tuple[str, str]] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _ModuleFacts:
+    """Names a Python module binds, gathered without resolving anything."""
+
+    module: str
+    importable: str
+    is_package: bool
+    project: str
+    # local name -> importable dotted target of an import
+    bindings: dict[str, str] = field(default_factory=dict)
+    # module-level ``name = callee(...)`` -> callee text (None when not a call)
+    variables: dict[str, str | None] = field(default_factory=dict)
+    # ``name = callee(...)`` in any scope (covers app factories such as ``create_app``)
+    scoped_calls: dict[str, str] = field(default_factory=dict)
+    functions: dict[str, _FunctionFacts] = field(default_factory=dict)
+    # every other module-level definition (classes)
+    other_names: set[str] = field(default_factory=set)
+
+
+def _assignment_call(node: Node, source_bytes: bytes) -> tuple[str, int, str | None] | None:
+    """For ``name = value``/``name: T = value`` return ``(name, line, callee_or_None)``."""
+    left = node.child_by_field_name("left")
+    right = node.child_by_field_name("right")
+    if left is None or left.type != "identifier" or right is None:
+        return None
+    callee = None
+    if right.type == "call":
+        fn = right.child_by_field_name("function")
+        if fn is not None and fn.type in ("identifier", "attribute"):
+            callee = re.sub(r"\s+", "", _get_node_text(fn, source_bytes))
+    return _get_node_text(left, source_bytes), node.start_point[0] + 1, callee
+
+
+def _import_bindings(
+    node: Node, source_bytes: bytes, importable: str, is_package: bool
+) -> list[tuple[str, str]]:
+    """Return ``(local_name, importable_target)`` pairs bound by an import statement."""
+    pairs: list[tuple[str, str]] = []
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "dotted_name":
+                raw = _get_node_text(child, source_bytes)
+                head = raw.split(".", 1)[0]
+                pairs.append((head, head))
+            elif child.type == "aliased_import":
+                orig = child.child_by_field_name("name")
+                alias = child.child_by_field_name("alias")
+                if orig is not None:
+                    raw = _get_node_text(orig, source_bytes)
+                    if alias is not None:
+                        pairs.append((_get_node_text(alias, source_bytes), raw))
+                    else:
+                        head = raw.split(".", 1)[0]
+                        pairs.append((head, head))
+        return pairs
+    mod_node = node.child_by_field_name("module_name")
+    rel_mod, dots = "", 0
+    if mod_node is not None:
+        if mod_node.type == "relative_import":
+            for c in mod_node.children:
+                if c.type == "import_prefix":
+                    dots = len(_get_node_text(c, source_bytes))
+                elif c.type == "dotted_name":
+                    rel_mod = _get_node_text(c, source_bytes)
+        else:
+            rel_mod = _get_node_text(mod_node, source_bytes)
+    base = _resolve_relative_module(importable, is_package, dots, rel_mod) if dots else rel_mod
+    for child in node.children:
+        if child.type == "dotted_name" and child != mod_node:
+            name = _get_node_text(child, source_bytes)
+            pairs.append((name, f"{base}.{name}" if base else name))
+        elif child.type == "aliased_import":
+            orig = child.child_by_field_name("name")
+            alias = child.child_by_field_name("alias")
+            if orig is not None:
+                name = _get_node_text(orig, source_bytes)
+                local = _get_node_text(alias, source_bytes) if alias is not None else name
+                pairs.append((local, f"{base}.{name}" if base else name))
+    return pairs
+
+
+def _gather_module_facts(
+    root: Node,
+    source_bytes: bytes,
+    module: str,
+    importable: str,
+    is_package: bool,
+    project: str,
+) -> _ModuleFacts:
+    """Collect the bindings, variables and functions a module defines."""
+    facts = _ModuleFacts(module, importable, is_package, project)
+    stack: list[tuple[Node, bool]] = [(root, True)]
+    while stack:
+        node, module_level = stack.pop()
+        if node.type in ("import_statement", "import_from_statement"):
+            for local, target in _import_bindings(node, source_bytes, importable, is_package):
+                facts.bindings.setdefault(local, target)
+            continue
+        if node.type == "assignment":
+            assigned = _assignment_call(node, source_bytes)
+            if assigned is not None:
+                name, _, callee = assigned
+                if module_level:
+                    facts.variables.setdefault(name, callee)
+                if callee is not None:
+                    facts.scoped_calls.setdefault(name, callee)
+        elif node.type == "function_definition" and module_level:
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                ffacts = _FunctionFacts()
+                parent = node.parent
+                if parent is not None and parent.type == "decorated_definition":
+                    for dec in parent.children:
+                        if dec.type == "decorator":
+                            split = _split_decorator(dec, source_bytes)
+                            if split is not None:
+                                ffacts.decorators.append((split[0], split[1]))
+                params = node.child_by_field_name("parameters")
+                ffacts.dependencies = [
+                    text for _, text, _ in _dependency_calls(params, source_bytes) if text
+                ]
+                facts.functions.setdefault(_get_node_text(name_node, source_bytes), ffacts)
+        elif node.type == "class_definition" and module_level:
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                facts.other_names.add(_get_node_text(name_node, source_bytes))
+        nested = module_level and node.type not in ("function_definition", "class_definition")
+        stack.extend((child, nested) for child in reversed(node.children))
+    return facts
+
+
+# Resolution targets: ("internal", module, name), ("module", module, ""),
+# ("external", dotted, "").
+_Target = tuple[str, str, str]
+
+
+class _Resolver:
+    """Resolve Python names across files through imports, without pattern matching."""
+
+    def __init__(
+        self,
+        parser: Parser,
+        repo_root: Path,
+        file_records: list[dict[str, Any]],
+        translate: Callable[[str, str], str],
+        root_cache: dict[tuple[str, ...], bool],
+    ) -> None:
+        self.parser = parser
+        self.repo_root = repo_root
+        self.translate = translate
+        self.root_cache = root_cache
+        self.paths = {r["module"]: r["path"] for r in file_records if r.get("module")}
+        self.cache: dict[str, _ModuleFacts | None] = {}
+
+    def facts(self, module: str) -> _ModuleFacts | None:
+        if module not in self.cache:
+            self.cache[module] = None
+            path = self.paths.get(module)
+            if path is not None:
+                try:
+                    source_bytes = (self.repo_root / path).read_bytes()
+                except OSError:
+                    return None
+                stored, importable, is_package, project = _module_info(
+                    self.repo_root, path, self.root_cache
+                )
+                tree = self.parser.parse(source_bytes)
+                self.cache[module] = _gather_module_facts(
+                    tree.root_node, source_bytes, stored, importable, is_package, project
+                )
+        return self.cache[module]
+
+    def resolve(self, module: str, text: str, depth: int = 0) -> _Target | None:
+        """Resolve a (dotted) name as seen from inside ``module``."""
+        facts = self.facts(module)
+        if facts is None or not text or depth > MAX_RESOLVE_DEPTH:
+            return None
+        head, _, rest = text.partition(".")
+        if head in facts.variables or head in facts.functions or head in facts.other_names:
+            # Attributes of a local object are not followed.
+            return None if rest else ("internal", module, head)
+        target = facts.bindings.get(head)
+        if target is None:
+            return None
+        dotted = self.translate(target, facts.project)
+        return self.resolve_dotted(f"{dotted}.{rest}" if rest else dotted, depth + 1)
+
+    def resolve_dotted(self, dotted: str, depth: int = 0) -> _Target | None:
+        parts = dotted.split(".")
+        for i in range(len(parts), 0, -1):
+            module = ".".join(parts[:i])
+            if module in self.paths:
+                rest = ".".join(parts[i:])
+                if not rest:
+                    return ("module", module, "")
+                return self.resolve(module, rest, depth)
+        return ("external", dotted, "")
+
+    def factory_kind(self, module: str, callee: str, depth: int = 0) -> str | None:
+        target = self.resolve(module, callee, depth + 1)
+        if target is not None and target[0] == "external":
+            return FRAMEWORK_FACTORIES.get(target[1])
+        return None
+
+    def target_kind(self, target: _Target, depth: int = 0) -> str:
+        """Classify a resolved target as a framework receiver kind, else ``other``."""
+        kind, where, name = target
+        if kind == "external":
+            return CLICK_MODULE if where == "click" else "other"
+        if kind != "internal":
+            return "other"
+        facts = self.facts(where)
+        if facts is None:
+            return "other"
+        if name in facts.variables:
+            callee = facts.variables[name]
+            return (self.factory_kind(where, callee, depth) if callee else None) or "other"
+        function = facts.functions.get(name)
+        if function is not None:
+            for receiver, attr in function.decorators:
+                if attr == "group" and self.receiver_kind(
+                    where, receiver, depth + 1, scoped=False
+                ) in (CLICK_MODULE, "click"):
+                    return "click"
+        return "other"
+
+    def receiver_kind(
+        self, module: str, receiver: str, depth: int = 0, scoped: bool = True
+    ) -> str | None:
+        """Kind of a decorator receiver; ``None`` when it cannot be resolved."""
+        facts = self.facts(module)
+        if facts is None or depth > MAX_RESOLVE_DEPTH:
+            return None
+        callee = facts.scoped_calls.get(receiver)
+        if scoped and callee is not None and receiver not in facts.variables:
+            return self.factory_kind(module, callee, depth) or "other"
+        target = self.resolve(module, receiver, depth)
+        return None if target is None else self.target_kind(target, depth)
+
+    @staticmethod
+    def _is_scheme_class(target: _Target | None) -> bool:
+        if target is None or target[0] != "external":
+            return False
+        parts = target[1].split(".")
+        return parts[0] == "fastapi" and parts[-1] in FASTAPI_SECURITY_SCHEMES
+
+    def is_security_scheme(self, module: str, text: str) -> bool:
+        """Whether ``text`` is a FastAPI security scheme instance: an inline
+        ``OAuth2PasswordBearer(...)`` call or a variable assigned from one."""
+        if "(" in text:
+            return self._is_scheme_class(self.resolve(module, text.split("(", 1)[0].strip()))
+        target = self.resolve(module, text)
+        if target is None or target[0] != "internal":
+            return False
+        facts = self.facts(target[1])
+        callee = facts.variables.get(target[2]) if facts is not None else None
+        return bool(callee) and self._is_scheme_class(self.resolve(target[1], callee or ""))
+
+    def is_auth_dependency(self, module: str, text: str) -> bool:
+        """``Depends(x)`` is auth when ``x`` is a security scheme, or a function whose
+        own parameters depend on one (one level deep)."""
+        if self.is_security_scheme(module, text):
+            return True
+        target = self.resolve(module, text)
+        if target is None or target[0] != "internal":
+            return False
+        facts = self.facts(target[1])
+        function = facts.functions.get(target[2]) if facts is not None else None
+        if function is None:
+            return False
+        return any(self.is_security_scheme(target[1], dep) for dep in function.dependencies)
+
+    @staticmethod
+    def fqname(target: _Target | None, fallback: str) -> str:
+        if target is None:
+            return fallback
+        kind, where, name = target
+        return f"{where}.{name}" if kind == "internal" else where
 
 
 class PythonPlugin(LanguagePlugin):
@@ -297,7 +662,9 @@ class PythonPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            module_name, _, _, _ = _module_info(repo_root, rel_path, self._root_cache)
+            module_name, importable, is_package, project = _module_info(
+                repo_root, rel_path, self._root_cache
+            )
 
             file_records.append(
                 {
@@ -308,6 +675,9 @@ class PythonPlugin(LanguagePlugin):
                     "module": module_name,
                     "tier": IndexingTier.TIER2.value,
                     "fallback_reason": "tool_unavailable",
+                    # In-memory tag (no files column for it in SPEC 4.5): test code
+                    # never yields entrypoints.
+                    "is_test": _is_test_path(rel_path),
                 }
             )
 
@@ -315,8 +685,67 @@ class PythonPlugin(LanguagePlugin):
             self._collect_definitions(
                 tree.root_node, source_bytes, rel_path, module_name, symbol_records
             )
+            facts = _gather_module_facts(
+                tree.root_node, source_bytes, module_name, importable, is_package, project
+            )
+            self._collect_variables(
+                tree.root_node, source_bytes, rel_path, module_name, facts, symbol_records
+            )
 
         return file_records, symbol_records
+
+    def _collect_variables(
+        self,
+        root: Node,
+        source_bytes: bytes,
+        rel_path: str,
+        module_name: str,
+        facts: _ModuleFacts,
+        symbols: list[dict[str, Any]],
+    ) -> None:
+        """Record module-level ``name = callee(...)`` assignments as ``variable`` symbols.
+
+        Plain value assignments (constants) are not symbols. Each record carries
+        ``factory``: the assigned call's callee expanded through the module's imports
+        (``users = APIRouter()`` -> ``fastapi.APIRouter``).
+        """
+        seen: set[str] = set()
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type in ("function_definition", "class_definition", "lambda"):
+                continue
+            if node.type == "assignment":
+                assigned = _assignment_call(node, source_bytes)
+                if assigned is not None and assigned[2] and assigned[0] not in seen:
+                    name, line, callee = assigned
+                    seen.add(name)
+                    head, _, rest = callee.partition(".")
+                    bound = facts.bindings.get(head)
+                    if bound is not None:
+                        factory = f"{bound}.{rest}" if rest else bound
+                    elif head in facts.variables or head in facts.functions:
+                        factory = f"{module_name}.{callee}" if module_name else callee
+                    else:
+                        factory = callee
+                    symbols.append(
+                        {
+                            "fqname": f"{module_name}.{name}" if module_name else name,
+                            "name": name,
+                            "kind": "variable",
+                            "file_path": rel_path,
+                            "start_line": line,
+                            "end_line": node.end_point[0] + 1,
+                            "body_sha256": hashlib.sha256(
+                                source_bytes[node.start_byte : node.end_byte]
+                            ).hexdigest(),
+                            "visibility": "private" if name.startswith("_") else "public",
+                            "decorators_json": "[]",
+                            "factory": factory,
+                        }
+                    )
+                continue
+            stack.extend(reversed(node.children))
 
     def _collect_definitions(
         self,
@@ -438,6 +867,9 @@ class PythonPlugin(LanguagePlugin):
                 known_modules.update(module_with_parents(f["module"]))
 
         import_map = _ImportMap.build(repo_root, all_file_records, self._root_cache)
+        resolver = _Resolver(
+            self.parser, repo_root, all_file_records, import_map.translate, self._root_cache
+        )
 
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
@@ -459,6 +891,9 @@ class PythonPlugin(LanguagePlugin):
             )
 
             tree = self.parser.parse(source_bytes)
+            resolver.cache[module_name] = _gather_module_facts(
+                tree.root_node, source_bytes, module_name, importable, is_package, project
+            )
             self._analyze_file(
                 tree.root_node,
                 source_bytes,
@@ -467,6 +902,7 @@ class PythonPlugin(LanguagePlugin):
                 importable,
                 is_package,
                 lambda dotted, project=project: import_map.translate(dotted, project),
+                resolver,
                 known_fqnames,
                 known_names,
                 known_modules,
@@ -490,6 +926,114 @@ class PythonPlugin(LanguagePlugin):
             infra_artifacts=[],
         )
 
+    def _route_entrypoint(
+        self,
+        func_node: Node,
+        call_node: Node | None,
+        attr: str,
+        dec: str,
+        decorators: list[str],
+        source_bytes: bytes,
+        rel_path: str,
+        module_name: str,
+        func_name: str,
+        func_fqname: str,
+        resolver: _Resolver,
+        references: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build an ``http`` entrypoint for a resolved route decorator."""
+        args_match = re.search(r"\(([^)]*)\)", dec)
+        args_str = args_match.group(1) if args_match else ""
+        path_match = re.search(r"['\"]([^'\"]+)['\"]", args_str)
+        route_path = path_match.group(1) if path_match else "/"
+        method_name = attr.upper()
+        # ``.route``/``.api_route`` declare methods=['GET', 'POST'] (or the tuple form)
+        if attr in ("route", "api_route"):
+            methods_match = re.search(r"methods\s*=\s*[\[(]([^\])}]*)[\])]?", args_str)
+            declared = [
+                m.upper()
+                for m in re.findall(
+                    r"['\"]([A-Za-z]+)['\"]", methods_match.group(1) if methods_match else ""
+                )
+            ]
+            method_name = ",".join(declared) or "GET"
+
+        # Dependencies come from the decorator (``dependencies=[...]``) and the signature,
+        # never the body. Auth is resolved, never guessed from names.
+        dependencies: list[str] = []
+        auth_symbols: list[str] = []
+        params = func_node.child_by_field_name("parameters")
+        found = _dependency_calls(call_node, source_bytes) + _dependency_calls(params, source_bytes)
+        for marker, text, dep_call in found:
+            if not text:
+                continue
+            dependencies.append(text)
+            references.append(
+                {
+                    "symbol_fqname": resolver.fqname(resolver.resolve(module_name, text), text),
+                    "file_path": rel_path,
+                    "line": dep_call.start_point[0] + 1,
+                    "col": dep_call.start_point[1],
+                    "ref_kind": "depends_on",
+                }
+            )
+            if (
+                marker == "Security" or resolver.is_auth_dependency(module_name, text)
+            ) and text not in auth_symbols:
+                auth_symbols.append(text)
+        if any(d.startswith("@login_required") for d in decorators):
+            auth_symbols.append("login_required")
+
+        return {
+            "kind": "http",
+            "name": func_name,
+            "method": method_name,
+            "route_or_trigger": route_path,
+            "file_path": rel_path,
+            "line": func_node.start_point[0] + 1,
+            "symbol_fqname": func_fqname,
+            "auth_symbols_json": json.dumps(auth_symbols),
+            # In-memory metadata (SPEC 4.5 has no column); dependencies are also
+            # persisted as ``depends_on`` references at each Depends/Security call.
+            "metadata": {"dependencies": dependencies},
+        }
+
+    def _record_router_mount(
+        self,
+        call: Node,
+        fn_text: str,
+        source_bytes: bytes,
+        rel_path: str,
+        module_name: str,
+        resolver: _Resolver,
+        references: list[dict[str, Any]],
+    ) -> None:
+        """Record ``app.include_router(r)``/``register_blueprint(bp)`` as an edge only."""
+        receiver, _, attr = fn_text.rpartition(".")
+        if attr not in ROUTER_MOUNT_ATTRS or not receiver:
+            return
+        if resolver.receiver_kind(module_name, receiver) not in RECEIVER_ROUTE_ATTRS:
+            return
+        arg = _first_argument(
+            call, source_bytes, "router" if attr == "include_router" else "blueprint"
+        )
+        if arg is None or arg.type not in ("identifier", "attribute"):
+            return
+        target = resolver.resolve(module_name, _get_node_text(arg, source_bytes))
+        if target is None or target[0] != "internal":
+            return
+        if resolver.target_kind(target) not in RECEIVER_ROUTE_ATTRS:
+            return
+        references.append(
+            {
+                "symbol_fqname": resolver.fqname(target, ""),
+                "file_path": rel_path,
+                "line": arg.start_point[0] + 1,
+                "col": arg.start_point[1],
+                "ref_kind": "read",
+            }
+        )
+
     def _analyze_file(
         self,
         root: Node,
@@ -499,6 +1043,7 @@ class PythonPlugin(LanguagePlugin):
         importable_module: str,
         is_package: bool,
         translate: Callable[[str], str],
+        resolver: _Resolver,
         known_fqnames: set[str],
         known_names: dict[str, str],
         known_modules: set[str],
@@ -509,8 +1054,13 @@ class PythonPlugin(LanguagePlugin):
         """Extract imports, call references, and entrypoints for a Python file."""
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
         bound_names: set[str] = set()
-        tracked_receivers: set[str] = set()
         has_argparse = False
+        is_test = _is_test_path(rel_path)
+
+        def add_entrypoint(entry: dict[str, Any]) -> None:
+            # Test code (mock.patch, fixtures, helper apps) never yields entrypoints.
+            if not is_test:
+                entrypoints.append(entry)
 
         def record_import(raw_symbol: str, local_name: str, line: int, col: int) -> None:
             """Store an import as a reference when it is internal, else as unresolved."""
@@ -642,15 +1192,20 @@ class PythonPlugin(LanguagePlugin):
                             "ref_kind": "call",
                         }
                     )
+                    self._record_router_mount(
+                        node, fn_text, source_bytes, rel_path, module_name, resolver, references
+                    )
 
             # 3. Entrypoint detection
-            # 3a. Decorated functions (FastAPI, Flask, click, typer)
-            elif node.type == "decorated_definition":
+            # 3a. Decorated functions (FastAPI, Flask, click, typer). A decorator is an
+            # entrypoint only when its receiver resolves to an object created by a known
+            # framework factory; unresolvable receivers are recorded as unresolved refs.
+            elif node.type == "decorated_definition" and not is_test:
                 func_node = None
-                decorators: list[str] = []
+                decorator_nodes: list[Node] = []
                 for c in node.children:
                     if c.type == "decorator":
-                        decorators.append(_get_node_text(c, source_bytes).strip())
+                        decorator_nodes.append(c)
                     elif c.type == "function_definition":
                         func_node = c
 
@@ -659,85 +1214,55 @@ class PythonPlugin(LanguagePlugin):
                     func_name = _get_node_text(name_node, source_bytes) if name_node else ""
                     func_line = func_node.start_point[0] + 1
                     func_fqname = f"{scope}.{func_name}" if scope else func_name
+                    decorators = [_get_node_text(d, source_bytes).strip() for d in decorator_nodes]
 
-                    for dec in decorators:
-                        # FastAPI / Flask HTTP routes:
-                        # e.g. @app.get('/...'), @users_router.post(...), @auth_bp.route(...)
-                        http_match = re.match(
-                            r"@\s*([\w.]+)\s*\.\s*(get|post|put|delete|patch|options|head"
-                            r"|route|api_route)\s*\(([^)]*)\)",
-                            dec,
-                        )
-                        if http_match and (
-                            http_match.group(2) in ("route", "api_route")
-                            or _is_app_receiver(
-                                http_match.group(1), tracked_receivers, file_imports
-                            )
-                        ):
-                            method_name = http_match.group(2).upper()
-                            args_str = http_match.group(3)
-                            # Extract path
-                            path_match = re.search(r"['\"]([^'\"]+)['\"]", args_str)
-                            route_path = path_match.group(1) if path_match else "/"
-                            # Check methods=['GET', 'POST'] (or the tuple form) if .route
-                            if method_name in ("ROUTE", "API_ROUTE"):
-                                methods_match = re.search(
-                                    r"methods\s*=\s*[\[(]([^\])}]*)[\])]?", args_str
-                                )
-                                declared_methods = [
-                                    m.upper()
-                                    for m in re.findall(
-                                        r"['\"]([A-Za-z]+)['\"]",
-                                        methods_match.group(1) if methods_match else "",
-                                    )
-                                ]
-                                method_name = ",".join(declared_methods) or "GET"
-
-                            # Extract auth symbols
-                            # Auth comes from the signature only, never the body.
-                            params_node = func_node.child_by_field_name("parameters")
-                            auth_symbols = _auth_symbols_from_params(
-                                _get_node_text(params_node, source_bytes) if params_node else ""
-                            )
-                            if any("@login_required" in d for d in decorators):
-                                auth_symbols.append("login_required")
-
-                            entrypoints.append(
+                    for dec_node, dec in zip(decorator_nodes, decorators, strict=True):
+                        split = _split_decorator(dec_node, source_bytes)
+                        if split is None or split[1] not in ROUTE_LIKE_ATTRS:
+                            continue
+                        receiver, attr, call_node = split
+                        kind = resolver.receiver_kind(module_name, receiver)
+                        if kind is None:
+                            unresolved_refs.append(
                                 {
-                                    "kind": "http",
+                                    "file_path": rel_path,
+                                    "line": dec_node.start_point[0] + 1,
+                                    "raw_symbol": f"{receiver}.{attr}",
+                                    "language": "python",
+                                }
+                            )
+                            continue
+
+                        if attr in RECEIVER_ROUTE_ATTRS.get(kind, ()):
+                            add_entrypoint(
+                                self._route_entrypoint(
+                                    func_node,
+                                    call_node,
+                                    attr,
+                                    dec,
+                                    decorators,
+                                    source_bytes,
+                                    rel_path,
+                                    module_name,
+                                    func_name,
+                                    func_fqname,
+                                    resolver,
+                                    references,
+                                )
+                            )
+                        elif attr in RECEIVER_CLI_ATTRS.get(kind, ()):
+                            add_entrypoint(
+                                {
+                                    "kind": "cli",
                                     "name": func_name,
-                                    "method": method_name,
-                                    "route_or_trigger": route_path,
+                                    "method": None,
+                                    "route_or_trigger": func_name,
                                     "file_path": rel_path,
                                     "line": func_line,
                                     "symbol_fqname": func_fqname,
-                                    "auth_symbols_json": json.dumps(auth_symbols),
+                                    "auth_symbols_json": "[]",
                                 }
                             )
-
-                        # Click / Typer CLI: @click.command(), @click.group(), @cli.command()
-                        else:
-                            cli_match = re.match(r"@\s*([\w.]+)\s*\.\s*(command|group)\b", dec)
-                            if cli_match and (
-                                cli_match.group(1) == "click"
-                                or _is_app_receiver(
-                                    cli_match.group(1), tracked_receivers, file_imports
-                                )
-                            ):
-                                entrypoints.append(
-                                    {
-                                        "kind": "cli",
-                                        "name": func_name,
-                                        "method": None,
-                                        "route_or_trigger": func_name,
-                                        "file_path": rel_path,
-                                        "line": func_line,
-                                        "symbol_fqname": func_fqname,
-                                        "auth_symbols_json": "[]",
-                                    }
-                                )
-                                if cli_match.group(2) == "group":
-                                    tracked_receivers.add(func_name)
 
             # 3b. if __name__ == "__main__":
             elif node.type == "if_statement":
@@ -747,7 +1272,7 @@ class PythonPlugin(LanguagePlugin):
                         _get_node_text(cond, source_bytes).replace(" ", "").replace("'", '"')
                     )
                     if '__name__=="__main__"' in cond_text or '"__main__"==__name__' in cond_text:
-                        entrypoints.append(
+                        add_entrypoint(
                             {
                                 "kind": "main",
                                 "name": "__main__",
@@ -760,21 +1285,6 @@ class PythonPlugin(LanguagePlugin):
                             }
                         )
 
-            # 4. Framework object bindings (``app = FastAPI()``) and nested scopes
-            elif node.type == "assignment":
-                left = node.child_by_field_name("left")
-                right = node.child_by_field_name("right")
-                if (
-                    left is not None
-                    and left.type == "identifier"
-                    and right is not None
-                    and right.type == "call"
-                ):
-                    factory = right.child_by_field_name("function")
-                    factory_text = _get_node_text(factory, source_bytes).strip() if factory else ""
-                    if factory_text in APP_FACTORY_CALLEES:
-                        tracked_receivers.add(_get_node_text(left, source_bytes))
-
             elif node.type in ("function_definition", "class_definition"):
                 name_node = node.child_by_field_name("name")
                 if name_node is not None:
@@ -784,7 +1294,7 @@ class PythonPlugin(LanguagePlugin):
 
         # 3c. Argparse CLI detection
         if has_argparse:
-            entrypoints.append(
+            add_entrypoint(
                 {
                     "kind": "cli",
                     "name": Path(rel_path).stem,

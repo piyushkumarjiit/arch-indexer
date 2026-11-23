@@ -1,12 +1,12 @@
 from math import sqrt
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, security
 
 app = FastAPI()
 
 
-def get_token():
-    return "secret"
+def get_token(token: str = Depends(security.OAuth2PasswordBearer(tokenUrl="token"))):
+    return token
 
 
 @app.get("/items/{item_id}")

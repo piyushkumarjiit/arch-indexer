@@ -85,6 +85,11 @@ def test_python_flask_click_typer_argparse():
     code = b"""
 import argparse
 import click
+import typer
+from flask import Flask
+
+app = Flask(__name__)
+cli_app = typer.Typer()
 
 @app.route("/api/v1/resource", methods=["POST", "PUT"])
 def update_resource():
@@ -94,7 +99,7 @@ def update_resource():
 def cli_main():
     pass
 
-@app.command()
+@cli_app.command()
 def typer_cmd():
     pass
 
@@ -457,7 +462,12 @@ def test_api_call_url_comes_from_url_argument(tmp_path: Path):
 def test_python_route_auth_from_signature_only(tmp_path: Path):
     (tmp_path / "api.py").write_text(
         "from fastapi import Depends, FastAPI, Security\n"
+        "from fastapi.security import OAuth2PasswordBearer\n"
         "app = FastAPI()\n"
+        "scheme = OAuth2PasswordBearer(tokenUrl='token')\n"
+        "\n"
+        "def get_current_user(token=Depends(scheme)):\n"
+        "    return token\n"
         "\n"
         "@app.get('/a')\n"
         "def a(db=Depends(get_db), user=Depends(get_current_user), k=Security(scheme)):\n"
@@ -646,6 +656,10 @@ def test_python_route_methods_accept_lowercase_and_tuple_forms(tmp_path: Path):
         tmp_path,
         "app.py",
         b"""
+from flask import Flask
+
+app = Flask(__name__)
+
 @app.route("/lower", methods=['post'])
 def lower(): pass
 
@@ -809,6 +823,13 @@ def test_python_verb_decorators_require_app_receivers(tmp_path: Path):
         b"""
 from unittest import mock
 
+from fastapi import APIRouter
+from flask import Blueprint
+
+users_router = APIRouter()
+auth_bp = Blueprint("auth", __name__)
+main = Blueprint("main", __name__)
+
 @users_router.get("/users")
 def list_users(): pass
 
@@ -895,6 +916,11 @@ def test_python_click_subcommands_are_recorded(tmp_path: Path):
         tmp_path,
         "cli.py",
         b"""
+import click
+import typer
+
+users_app = typer.Typer()
+
 @click.group()
 def cli(): pass
 
@@ -974,3 +1000,137 @@ def test_typescript_mixed_default_and_namespace_import(tmp_path: Path):
     res = TypeScriptPlugin().index_unit_tier2(unit)
     calls = {r["symbol_fqname"] for r in res.references if r["ref_kind"] == "call"}
     assert calls == {"utils.main", "utils.helper"}
+
+
+ROUTES_FIXTURE = FIXTURES_DIR / "python_routes"
+
+
+def _index_routes_fixture():
+    files = sorted(ROUTES_FIXTURE.rglob("*.py"))
+    unit = IndexUnit(
+        unit_id="python:routes",
+        name="routes",
+        language="python",
+        root_dir=ROUTES_FIXTURE,
+        files=files,
+    )
+    return PythonPlugin().index_unit_tier2(unit)
+
+
+def test_python_receivers_resolve_across_files():
+    res = _index_routes_fixture()
+    http = {
+        (e["file_path"], e["line"], e["name"], e["method"], e["route_or_trigger"])
+        for e in res.entrypoints
+        if e["kind"] == "http"
+    }
+    assert http == {
+        # multi-file Flask blueprint: ``from . import auth`` then ``@auth.route``
+        ("flaskapp/views.py", 5, "login", "POST", "/login"),
+        # multi-file FastAPI router: ``from . import users`` then ``@users.get``
+        ("api/routes/views.py", 5, "list_users", "GET", "/users"),
+        # aliased import: ``import api.routes as r`` then ``@r.users.post``
+        ("api/routes/admin.py", 5, "create_user", "POST", "/users"),
+        ("api/main.py", 13, "me", "GET", "/me"),
+        ("api/main.py", 21, "admin", "GET", "/admin"),
+        ("api/main.py", 26, "services", "GET", "/services"),
+    }
+    # click group defined in one module, subcommand registered in another
+    cli = {(e["file_path"], e["name"]) for e in res.entrypoints if e["kind"] == "cli"}
+    assert cli == {("clitool/cli.py", "cli"), ("clitool/commands.py", "build")}
+
+
+def test_python_router_variables_are_symbols_with_factory():
+    res = _index_routes_fixture()
+    variables = {
+        s["fqname"]: (s["file_path"], s["start_line"], s["factory"])
+        for s in res.symbols
+        if s["kind"] == "variable"
+    }
+    assert variables["api.routes.users"] == ("api/routes/__init__.py", 3, "fastapi.APIRouter")
+    assert variables["flaskapp.auth"] == ("flaskapp/__init__.py", 3, "flask.Blueprint")
+    assert variables["api.main.app"] == ("api/main.py", 8, "fastapi.FastAPI")
+    assert variables["api.deps.oauth2_scheme"] == (
+        "api/deps.py",
+        6,
+        "fastapi.security.OAuth2PasswordBearer",
+    )
+
+
+def test_python_unresolvable_receiver_is_unresolved_not_entrypoint():
+    res = _index_routes_fixture()
+    assert not [e for e in res.entrypoints if e["file_path"] == "api/broken.py"]
+    unresolved = {(u["file_path"], u["line"], u["raw_symbol"]) for u in res.unresolved_refs}
+    assert ("api/broken.py", 1, "unknown_router.get") in unresolved
+
+
+def test_python_test_files_never_yield_entrypoints():
+    res = _index_routes_fixture()
+    # ``@mock.patch``, a real router decorator and ``__main__`` in a test helper
+    assert [e for e in res.entrypoints if e["file_path"].startswith("tests/")] == []
+    assert {f["path"]: f["is_test"] for f in res.files}["tests/helpers.py"] is True
+    assert {f["path"]: f["is_test"] for f in res.files}["api/main.py"] is False
+
+
+def test_python_mounts_are_edges_not_entrypoints():
+    res = _index_routes_fixture()
+    mounts = {
+        (r["file_path"], r["line"], r["symbol_fqname"])
+        for r in res.references
+        if r["ref_kind"] == "read"
+    }
+    assert mounts == {
+        ("api/main.py", 9, "api.routes.users"),
+        ("flaskapp/app.py", 6, "flaskapp.auth"),
+    }
+    assert not [e for e in res.entrypoints if e["file_path"] == "flaskapp/app.py"]
+
+
+def test_python_auth_is_resolved_from_security_schemes():
+    res = _index_routes_fixture()
+    eps = {e["name"]: e for e in res.entrypoints if e["file_path"] == "api/main.py"}
+    auth = {name: json.loads(e["auth_symbols_json"]) for name, e in eps.items()}
+    deps = {name: e["metadata"]["dependencies"] for name, e in eps.items()}
+    # Depends(get_user_service) is a dependency, not auth; get_current_user depends on
+    # OAuth2PasswordBearer, so it is auth; Security(...) is always auth.
+    assert auth == {"me": ["get_current_user"], "admin": ["oauth2_scheme"], "services": []}
+    # require_admin is two levels from the scheme: recorded, never guessed to be auth
+    assert deps == {
+        "me": ["get_user_service", "get_current_user"],
+        "admin": ["require_admin", "oauth2_scheme"],
+        "services": ["get_user_service"],
+    }
+    depends_on = {
+        (r["line"], r["symbol_fqname"])
+        for r in res.references
+        if r["ref_kind"] == "depends_on" and r["file_path"] == "api/main.py"
+    }
+    assert depends_on == {
+        (14, "api.deps.get_user_service"),
+        (15, "api.deps.get_current_user"),
+        (20, "api.deps.require_admin"),
+        (21, "api.deps.oauth2_scheme"),
+        (26, "api.deps.get_user_service"),
+    }
+
+
+def test_python_auth_names_alone_are_not_auth(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "api.py",
+        b"""
+from fastapi import Depends, FastAPI
+
+app = FastAPI()
+
+def get_user_token(): pass
+
+@app.get("/x")
+def x(t=Depends(get_user_token), a=Depends(verify_auth)):
+    pass
+""",
+    )
+    (ep,) = res.entrypoints
+    assert json.loads(ep["auth_symbols_json"]) == []
+    assert ep["metadata"]["dependencies"] == ["get_user_token", "verify_auth"]
