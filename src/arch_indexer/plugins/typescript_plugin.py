@@ -730,13 +730,12 @@ class TypeScriptPlugin(LanguagePlugin):
                         if route_path is not None and (http_method == "USE" or has_handler):
                             handler_name = ""
                             handler_fqname = None
-                            for c in reversed(arg_nodes[1:]):
-                                if c.type == "identifier":
-                                    handler_name = _get_node_text(c, source_bytes)
-                                    handler_fqname = file_imports.get(
-                                        handler_name, f"{module_name}.{handler_name}"
-                                    )
-                                    break
+                            last_arg = arg_nodes[-1] if arg_nodes else None
+                            if last_arg is not None and last_arg.type == "identifier":
+                                handler_name = _get_node_text(last_arg, source_bytes)
+                                handler_fqname = file_imports.get(
+                                    handler_name, f"{module_name}.{handler_name}"
+                                )
 
                             entrypoints.append(
                                 {

@@ -178,9 +178,9 @@ def _resolve_relative_module(
     return prefix or relative_module
 
 
-def _is_app_receiver(receiver: str, tracked: set[str]) -> bool:
-    """Whether a decorator receiver is a known app/router/blueprint object."""
-    if receiver in tracked:
+def _is_app_receiver(receiver: str, tracked: set[str], file_imports: dict[str, str]) -> bool:
+    """Whether a decorator receiver may be an app/router/blueprint/CLI object."""
+    if receiver in tracked or receiver in file_imports:
         return True
     return receiver.rsplit(".", 1)[-1].lower().endswith(APP_RECEIVER_SUFFIXES)
 
@@ -668,7 +668,12 @@ class PythonPlugin(LanguagePlugin):
                             r"|route|api_route)\s*\(([^)]*)\)",
                             dec,
                         )
-                        if http_match and _is_app_receiver(http_match.group(1), tracked_receivers):
+                        if http_match and (
+                            http_match.group(2) in ("route", "api_route")
+                            or _is_app_receiver(
+                                http_match.group(1), tracked_receivers, file_imports
+                            )
+                        ):
                             method_name = http_match.group(2).upper()
                             args_str = http_match.group(3)
                             # Extract path
@@ -715,7 +720,9 @@ class PythonPlugin(LanguagePlugin):
                             cli_match = re.match(r"@\s*([\w.]+)\s*\.\s*(command|group)\b", dec)
                             if cli_match and (
                                 cli_match.group(1) == "click"
-                                or _is_app_receiver(cli_match.group(1), tracked_receivers)
+                                or _is_app_receiver(
+                                    cli_match.group(1), tracked_receivers, file_imports
+                                )
                             ):
                                 entrypoints.append(
                                     {

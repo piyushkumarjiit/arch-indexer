@@ -801,16 +801,13 @@ def test_reused_definition_records_rebuild_import_map(tmp_path: Path):
     assert [u["raw_symbol"] for u in res_b.unresolved_refs] == ["utils"]
 
 
-def test_python_route_decorators_require_app_receivers(tmp_path: Path):
+def test_python_verb_decorators_require_app_receivers(tmp_path: Path):
     res = _run_single_file(
         PythonPlugin(),
         tmp_path,
         "routes.py",
         b"""
 from unittest import mock
-from flask import Flask
-
-main = Flask(__name__)
 
 @users_router.get("/users")
 def list_users(): pass
@@ -835,6 +832,37 @@ def ping(): pass
         ("index", "GET", "/"),
     }
     assert [e for e in res.entrypoints if e["kind"] == "cli"] == []
+
+
+def test_python_routes_and_commands_from_imported_modules(tmp_path: Path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        "from flask import Blueprint\n\nauth = Blueprint('auth', __name__)\n"
+    )
+    (tmp_path / "pkg" / "views.py").write_text(
+        "from . import auth\n\n@auth.route('/login', methods=['POST'])\ndef login(): pass\n"
+    )
+    (tmp_path / "pkg" / "cli.py").write_text("import click\n\n\n@click.group()\ndef cli(): pass\n")
+    (tmp_path / "pkg" / "commands.py").write_text(
+        "from .cli import cli\n\n\n@cli.command()\ndef build(): pass\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:pkg",
+        name="pkg",
+        language="python",
+        root_dir=tmp_path,
+        files=[
+            tmp_path / "pkg" / "__init__.py",
+            tmp_path / "pkg" / "views.py",
+            tmp_path / "pkg" / "cli.py",
+            tmp_path / "pkg" / "commands.py",
+        ],
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    http = {(e["name"], e["method"], e["route_or_trigger"]) for e in res.entrypoints}
+    assert ("login", "POST", "/login") in http
+    cli = {e["name"]: e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "cli"}
+    assert cli == {"cli": "cli", "build": "build"}
 
 
 def test_python_route_in_nested_scope_uses_enclosing_fqname(tmp_path: Path):
@@ -910,7 +938,10 @@ def test_typescript_route_handler_is_last_argument_and_import_resolved(tmp_path:
         "import { listUsers } from './handlers';\n"
         "const app = express();\n"
         "function requireAuth(req: any, res: any, next: any) { next(); }\n"
+        "const auth = requireAuth;\n"
         "app.get('/users', requireAuth, listUsers);\n"
+        "app.get('/inline', requireAuth, (req: any, res: any) => res.json([]));\n"
+        "app.post('/items', auth, handlers.create);\n"
     )
     unit = IndexUnit(
         unit_id="typescript:root",
@@ -920,8 +951,12 @@ def test_typescript_route_handler_is_last_argument_and_import_resolved(tmp_path:
         files=[tmp_path / "handlers.ts", tmp_path / "server.ts"],
     )
     res = TypeScriptPlugin().index_unit_tier2(unit)
-    http = [e for e in res.entrypoints if e["kind"] == "http"]
-    assert [(e["name"], e["symbol_fqname"]) for e in http] == [("listUsers", "handlers.listUsers")]
+    http = {e["route_or_trigger"]: (e["name"], e["symbol_fqname"]) for e in res.entrypoints}
+    assert http == {
+        "/users": ("listUsers", "handlers.listUsers"),
+        "/inline": ("/inline", None),
+        "/items": ("/items", None),
+    }
 
 
 def test_typescript_mixed_default_and_namespace_import(tmp_path: Path):
