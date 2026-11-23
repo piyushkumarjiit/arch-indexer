@@ -372,9 +372,16 @@
 
     const passesLeaf = (node) => leafPassesFilters(node, activeFilters);
 
+    const filtersActive = Boolean(
+      (activeFilters.modules && activeFilters.modules.size > 0) ||
+        (activeFilters.kinds && activeFilters.kinds.size > 0) ||
+        (activeFilters.tiers && activeFilters.tiers.size > 0)
+    );
+
     const passingLeafCache = new Map();
     function hasPassingLeaf(node) {
       if (!node) return false;
+      if (!filtersActive) return true;
       if (passingLeafCache.has(node.id)) return passingLeafCache.get(node.id);
       let result;
       if (

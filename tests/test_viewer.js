@@ -446,6 +446,35 @@ function runTests() {
   );
   state.filters.kinds.clear();
 
+  // 8c. Unfiltered views must show every declared module, including leafless ones
+  console.log("Checking unfiltered views keep declared modules without flow nodes...");
+  const leaflessGraph = JSON.parse(JSON.stringify(graph));
+  leaflessGraph.modules.push({
+    id: "mod:utils",
+    name: "utils",
+    language: "python",
+    path: "src/utils",
+    file_count: 8,
+    tier: "scip",
+  });
+  const leaflessHierarchy = buildHierarchy(leaflessGraph);
+  const unfilteredScope = getHierarchyScope(leaflessHierarchy, "system", "system", {
+    modules: new Set(),
+    kinds: new Set(),
+    tiers: new Set(),
+  });
+  const unfilteredIds = new Set(unfilteredScope.nodes.map((n) => n.id));
+  for (const childId of leaflessHierarchy.systemNode.children) {
+    assert(
+      unfilteredIds.has(childId),
+      `An unfiltered system view must show the declared entry ${childId}`
+    );
+  }
+  assert(
+    unfilteredIds.has("mod:utils"),
+    "A declared module with no flow nodes must stay visible when no filters are active"
+  );
+
   // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
   console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
   const pythonExe = process.env.ARCH_VIEWER_PYTHON || "python3";
