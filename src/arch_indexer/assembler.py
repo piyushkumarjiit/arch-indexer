@@ -243,6 +243,28 @@ def _retain_canonical_heading(existing: str, new_content: str) -> str:
     return f"{heading}\n\n{new_content}"
 
 
+def _retain_auto_diagram_slots(existing: str, new_content: str) -> str:
+    """Carry over AUTO-DIAGRAM slots owned by the document that the draft omits."""
+    draft_slot_ids = {m.group("id").strip() for m in AUTO_DIAGRAM_SLOT_RE.finditer(new_content)}
+    retained = [
+        m.group(0).strip()
+        for m in AUTO_DIAGRAM_SLOT_RE.finditer(existing)
+        if m.group("id").strip() not in draft_slot_ids
+    ]
+    if not retained:
+        return new_content
+    blocks = "\n\n".join(retained)
+    lines = _split_lines(new_content)
+    insert_at = 0
+    for idx, line in enumerate(lines):
+        if line.strip():
+            insert_at = idx + 1 if HEADING_RE.match(line.strip()) else 0
+            break
+    head = "\n".join(lines[:insert_at]).strip()
+    tail = "\n".join(lines[insert_at:]).strip()
+    return "\n\n".join(part for part in (head, blocks, tail) if part)
+
+
 def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
     """Patch a single section in document text between its START and END markers."""
     clean_new = new_content.strip()
@@ -267,9 +289,9 @@ def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
         )
         end_match = end_marker.search(doc_text, start_match.end())
         if end_match:
-            clean_new = _retain_canonical_heading(
-                doc_text[start_match.end() : end_match.start()], clean_new
-            )
+            existing_section = doc_text[start_match.end() : end_match.start()]
+            clean_new = _retain_canonical_heading(existing_section, clean_new)
+            clean_new = _retain_auto_diagram_slots(existing_section, clean_new)
             # Preserve start marker and end marker
             before = doc_text[: start_match.end()]
             after = doc_text[end_match.start() :]

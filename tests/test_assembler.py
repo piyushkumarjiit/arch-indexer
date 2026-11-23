@@ -743,3 +743,46 @@ def test_assemble_deletes_only_consumed_draft_files(tmp_path):
     assert not draft.exists()
     assert notes.is_file()
     assert drafts.is_dir()
+
+
+def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):
+    """Prose drafts must not delete the AUTO-DIAGRAM slots owned by the document."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text(
+        "def overview():\n    pass\n\ndef flow():\n    pass\n", encoding="utf-8"
+    )
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "flow.md").write_text(
+        "---\n"
+        "packet_id: flow\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec1, design-sec3]\n"
+        "---\n"
+        "<!-- SECTION:design-sec1:START -->\n"
+        "The system is one module[^1].\n"
+        "<!-- SECTION:design-sec1:END -->\n\n"
+        "<!-- SECTION:design-sec3:START -->\n"
+        "Control flows from the entrypoint to the worker[^2].\n"
+        "<!-- SECTION:design-sec3:END -->\n\n"
+        "[^1]: `src/app.py:1` — `overview`\n"
+        "[^2]: `src/app.py:4` — `flow`\n",
+        encoding="utf-8",
+    )
+
+    diagrams_file = tmp_path / "diagrams.json"
+    diagrams_file.write_text(
+        json.dumps({"flow-overview": "flowchart TD\n  Entry --> Worker"}), encoding="utf-8"
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", diagrams=diagrams_file)
+    assert code == 0
+
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "The system is one module[^1]." in content
+    assert "Control flows from the entrypoint to the worker[^2]." in content
+    assert "Entry --> Worker" in content
+    assert "Module Overview" in content
