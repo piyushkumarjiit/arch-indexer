@@ -78,6 +78,9 @@ FASTAPI_SECURITY_SCHEMES = frozenset(
 )
 DEPENDENCY_MARKERS = frozenset({"Depends", "Security"})
 MAX_RESOLVE_DEPTH = 8
+# How far ``Depends``/``Security`` chains are followed when deciding whether a route is
+# auth-guarded (``get_current_active_user -> get_current_user -> oauth2_scheme``).
+MAX_AUTH_DEPTH = 5
 
 TEST_DIR_NAMES = frozenset({"test", "tests"})
 
@@ -273,12 +276,49 @@ def _dependency_calls(node: Node | None, source_bytes: bytes) -> list[tuple[str,
     return found
 
 
+def _annotation_names(params: Node | None, source_bytes: bytes) -> list[tuple[str, Node]]:
+    """Names used in parameter type annotations (``user: CurrentUser`` -> ``CurrentUser``).
+
+    ``Depends(...)``/``Security(...)`` calls inside annotations are skipped; they are
+    found by :func:`_dependency_calls`.
+    """
+    names: list[tuple[str, Node]] = []
+    if params is None:
+        return names
+    for param in params.named_children:
+        if param.type not in ("typed_parameter", "typed_default_parameter"):
+            continue
+        type_node = param.child_by_field_name("type")
+        stack = [type_node] if type_node is not None else []
+        while stack:
+            current = stack.pop()
+            if current.type in ("identifier", "attribute"):
+                text = re.sub(r"\s+", "", _get_node_text(current, source_bytes))
+                names.append((text, current))
+            elif current.type != "call":
+                stack.extend(reversed(current.named_children))
+    names.sort(key=lambda item: item[1].start_byte)
+    return names
+
+
+def _function_dependencies(
+    func_node: Node, source_bytes: bytes
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """A function's signature ``(marker, dependency)`` pairs and annotation names."""
+    params = func_node.child_by_field_name("parameters")
+    direct = [(marker, text) for marker, text, _ in _dependency_calls(params, source_bytes) if text]
+    return direct, [name for name, _ in _annotation_names(params, source_bytes)]
+
+
 @dataclass
 class _FunctionFacts:
     """Module-level function facts used for receiver and auth resolution."""
 
     decorators: list[tuple[str, str]] = field(default_factory=list)
-    dependencies: list[str] = field(default_factory=list)
+    # ``(marker, dependency_text)`` for each signature ``Depends``/``Security`` call
+    dependencies: list[tuple[str, str]] = field(default_factory=list)
+    # names used in parameter annotations; may be ``Annotated`` dependency aliases
+    annotations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -296,6 +336,8 @@ class _ModuleFacts:
     # ``name = callee(...)`` in any scope (covers app factories such as ``create_app``)
     scoped_calls: dict[str, str] = field(default_factory=dict)
     functions: dict[str, _FunctionFacts] = field(default_factory=dict)
+    # module-level ``Alias = Annotated[T, Depends(x)]`` -> ``(marker, dependency_text)``
+    aliases: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # every other module-level definition (classes)
     other_names: set[str] = field(default_factory=set)
 
@@ -385,6 +427,15 @@ def _gather_module_facts(
                 name, _, callee = assigned
                 if module_level:
                     facts.variables.setdefault(name, callee)
+                    right = node.child_by_field_name("right")
+                    if right is not None and right.type == "subscript":
+                        deps = [
+                            (marker, text)
+                            for marker, text, _ in _dependency_calls(right, source_bytes)
+                            if text
+                        ]
+                        if deps:
+                            facts.aliases.setdefault(name, deps)
                 if callee is not None:
                     facts.scoped_calls.setdefault(name, callee)
         elif node.type == "function_definition" and module_level:
@@ -398,10 +449,7 @@ def _gather_module_facts(
                             split = _split_decorator(dec, source_bytes)
                             if split is not None:
                                 ffacts.decorators.append((split[0], split[1]))
-                params = node.child_by_field_name("parameters")
-                ffacts.dependencies = [
-                    text for _, text, _ in _dependency_calls(params, source_bytes) if text
-                ]
+                ffacts.dependencies, ffacts.annotations = _function_dependencies(node, source_bytes)
                 facts.functions.setdefault(_get_node_text(name_node, source_bytes), ffacts)
         elif node.type == "class_definition" and module_level:
             name_node = node.child_by_field_name("name")
@@ -544,19 +592,55 @@ class _Resolver:
         callee = facts.variables.get(target[2]) if facts is not None else None
         return bool(callee) and self._is_scheme_class(self.resolve(target[1], callee or ""))
 
-    def is_auth_dependency(self, module: str, text: str) -> bool:
+    def alias_dependencies(self, module: str, name: str) -> list[tuple[str, str, str]]:
+        """``(marker, dependency_text, alias_module)`` for an ``Annotated`` alias name."""
+        target = self.resolve(module, name)
+        if target is None or target[0] != "internal":
+            return []
+        facts = self.facts(target[1])
+        deps = facts.aliases.get(target[2], []) if facts is not None else []
+        return [(marker, text, target[1]) for marker, text in deps]
+
+    def function_dependencies(
+        self, module: str, function: _FunctionFacts
+    ) -> list[tuple[str, str, str]]:
+        """``(marker, dependency_text, module_to_resolve_in)`` for a function's
+        signature, including dependencies declared through ``Annotated`` aliases."""
+        found = [(marker, text, module) for marker, text in function.dependencies]
+        for name in function.annotations:
+            found.extend(self.alias_dependencies(module, name))
+        return found
+
+    def is_auth_dependency(
+        self,
+        module: str,
+        text: str,
+        depth: int = 0,
+        path: frozenset[tuple[str, str]] = frozenset(),
+    ) -> bool:
         """``Depends(x)`` is auth when ``x`` is a security scheme, or a function whose
-        own parameters depend on one (one level deep)."""
+        ``Depends``/``Security`` chain reaches one (or a ``Security(...)``) within
+        ``MAX_AUTH_DEPTH`` hops. Names are never used as evidence."""
         if self.is_security_scheme(module, text):
             return True
+        if depth >= MAX_AUTH_DEPTH:
+            return False
         target = self.resolve(module, text)
         if target is None or target[0] != "internal":
+            return False
+        # ``path`` holds the functions on the current chain only, so a cycle stops but a
+        # function first reached through a longer (depth-cut) chain is still explored.
+        key = (target[1], target[2])
+        if key in path:
             return False
         facts = self.facts(target[1])
         function = facts.functions.get(target[2]) if facts is not None else None
         if function is None:
             return False
-        return any(self.is_security_scheme(target[1], dep) for dep in function.dependencies)
+        return any(
+            marker == "Security" or self.is_auth_dependency(where, dep, depth + 1, path | {key})
+            for marker, dep, where in self.function_dependencies(target[1], function)
+        )
 
     @staticmethod
     def fqname(target: _Target | None, fallback: str) -> str:
@@ -667,9 +751,7 @@ class PythonPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            module_name, importable, is_package, project = _module_info(
-                repo_root, rel_path, self._root_cache
-            )
+            module_name, _, _, _ = _module_info(repo_root, rel_path, self._root_cache)
 
             file_records.append(
                 {
@@ -680,9 +762,6 @@ class PythonPlugin(LanguagePlugin):
                     "module": module_name,
                     "tier": IndexingTier.TIER2.value,
                     "fallback_reason": "tool_unavailable",
-                    # In-memory tag (no files column for it in SPEC 4.5): test code
-                    # never yields entrypoints.
-                    "is_test": _is_test_path(rel_path),
                 }
             )
 
@@ -690,11 +769,8 @@ class PythonPlugin(LanguagePlugin):
             self._collect_definitions(
                 tree.root_node, source_bytes, rel_path, module_name, symbol_records
             )
-            facts = _gather_module_facts(
-                tree.root_node, source_bytes, module_name, importable, is_package, project
-            )
             self._collect_variables(
-                tree.root_node, source_bytes, rel_path, module_name, facts, symbol_records
+                tree.root_node, source_bytes, rel_path, module_name, symbol_records
             )
 
         return file_records, symbol_records
@@ -705,14 +781,11 @@ class PythonPlugin(LanguagePlugin):
         source_bytes: bytes,
         rel_path: str,
         module_name: str,
-        facts: _ModuleFacts,
         symbols: list[dict[str, Any]],
     ) -> None:
         """Record module-level ``name = callee(...)`` assignments as ``variable`` symbols.
 
-        Plain value assignments (constants) are not symbols. Each record carries
-        ``factory``: the assigned call's callee expanded through the module's imports
-        (``users = APIRouter()`` -> ``fastapi.APIRouter``).
+        Plain value assignments (constants) are not symbols.
         """
         seen: set[str] = set()
         stack = [root]
@@ -723,16 +796,8 @@ class PythonPlugin(LanguagePlugin):
             if node.type == "assignment":
                 assigned = _assignment_call(node, source_bytes)
                 if assigned is not None and assigned[2] and assigned[0] not in seen:
-                    name, line, callee = assigned
+                    name, line, _ = assigned
                     seen.add(name)
-                    head, _, rest = callee.partition(".")
-                    bound = facts.bindings.get(head)
-                    if bound is not None:
-                        factory = f"{bound}.{rest}" if rest else bound
-                    elif head in facts.variables or head in facts.functions:
-                        factory = f"{module_name}.{callee}" if module_name else callee
-                    else:
-                        factory = callee
                     symbols.append(
                         {
                             "fqname": f"{module_name}.{name}" if module_name else name,
@@ -746,7 +811,6 @@ class PythonPlugin(LanguagePlugin):
                             ).hexdigest(),
                             "visibility": "private" if name.startswith("_") else "public",
                             "decorators_json": "[]",
-                            "factory": factory,
                         }
                     )
                 continue
@@ -964,31 +1028,38 @@ class PythonPlugin(LanguagePlugin):
             ]
             method_name = ",".join(declared) or "GET"
 
-        # Dependencies come from the decorator (``dependencies=[...]``) and the signature,
-        # never the body. Auth is resolved, never guessed from names.
-        dependencies: list[str] = []
+        # Dependencies come from the decorator (``dependencies=[...]``) and the signature
+        # (including ``Annotated`` aliases), never the body. Each is persisted as a
+        # ``call`` reference (FastAPI calls it); auth is resolved, never guessed from names.
         auth_symbols: list[str] = []
         params = func_node.child_by_field_name("parameters")
-        found = _dependency_calls(call_node, source_bytes) + _dependency_calls(params, source_bytes)
-        for marker, text, dep_call in found:
-            if not text:
-                continue
-            dependencies.append(text)
-            symbol_fqname = resolver.fqname(resolver.resolve(module_name, text), text)
-            ref_key = (dep_call.start_point[0], dep_call.start_point[1], symbol_fqname)
+        found: list[tuple[str, str, str, Node]] = [
+            (marker, text, module_name, node)
+            for marker, text, node in _dependency_calls(call_node, source_bytes)
+            + _dependency_calls(params, source_bytes)
+            if text
+        ]
+        for name, name_node in _annotation_names(params, source_bytes):
+            found.extend(
+                (marker, text, where, name_node)
+                for marker, text, where in resolver.alias_dependencies(module_name, name)
+            )
+        for marker, text, where, anchor in found:
+            symbol_fqname = resolver.fqname(resolver.resolve(where, text), text)
+            ref_key = (anchor.start_point[0], anchor.start_point[1], symbol_fqname)
             if ref_key not in dependency_refs:
                 dependency_refs.add(ref_key)
                 references.append(
                     {
                         "symbol_fqname": symbol_fqname,
                         "file_path": rel_path,
-                        "line": dep_call.start_point[0] + 1,
-                        "col": dep_call.start_point[1],
-                        "ref_kind": "depends_on",
+                        "line": anchor.start_point[0] + 1,
+                        "col": anchor.start_point[1],
+                        "ref_kind": "call",
                     }
                 )
             if (
-                marker == "Security" or resolver.is_auth_dependency(module_name, text)
+                marker == "Security" or resolver.is_auth_dependency(where, text)
             ) and text not in auth_symbols:
                 auth_symbols.append(text)
         if any(d.startswith("@login_required") for d in decorators):
@@ -1003,9 +1074,6 @@ class PythonPlugin(LanguagePlugin):
             "line": func_node.start_point[0] + 1,
             "symbol_fqname": func_fqname,
             "auth_symbols_json": json.dumps(auth_symbols),
-            # In-memory metadata (SPEC 4.5 has no column); dependencies are also
-            # persisted as ``depends_on`` references at each Depends/Security call.
-            "metadata": {"dependencies": dependencies},
         }
 
     def _record_router_mount(

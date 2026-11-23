@@ -914,10 +914,8 @@ def home(db=Depends(get_db)):
     )
     http = {e["route_or_trigger"]: e for e in res.entrypoints if e["kind"] == "http"}
     assert set(http) == {"/", "/home"}
-    assert all(e["metadata"]["dependencies"] == ["get_db"] for e in http.values())
-    depends_on = [r for r in res.references if r["ref_kind"] == "depends_on"]
-    assert len(depends_on) == 1
-    assert depends_on[0]["symbol_fqname"] == "app.get_db"
+    dependency_calls = [r for r in res.references if r["symbol_fqname"] == "app.get_db"]
+    assert [(r["ref_kind"], r["line"], r["col"]) for r in dependency_calls] == [("call", 13, 12)]
 
 
 def test_python_routes_and_commands_from_imported_modules(tmp_path: Path):
@@ -1105,21 +1103,19 @@ def test_python_receivers_resolve_across_files():
     assert cli == {("clitool/cli.py", "cli"), ("clitool/commands.py", "build")}
 
 
-def test_python_router_variables_are_symbols_with_factory():
+def test_python_router_variables_are_symbols():
     res = _index_routes_fixture()
     variables = {
-        s["fqname"]: (s["file_path"], s["start_line"], s["factory"])
+        s["fqname"]: (s["file_path"], s["start_line"], s["end_line"])
         for s in res.symbols
         if s["kind"] == "variable"
     }
-    assert variables["api.routes.users"] == ("api/routes/__init__.py", 3, "fastapi.APIRouter")
-    assert variables["flaskapp.auth"] == ("flaskapp/__init__.py", 3, "flask.Blueprint")
-    assert variables["api.main.app"] == ("api/main.py", 8, "fastapi.FastAPI")
-    assert variables["api.deps.oauth2_scheme"] == (
-        "api/deps.py",
-        6,
-        "fastapi.security.OAuth2PasswordBearer",
-    )
+    assert variables["api.routes.users"] == ("api/routes/__init__.py", 3, 3)
+    assert variables["flaskapp.auth"] == ("flaskapp/__init__.py", 3, 3)
+    assert variables["api.main.app"] == ("api/main.py", 8, 8)
+    assert variables["api.deps.oauth2_scheme"] == ("api/deps.py", 6, 6)
+    # only persisted symbol columns are produced
+    assert all("factory" not in s for s in res.symbols)
 
 
 def test_python_unresolvable_receiver_is_unresolved_not_entrypoint():
@@ -1133,8 +1129,11 @@ def test_python_test_files_never_yield_entrypoints():
     res = _index_routes_fixture()
     # ``@mock.patch``, a real router decorator and ``__main__`` in a test helper
     assert [e for e in res.entrypoints if e["file_path"].startswith("tests/")] == []
-    assert {f["path"]: f["is_test"] for f in res.files}["tests/helpers.py"] is True
-    assert {f["path"]: f["is_test"] for f in res.files}["api/main.py"] is False
+    # the same router decorator outside tests/ is an entrypoint
+    assert ("api/routes/views.py", "/users") in {
+        (e["file_path"], e["route_or_trigger"]) for e in res.entrypoints
+    }
+    assert all("is_test" not in f for f in res.files)
 
 
 def test_python_mounts_are_edges_not_entrypoints():
@@ -1155,22 +1154,24 @@ def test_python_auth_is_resolved_from_security_schemes():
     res = _index_routes_fixture()
     eps = {e["name"]: e for e in res.entrypoints if e["file_path"] == "api/main.py"}
     auth = {name: json.loads(e["auth_symbols_json"]) for name, e in eps.items()}
-    deps = {name: e["metadata"]["dependencies"] for name, e in eps.items()}
     # Depends(get_user_service) is a dependency, not auth; get_current_user depends on
-    # OAuth2PasswordBearer, so it is auth; Security(...) is always auth.
-    assert auth == {"me": ["get_current_user"], "admin": ["oauth2_scheme"], "services": []}
-    # require_admin is two levels from the scheme: recorded, never guessed to be auth
-    assert deps == {
-        "me": ["get_user_service", "get_current_user"],
+    # OAuth2PasswordBearer, so it is auth; require_admin reaches the scheme through
+    # get_current_user (two hops); Security(...) is always auth.
+    assert auth == {
+        "me": ["get_current_user"],
         "admin": ["require_admin", "oauth2_scheme"],
-        "services": ["get_user_service"],
+        "services": [],
     }
-    depends_on = {
+    assert all("metadata" not in e for e in res.entrypoints)
+    dependency_calls = {
         (r["line"], r["symbol_fqname"])
         for r in res.references
-        if r["ref_kind"] == "depends_on" and r["file_path"] == "api/main.py"
+        if r["ref_kind"] == "call"
+        and r["file_path"] == "api/main.py"
+        and r["symbol_fqname"].startswith("api.deps.")
     }
-    assert depends_on == {
+    assert not [r for r in res.references if r["ref_kind"] not in {"call", "import", "read"}]
+    assert dependency_calls == {
         (14, "api.deps.get_user_service"),
         (15, "api.deps.get_current_user"),
         (20, "api.deps.require_admin"),
@@ -1198,4 +1199,132 @@ def x(t=Depends(get_user_token), a=Depends(verify_auth)):
     )
     (ep,) = res.entrypoints
     assert json.loads(ep["auth_symbols_json"]) == []
-    assert ep["metadata"]["dependencies"] == ["get_user_token", "verify_auth"]
+    assert {
+        (r["line"], r["symbol_fqname"])
+        for r in res.references
+        if r["ref_kind"] == "call" and r["symbol_fqname"] in {"api.get_user_token", "verify_auth"}
+    } == {(9, "api.get_user_token"), (9, "verify_auth")}
+
+
+def test_python_auth_follows_transitive_dependency_chains(tmp_path: Path):
+    # FastAPI tutorial chain: get_current_active_user -> get_current_user -> oauth2_scheme
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "security.py").write_text(
+        "from typing import Annotated\n"
+        "\n"
+        "from fastapi import Depends\n"
+        "from fastapi.security import OAuth2PasswordBearer\n"
+        "\n"
+        "oauth2_scheme = OAuth2PasswordBearer(tokenUrl='token')\n"
+        "\n"
+        "\n"
+        "def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):\n"
+        "    return token\n"
+        "\n"
+        "\n"
+        "def get_current_active_user(user=Depends(get_current_user)):\n"
+        "    return user\n"
+        "\n"
+        "\n"
+        "CurrentUser = Annotated[str, Depends(get_current_active_user)]\n"
+        "\n"
+        "\n"
+        "def get_settings():\n"
+        "    return {}\n"
+        "\n"
+        "\n"
+        "def get_db(settings=Depends(get_settings)):\n"
+        "    return settings\n"
+        "\n"
+        "\n"
+        "def loop_a(b=Depends('loop_b')):\n"
+        "    return b\n"
+    )
+    (tmp_path / "app" / "main.py").write_text(
+        "from typing import Annotated\n"
+        "\n"
+        "from fastapi import Depends, FastAPI\n"
+        "\n"
+        "from app.security import CurrentUser, get_current_active_user, get_db\n"
+        "\n"
+        "app = FastAPI()\n"
+        "\n"
+        "\n"
+        "@app.get('/me')\n"
+        "def me(user: Annotated[str, Depends(get_current_active_user)]):\n"
+        "    return user\n"
+        "\n"
+        "\n"
+        "@app.get('/alias')\n"
+        "def alias(user: CurrentUser):\n"
+        "    return user\n"
+        "\n"
+        "\n"
+        "@app.get('/items')\n"
+        "def items(db=Depends(get_db)):\n"
+        "    return db\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:app",
+        name="app",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted((tmp_path / "app").glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth == {
+        "me": ["get_current_active_user"],
+        "alias": ["get_current_active_user"],
+        # get_db -> get_settings never reaches a security scheme
+        "items": [],
+    }
+    calls = {
+        (r["line"], r["col"], r["symbol_fqname"])
+        for r in res.references
+        if r["ref_kind"] == "call" and r["file_path"] == "app/main.py"
+    }
+    assert {
+        (11, 28, "app.security.get_current_active_user"),
+        # alias dependency anchored at the annotation in the route's signature
+        (16, 16, "app.security.get_current_active_user"),
+        (21, 13, "app.security.get_db"),
+    } <= calls
+
+
+def test_python_auth_chain_is_depth_limited_and_cycle_safe(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "api.py",
+        b"""
+from fastapi import Depends, FastAPI
+from fastapi.security import HTTPBearer
+
+app = FastAPI()
+scheme = HTTPBearer()
+
+def d6(t=Depends(scheme)): pass
+def d5(x=Depends(d6)): pass
+def d4(x=Depends(d5)): pass
+def d3(x=Depends(d4)): pass
+def d2(x=Depends(d3)): pass
+def d1(x=Depends(d2)): pass
+
+def ping(x=Depends(pong)): pass
+def pong(x=Depends(ping)): pass
+
+@app.get("/near")
+def near(x=Depends(d2)): pass
+
+@app.get("/far")
+def far(x=Depends(d1)): pass
+
+@app.get("/cycle")
+def cycle(x=Depends(ping)): pass
+""",
+    )
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    # d2 reaches the scheme in 5 hops (d2..d6 -> scheme); d1 needs 6
+    assert auth == {"near": ["d2"], "far": [], "cycle": []}
