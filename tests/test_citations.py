@@ -12,6 +12,7 @@ from arch_indexer.checks.citations import (
     CODE_LINE_OUT_OF_RANGE,
     CODE_MISSING_FILE,
     CODE_SYMBOL_MISMATCH,
+    CODE_UNCITED_SECTION,
     check_citations,
     run_check_citations,
 )
@@ -584,3 +585,124 @@ def test_check_citations_file_flag(tmp_path):
     assert code == 0
     # Canonical docs were skipped without failing
     assert "DESIGN.md" not in out.getvalue()
+
+
+def test_uncited_technical_section_in_design_md(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "This section describes technical components without any footnote citations.\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-references:START:exempt -->\n"
+        "## References\n\n"
+        "<!-- SECTION:design-references:END -->\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert len(errors) == 1
+    assert errors[0].code == CODE_UNCITED_SECTION
+    assert errors[0].footnote_id == "design-sec2"
+    assert "design-sec2" in errors[0].format_line()
+
+
+def test_exempt_section_not_flagged_for_uncited_section(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "<!-- SECTION:design-sec1:START:exempt -->\n"
+        "## 1. Architecture Overview\n\n"
+        "High level architecture overview prose with no citations.\n"
+        "<!-- SECTION:design-sec1:END -->\n\n"
+        "<!-- SECTION:design-references:START:exempt -->\n"
+        "## References\n\n"
+        "<!-- SECTION:design-references:END -->\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []
+
+
+def test_exempt_space_syntax_not_flagged(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "<!-- SECTION:design-sec1:START exempt -->\n"
+        "## 1. Architecture Overview\n\n"
+        "Overview text without citations.\n"
+        "<!-- SECTION:design-sec1:END -->\n\n"
+        "<!-- SECTION:design-references:START exempt -->\n"
+        "## References\n\n"
+        "<!-- SECTION:design-references:END -->\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []
+
+
+def test_empty_or_heading_only_technical_section_not_flagged(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "<!-- Content will be populated by worker drafts -->\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-references:START:exempt -->\n"
+        "## References\n\n"
+        "<!-- SECTION:design-references:END -->\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []
+
+
+def test_cited_technical_section_passes(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "The application runs cleanly[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-references:START:exempt -->\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `run`\n"
+        "<!-- SECTION:design-references:END -->\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo)
+    assert errors == []

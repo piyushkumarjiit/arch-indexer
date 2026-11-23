@@ -5,6 +5,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
+from arch_indexer.assembler import run_assemble
 from arch_indexer.checks.citations import run_check_citations
 from arch_indexer.checks.mermaid import run_check_mermaid
 from arch_indexer.config import (
@@ -203,6 +204,11 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_parser.add_argument(
         "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
     )
+    assemble_parser.add_argument(
+        "--diagrams",
+        default=None,
+        help="Path to JSON file containing diagram id -> mermaid text mapping",
+    )
     assemble_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 6. check-citations
@@ -294,6 +300,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error during indexing: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "assemble":
+        try:
+            return run_assemble(
+                repo=args.repo,
+                drafts_dir=args.drafts_dir,
+                docs_dir=args.docs_dir,
+                diagrams=args.diagrams,
+                cache_dir=args.cache_dir,
+            )
+        except Exception as e:
+            sys.stderr.write(f"Error assembling documentation: {e}\n")
             return EXIT_ERROR
 
     elif args.command == "check-citations":

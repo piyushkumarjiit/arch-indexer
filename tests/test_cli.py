@@ -243,10 +243,6 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
             ],
             "plan",
         ),
-        (
-            ["assemble", "some/repo", "--drafts-dir", "drafts", "--docs-dir", "docs"],
-            "assemble",
-        ),
     ],
 )
 def test_not_implemented_commands_exit_error(cmd_args, expected_cmd, capsys):
@@ -277,6 +273,15 @@ def test_cli_check_citations_dispatch(tmp_path):
     draft.write_text("Hello [^1].\n\n[^1]: `app.py:1` — `hello`\n", encoding="utf-8")
     code_draft = main(["check-citations", str(repo), "--file", "docs/draft.md"])
     assert code_draft == 0
+
+
+def test_cli_assemble_dispatch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    code = main(["assemble", str(repo), "--drafts-dir", "docs/.drafts"])
+    assert code == 1
 
 
 def test_cli_check_citations_multiple_files(tmp_path):

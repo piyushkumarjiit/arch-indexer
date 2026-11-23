@@ -401,6 +401,18 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
   - `draft_output_path`: `docs/.drafts/<packet_id>.md` (guaranteed unique per worker)
   - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context)
 
+> [!NOTE] Amendment: Draft File Front-Matter Format
+> Each worker draft written to `docs/.drafts/<packet_id>.md` must begin with a YAML front-matter header bounded by `---` declaring its target document and assigned section identifiers:
+> ```yaml
+> ---
+> packet_id: <packet_id>
+> target_doc: DESIGN.md  # or USER_GUIDE.md
+> section_ids:
+>   - design-sec2
+> ---
+> ```
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly.
+
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:
 
