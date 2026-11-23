@@ -20,6 +20,66 @@ from arch_indexer.toolchain import (
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+NODE_MANIFEST = {
+    "tools": {
+        "scip-python": {
+            "package": "@sourcegraph/scip-python",
+            "version": "0.6.8",
+            "install_type": "npm",
+        },
+        "scip-typescript": {
+            "package": "@sourcegraph/scip-typescript",
+            "version": "0.6.2",
+            "install_type": "npm",
+        },
+    }
+}
+
+
+def _fake_npm_install(cmd):
+    """Model npm >= 7 prefix installs: unrecorded packages are pruned on the next install."""
+    prefix = Path(cmd[cmd.index("--prefix") + 1])
+    no_save = "--no-save" in cmd
+    targets = [a for a in cmd[cmd.index("--prefix") + 2 :] if not a.startswith("-")]
+
+    pkg_json = prefix / "package.json"
+    recorded = {}
+    if pkg_json.is_file():
+        recorded = json.loads(pkg_json.read_text()).get("dependencies", {})
+
+    requested = {}
+    for target in targets:
+        name, _, version = target.rpartition("@")
+        requested[name] = version
+
+    scope_dir = prefix / "node_modules" / "@sourcegraph"
+    bin_dir = prefix / "node_modules" / ".bin"
+    present = (
+        {f"@sourcegraph/{p.name}" for p in scope_dir.iterdir()} if scope_dir.is_dir() else set()
+    )
+    keep = set(recorded) | set(requested)
+    for stale in present - keep:
+        name = stale.split("/")[-1]
+        shutil.rmtree(scope_dir / name)
+        (bin_dir / name).unlink(missing_ok=True)
+
+    for name, version in requested.items():
+        pkg_dir = scope_dir / name.split("/")[-1]
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        (pkg_dir / "package.json").write_text(json.dumps({"name": name, "version": version}))
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / name.split("/")[-1]).write_text("#!/bin/sh\n")
+
+    if not no_save:
+        pkg_json.write_text(json.dumps({"dependencies": recorded | requested}))
+
+
+def _fake_subprocess_run(cmd, *args, **kwargs):
+    if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
+        _fake_npm_install(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
+    return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
 
 def test_manifest_loading():
     manifest = load_toolchain_manifest()
@@ -236,39 +296,6 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
         }
     }
 
-    def fake_subprocess_run(cmd, *args, **kwargs):
-        # Model npm >= 7 prefix installs: unrecorded packages are pruned on the next install.
-        if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
-            prefix = Path(cmd[cmd.index("--prefix") + 1])
-            no_save = "--no-save" in cmd
-            targets = [a for a in cmd[cmd.index("--prefix") + 2 :] if not a.startswith("-")]
-
-            pkg_json = prefix / "package.json"
-            recorded = {}
-            if pkg_json.is_file():
-                recorded = json.loads(pkg_json.read_text()).get("dependencies", {})
-
-            requested = {}
-            for target in targets:
-                name, _, version = target.rpartition("@")
-                requested[name] = version
-
-            scope_dir = prefix / "node_modules" / "@sourcegraph"
-            present = {p.name for p in scope_dir.iterdir()} if scope_dir.is_dir() else set()
-            keep = set(recorded) | set(requested)
-            for stale in present - keep:
-                shutil.rmtree(scope_dir / stale)
-
-            if not no_save:
-                pkg_json.write_text(json.dumps({"dependencies": recorded | requested}))
-
-            bin_dir = prefix / "node_modules" / ".bin"
-            bin_dir.mkdir(parents=True, exist_ok=True)
-            for name in requested:
-                (bin_dir / name.split("/")[-1]).write_text("#!/bin/sh\n")
-            return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
     mock_resp = MagicMock()
     mock_resp.read.side_effect = [fake_jar_bytes, b""]
     mock_resp.__enter__.return_value = io.BytesIO(fake_jar_bytes)
@@ -276,7 +303,7 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
-        patch("subprocess.run", side_effect=fake_subprocess_run),
+        patch("subprocess.run", side_effect=_fake_subprocess_run),
         patch("shutil.which", return_value="/usr/bin/npm"),
         patch("urllib.request.urlopen", return_value=mock_resp.__enter__.return_value),
     ):
@@ -291,11 +318,6 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
         bin_dir = cache / "tools" / "node" / "node_modules" / ".bin"
         assert (bin_dir / "scip-python").is_file()
         assert (bin_dir / "scip-typescript").is_file()
-        node_pkg = json.loads((cache / "tools" / "node" / "package.json").read_text())
-        assert node_pkg["dependencies"] == {
-            "@sourcegraph/scip-python": "0.6.8",
-            "@sourcegraph/scip-typescript": "0.6.2",
-        }
 
         # Verify manifest.lock.json was created
         lock_path = cache / "tools" / "manifest.lock.json"
@@ -312,6 +334,22 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
         assert "scip-python" in res2["skipped"]
         assert "scip-typescript" in res2["skipped"]
         assert "scip-java" in res2["skipped"]
+
+
+def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
+    cache = tmp_path / "cache"
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=NODE_MANIFEST),
+        patch("subprocess.run", side_effect=_fake_subprocess_run),
+        patch("shutil.which", return_value="/usr/bin/npm"),
+    ):
+        ensure_toolchain(FIXTURES_DIR / "python", cache_dir=cache)
+        assert check_tool_status("scip-python", cache_dir=cache).installed is True
+
+        ensure_toolchain(FIXTURES_DIR / "ts", cache_dir=cache)
+        assert check_tool_status("scip-python", cache_dir=cache).installed is True
+        assert check_tool_status("scip-typescript", cache_dir=cache).installed is True
 
 
 def test_fetch_runtime_gating(tmp_path):

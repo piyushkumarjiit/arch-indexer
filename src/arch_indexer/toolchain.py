@@ -685,7 +685,10 @@ def ensure_toolchain(
 
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "arch-indexer"})
-                with urllib.request.urlopen(req, timeout=60) as resp, open(jar_path, "wb") as out_f:
+                with (
+                    urllib.request.urlopen(req, timeout=60) as resp,
+                    open(jar_path, "wb") as out_f,
+                ):
                     shutil.copyfileobj(resp, out_f)
             except Exception:
                 jar_path.unlink(missing_ok=True)
