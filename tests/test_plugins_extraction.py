@@ -537,6 +537,87 @@ public class FqController {
     ]
 
 
+def test_java_jsr250_method_guard_overrides_class_jsr250_guard(tmp_path: Path):
+    """JSR-250 guards form one override family: the method annotation wins.
+
+    Oracle: Spring's ``Jsr250AuthorizationManager`` reads the JSR-250 annotation
+    from the method when present and only falls back to the class annotation, so
+    ``@PermitAll`` makes a handler public inside an ``@RolesAllowed`` controller
+    and ``@DenyAll``/``@RolesAllowed`` replace it outright. A method JSR-250
+    annotation does not displace a Spring ``@Secured`` class guard, whose own
+    interceptor still applies.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "Jsr250Controller.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api")
+@RolesAllowed("ADMIN")
+public class Jsr250Controller {
+    @GetMapping("/health")
+    @PermitAll
+    public void health() {}
+
+    @GetMapping("/blocked")
+    @jakarta.annotation.security.DenyAll
+    public void blocked() {}
+
+    @GetMapping("/users")
+    @RolesAllowed("USER")
+    public void users() {}
+
+    @GetMapping("/admin")
+    public void admin() {}
+}
+""",
+    )
+
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth["health"] == ["@PermitAll"]
+    assert auth["blocked"] == ["@jakarta.annotation.security.DenyAll"]
+    assert auth["users"] == ['@RolesAllowed("USER")']
+    assert auth["admin"] == ['@RolesAllowed("ADMIN")']
+
+
+def test_java_jsr250_guard_does_not_override_spring_secured_guard(tmp_path: Path):
+    """A method JSR-250 annotation leaves a different-family class guard in place.
+
+    Oracle: Spring evaluates the ``@Secured`` interceptor independently of the
+    JSR-250 manager, so ``@PermitAll`` on a handler of a ``@Secured`` controller
+    does not make it public; both annotations describe the endpoint.
+    """
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "SecuredController.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api")
+@Secured("ROLE_ADMIN")
+public class SecuredController {
+    @GetMapping("/health")
+    @PermitAll
+    public void health() {}
+}
+""",
+    )
+
+    assert json.loads(res.entrypoints[0]["auth_symbols_json"]) == [
+        '@Secured("ROLE_ADMIN")',
+        "@PermitAll",
+    ]
+
+
 def test_python_main_single_quotes_and_login_required():
     code = b"""
 from flask import Flask

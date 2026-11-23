@@ -56,13 +56,22 @@ DECLARATION_KINDS = {
 }
 
 
-_AUTH_ANNOTATION_RE = re.compile(r"@(?:[\w.]+\.)?(PreAuthorize|Secured|RolesAllowed)\b")
+_AUTH_ANNOTATION_RE = re.compile(
+    r"@(?:[\w.]+\.)?(PreAuthorize|Secured|RolesAllowed|PermitAll|DenyAll)\b"
+)
+_JSR250_AUTH_NAMES = frozenset({"RolesAllowed", "PermitAll", "DenyAll"})
 
 
 def _auth_annotation_name(annotation: str) -> str | None:
     """The simple name of a guarding annotation, bare or package-qualified."""
     match = _AUTH_ANNOTATION_RE.match(annotation)
     return match.group(1) if match else None
+
+
+def _auth_override_key(annotation: str) -> str | None:
+    """The guard family a method-level annotation overrides on its class."""
+    name = _auth_annotation_name(annotation)
+    return "JSR250" if name in _JSR250_AUTH_NAMES else name
 
 
 def _is_auth_annotation(annotation: str) -> bool:
@@ -496,12 +505,12 @@ class JavaPlugin(LanguagePlugin):
                 _, annotations = _get_modifiers_and_annotations(node, source_bytes)
 
                 method_auth = [ann for ann in annotations if _is_auth_annotation(ann)]
-                overridden_guards = {_auth_annotation_name(ann) for ann in method_auth}
+                overridden_guards = {_auth_override_key(ann) for ann in method_auth}
                 auth_symbols = [
                     *(
                         ann
                         for ann in current_auth
-                        if _auth_annotation_name(ann) not in overridden_guards
+                        if _auth_override_key(ann) not in overridden_guards
                     ),
                     *method_auth,
                 ]
