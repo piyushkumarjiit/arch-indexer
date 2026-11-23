@@ -532,17 +532,16 @@ class _Resolver:
         target = self.resolve(module, callee, depth + 1)
         if target is None or target[0] != "external":
             return None
-        return FRAMEWORK_FACTORIES.get(target[1], "other")
+        return FRAMEWORK_FACTORIES.get(target[1])
 
     def target_kind(self, target: _Target, depth: int = 0) -> str | None:
         """Classify a resolved target as a framework receiver kind.
 
-        ``None`` when the target is internal and does not resolve to a known
-        factory; ``other`` only for a known external non-framework target.
+        ``None`` when the target does not resolve to a known framework receiver.
         """
         kind, where, name = target
         if kind == "external":
-            return CLICK_MODULE if where == "click" else "other"
+            return CLICK_MODULE if where == "click" else None
         if kind != "internal":
             return None
         facts = self.facts(where)
@@ -1132,8 +1131,17 @@ class PythonPlugin(LanguagePlugin):
         """Extract imports, call references, and entrypoints for a Python file."""
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
         bound_names: set[str] = set()
-        has_argparse = False
+        argparse_modules: set[str] = set()  # local names bound to the argparse module
+        argument_parser_names: set[str] = set()  # local names bound to ArgumentParser
+        parser_names: set[str] = set()  # variables assigned from ArgumentParser(...)
+        parses_argv = False
         is_test = _is_test_path(rel_path)
+
+        def is_argument_parser(fn_text: str) -> bool:
+            if "." not in fn_text:
+                return fn_text in argument_parser_names
+            head, _, attr = fn_text.rpartition(".")
+            return attr == "ArgumentParser" and head in argparse_modules
 
         def add_entrypoint(entry: dict[str, Any]) -> None:
             # Test code (mock.patch, fixtures, helper apps) never yields entrypoints.
@@ -1178,7 +1186,7 @@ class PythonPlugin(LanguagePlugin):
                         raw_sym = _get_node_text(child, source_bytes)
                         bound_names.add(raw_sym.split(".", 1)[0])
                         if raw_sym == "argparse":
-                            has_argparse = True
+                            argparse_modules.add(raw_sym)
                         record_import(raw_sym, raw_sym, line, col)
                     elif child.type == "aliased_import":
                         orig_node = child.child_by_field_name("name")
@@ -1191,6 +1199,8 @@ class PythonPlugin(LanguagePlugin):
                             else:
                                 alias = raw_sym
                                 bound_names.add(raw_sym.split(".", 1)[0])
+                            if raw_sym == "argparse":
+                                argparse_modules.add(alias)
                             record_import(raw_sym, alias, line, col)
 
             elif node.type == "import_from_statement":
@@ -1216,13 +1226,14 @@ class PythonPlugin(LanguagePlugin):
                 else:
                     resolved_mod = rel_mod
 
-                if resolved_mod == "argparse":
-                    has_argparse = True
+                from_argparse = resolved_mod == "argparse"
 
                 for child in node.children:
                     if child.type == "dotted_name" and child != mod_name_node:
                         sym_name = _get_node_text(child, source_bytes)
                         bound_names.add(sym_name)
+                        if from_argparse and sym_name == "ArgumentParser":
+                            argument_parser_names.add(sym_name)
                         full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                         record_import(full_sym, sym_name, line, col)
                     elif child.type == "aliased_import":
@@ -1234,8 +1245,26 @@ class PythonPlugin(LanguagePlugin):
                                 _get_node_text(alias_node, source_bytes) if alias_node else sym_name
                             )
                             bound_names.add(alias)
+                            if from_argparse and sym_name == "ArgumentParser":
+                                argument_parser_names.add(alias)
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                             record_import(full_sym, alias, line, col)
+
+            # 1b. ``name = argparse.ArgumentParser(...)`` marks an argv parser variable.
+            elif node.type == "assignment":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if (
+                    left is not None
+                    and left.type == "identifier"
+                    and right is not None
+                    and right.type == "call"
+                ):
+                    called = right.child_by_field_name("function")
+                    if called is not None:
+                        fn_text = _get_node_text(called, source_bytes).strip()
+                        if is_argument_parser(fn_text):
+                            parser_names.add(_get_node_text(left, source_bytes))
 
             # 2. Calls
             elif node.type == "call":
@@ -1246,9 +1275,12 @@ class PythonPlugin(LanguagePlugin):
                     col = node.start_point[1]
                     target_fqname = fn_text
 
-                    # Check argparse call
-                    if "parse_args" in fn_text:
-                        has_argparse = True
+                    receiver, _, called_attr = fn_text.rpartition(".")
+                    if receiver in parser_names and called_attr in (
+                        "parse_args",
+                        "parse_known_args",
+                    ):
+                        parses_argv = True
 
                     for alias in sorted(file_imports, key=len, reverse=True):
                         if fn_text == alias or fn_text.startswith(f"{alias}."):
@@ -1372,8 +1404,9 @@ class PythonPlugin(LanguagePlugin):
 
             stack.extend((child, child_scope) for child in reversed(node.children))
 
-        # 3c. Argparse CLI detection
-        if has_argparse:
+        # 3c. Argparse CLI detection: an ``ArgumentParser`` created in this file is
+        # parsed for argv here, so the file is a CLI.
+        if parses_argv:
             add_entrypoint(
                 {
                     "kind": "cli",

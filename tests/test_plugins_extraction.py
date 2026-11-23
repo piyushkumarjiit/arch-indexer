@@ -105,6 +105,7 @@ def typer_cmd():
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--flag")
+parser.parse_args()
 """
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)
@@ -135,6 +136,50 @@ parser.add_argument("--flag")
         assert "app" in eps_by_name
         assert eps_by_name["app"]["kind"] == "cli"
         assert eps_by_name["app"]["route_or_trigger"] == "argparse"
+
+
+def test_python_argparse_entrypoint_requires_parser_call(tmp_path: Path):
+    """An ``argparse`` import or a ``parse_args``-named method is not evidence of a CLI.
+
+    The oracle is the CLI contract: a file is a command-line program only when it
+    creates an ``argparse.ArgumentParser`` and parses argv with it.
+    """
+    (tmp_path / "helpers.py").write_text(
+        """from argparse import Namespace
+
+
+class Tool:
+    def parse_args_from_env(self):
+        return Namespace()
+
+    def run(self):
+        return self.parse_args_from_env()
+"""
+    )
+    (tmp_path / "cli.py").write_text(
+        """from argparse import ArgumentParser as AP
+
+
+def main():
+    parser = AP(description="tool")
+    parser.add_argument("--flag")
+    return parser.parse_args()
+"""
+    )
+
+    plugin = PythonPlugin()
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=tmp_path,
+        files=[tmp_path / "helpers.py", tmp_path / "cli.py"],
+    )
+    res = plugin.index_unit_tier2(unit)
+
+    cli_eps = [e for e in res.entrypoints if e["kind"] == "cli"]
+    assert [e["file_path"] for e in cli_eps] == ["cli.py"]
+    assert cli_eps[0]["route_or_trigger"] == "argparse"
 
 
 def test_typescript_plugin_extraction():
@@ -529,6 +574,37 @@ services:
     assert files["Dockerfile"]["sha256"] == hashlib.sha256(dockerfile.read_bytes()).hexdigest()
 
 
+def test_infra_compose_ports_keep_source_text(tmp_path: Path):
+    """Unquoted ``host:container`` mappings must keep their text, not YAML 1.1 base-60 ints.
+
+    The oracle is the Compose file contract: ``2222:22`` means host 2222, container 22,
+    and a docs summary that shows 133342 is wrong.
+    """
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """services:
+  web:
+    image: nginx
+    ports:
+      - 2222:22
+      - 1053:53
+      - 8080:80
+    volumes:
+      - ./data:/data
+"""
+    )
+
+    scanner = InfraScanner()
+    res = scanner.index_unit_tier2(scanner.detect(tmp_path)[0])
+    summary = next(
+        json.loads(a["summary_json"]) for a in res.infra_artifacts if a["kind"] == "compose"
+    )
+
+    assert summary["service"] == "web"
+    assert summary["ports"] == ["2222:22", "1053:53", "8080:80"]
+    assert summary["volumes"] == ["./data:/data"]
+
+
 def test_maven_and_tsconfig_units_partition_deepest_first(tmp_path: Path):
     maven = tmp_path / "maven"
     (maven / "src").mkdir(parents=True)
@@ -889,6 +965,44 @@ def alias_route(): pass
     assert [e for e in res.entrypoints if e["kind"] == "http"] == []
     unresolved = {u["raw_symbol"] for u in res.unresolved_refs}
     assert {"app.get", "router.get", "alias.get"} <= unresolved
+
+
+def test_python_untranslatable_receiver_import_is_unresolved(tmp_path: Path):
+    """A receiver imported from a module the import map cannot translate is reported.
+
+    Oracle: routes whose receiver cannot be resolved never silently disappear; the
+    decorator is recorded as an unresolved reference (a requirements.txt-only layout
+    without a pyproject still indexes, it just cannot follow ``app.routes``).
+    """
+    pkg = tmp_path / "backend" / "app"
+    pkg.mkdir(parents=True)
+    (pkg / "routes.py").write_text("from fastapi import APIRouter\n\nrouter = APIRouter()\n")
+    (pkg / "factory.py").write_text(
+        "from fastapi import FastAPI\n\n\ndef create_app():\n    return FastAPI()\n"
+    )
+    views = pkg / "views.py"
+    views.write_text(
+        "from app.routes import router\n"
+        "from app.factory import create_app\n\n"
+        "app = create_app()\n\n\n"
+        '@router.get("/{item_id}")\n'
+        "def show(item_id): pass\n\n\n"
+        '@app.get("/health")\n'
+        "def health(): pass\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:backend",
+        name="backend",
+        language="python",
+        root_dir=tmp_path,
+        files=[pkg / "routes.py", pkg / "factory.py", views],
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+
+    assert [e for e in res.entrypoints if e["file_path"] == "backend/app/views.py"] == []
+    unresolved = {(u["file_path"], u["raw_symbol"]) for u in res.unresolved_refs}
+    assert ("backend/app/views.py", "router.get") in unresolved
+    assert ("backend/app/views.py", "app.get") in unresolved
 
 
 def test_python_stacked_routes_record_signature_dependencies_once(tmp_path: Path):

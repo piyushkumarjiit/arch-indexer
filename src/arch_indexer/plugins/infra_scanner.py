@@ -21,6 +21,18 @@ from arch_indexer.plugins.base import (
 from arch_indexer.toolchain import get_repo_files
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Safe loader that keeps integer scalars as text.
+
+    YAML 1.1 resolves unquoted values such as ``2222:22`` as base-60 integers, which
+    corrupts port and volume mappings; their source text is what gets stored.
+    """
+
+    def resolve(self, kind: Any, value: str, implicit: tuple[bool, bool]) -> str:
+        tag = super().resolve(kind, value, implicit)
+        return "tag:yaml.org,2002:str" if tag == "tag:yaml.org,2002:int" else tag
+
+
 class InfraScanner(LanguagePlugin):
     """Scanner for repository infrastructure artifacts per spec section 4.5."""
 
@@ -191,7 +203,7 @@ class InfraScanner(LanguagePlugin):
                 basename.endswith(".yml") or basename.endswith(".yaml")
             ):
                 try:
-                    data = yaml.safe_load(content)
+                    data = yaml.load(content, Loader=_ComposeLoader)
                     if (
                         isinstance(data, dict)
                         and "services" in data
