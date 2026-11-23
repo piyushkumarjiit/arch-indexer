@@ -369,6 +369,39 @@ def test_first_run_without_docs_impacts_canonical_sections(tmp_path: Path, capsy
     assert all(entry["reasons"] == ["first_run"] for entry in report["sections"])
 
 
+def test_added_file_in_covered_module_impacts_its_section(tmp_path: Path, capsys):
+    repo = tmp_path / "pkg_repo"
+    package = repo / "src" / "pkg"
+    package.mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    (repo / "docs" / "DESIGN.md").write_text(
+        "## 2. Components & Modules\n\nPkg lives in `alpha`[^1].\n\n"
+        "## References\n\n[^1]: `src/pkg/a.py:1` — `alpha`\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "delta-tests@example.com")
+    _git(repo, "config", "user.name", "Delta Tests")
+    _commit(repo, "initial")
+    cache = tmp_path / "cache"
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (package / "b.py").write_text("def beta():\n    return 2\n", encoding="utf-8")
+    _commit(repo, "add package module")
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    report = _impacted(cache)
+    entries = {
+        (entry["doc"], entry["section_id"]): entry["reasons"] for entry in report["sections"]
+    }
+    assert entries[("docs/DESIGN.md", "2-components-modules")] == ["module_added"]
+    assert report["missing_sections"] == []
+
+
 def test_deleted_docs_report_missing_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"

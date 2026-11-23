@@ -457,7 +457,10 @@ def compute_impacted_sections(
         if section_files & (changed_files - deleted_files):
             reasons.add(IMPACT_MODIFIED_FILE)
         section_modules = _section_modules(section, module_by_file)
-        matched_modules = section_modules & added_modules
+        # A section covers an added module when it covers that module or any parent of it.
+        matched_modules = {
+            module for module in added_modules if module_with_parents(module) & section_modules
+        }
         if matched_modules:
             reasons.add(IMPACT_MODULE_ADDED)
             impacted_modules |= matched_modules
@@ -470,7 +473,7 @@ def compute_impacted_sections(
             report.sections.append(_impact_entry(section, reasons, section_modules))
 
     for module in sorted(added_modules - impacted_modules):
-        if module_sections.get(module):
+        if any(module_sections.get(candidate) for candidate in module_with_parents(module)):
             continue
         report.missing_sections.append(
             {
