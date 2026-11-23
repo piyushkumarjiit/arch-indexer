@@ -13,6 +13,7 @@ from arch_indexer.config import DEFAULT_DOCS_DIR
 CODE_INVALID_HEADER: str = "INVALID_HEADER"
 CODE_EMPTY_BODY: str = "EMPTY_BODY"
 CODE_UNBALANCED_SUBGRAPH: str = "UNBALANCED_SUBGRAPH"
+CODE_UNBALANCED_BLOCK: str = "UNBALANCED_BLOCK"
 CODE_UNBALANCED_QUOTES: str = "UNBALANCED_QUOTES"
 CODE_UNBALANCED_DELIMITERS: str = "UNBALANCED_DELIMITERS"
 CODE_INVALID_NODE_ID: str = "INVALID_NODE_ID"
@@ -531,6 +532,11 @@ _SEQ_KEYWORDS = frozenset(
     }
 )
 _SEQ_DECLARATION_KEYWORDS = frozenset({"participant", "actor", "create"})
+# Blocks opened by a header line and closed by a matching 'end'. 'box ... end'
+# is included because it also consumes 'end' in Mermaid's sequence grammar.
+_SEQ_BLOCK_OPENERS = frozenset({"loop", "alt", "opt", "par", "rect", "critical", "break", "box"})
+# Branch keywords continue an enclosing block and never open a new one.
+_SEQ_BLOCK_BRANCH_PARENT = {"else": "alt", "and": "par", "option": "critical"}
 # Message: <actor><arrow>[+|-]<actor>[: free text]. Actor names exclude the
 # characters Mermaid reserves for arrows and separators; a hyphen is an
 # ordinary character unless it starts an arrow.
@@ -544,14 +550,40 @@ _SEQ_MESSAGE_RE = re.compile(
 
 def _validate_sequence(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
     found: list[tuple[int, str, str]] = []
+    # Open blocks, outermost first: (keyword, line number)
+    open_blocks: list[tuple[str, int]] = []
     for line_no, raw in body:
         line = raw.strip()
         word = _first_word(line).lower()
         if word in _SEQ_KEYWORDS and line[len(word) : len(word) + 1] in ("", " ", "\t", ":"):
             # Keyword statements carry free text (titles, conditions, aliases,
-            # note text); only declaration quotes are structural.
+            # note text); only declaration quotes and block balance are structural.
             if word in _SEQ_DECLARATION_KEYWORDS and _has_unterminated_quote(line):
                 found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+                continue
+            if word in _SEQ_BLOCK_OPENERS:
+                open_blocks.append((word, line_no))
+            elif word in _SEQ_BLOCK_BRANCH_PARENT:
+                parent = _SEQ_BLOCK_BRANCH_PARENT[word]
+                if not open_blocks or open_blocks[-1][0] != parent:
+                    found.append(
+                        (
+                            line_no,
+                            CODE_UNBALANCED_BLOCK,
+                            f"'{word}' is only valid inside an enclosing '{parent}' block",
+                        )
+                    )
+            elif word == "end":
+                if open_blocks:
+                    open_blocks.pop()
+                else:
+                    found.append(
+                        (
+                            line_no,
+                            CODE_UNBALANCED_BLOCK,
+                            "Found 'end' without a matching block opener",
+                        )
+                    )
             continue
         structural = line
         if _SEQ_MESSAGE_RE.match(structural):
@@ -562,6 +594,14 @@ def _validate_sequence(body: list[tuple[int, str]]) -> list[tuple[int, str, str]
             message = f"Message without a valid arrow in sequenceDiagram: '{structural}'"
             code = CODE_INVALID_ARROW
         found.append((line_no, code, message))
+    for opener, opener_line in open_blocks:
+        found.append(
+            (
+                opener_line,
+                CODE_UNBALANCED_BLOCK,
+                f"Unclosed '{opener}' block (missing matching 'end')",
+            )
+        )
     return found
 
 

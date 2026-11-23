@@ -10,6 +10,7 @@ from arch_indexer.checks.mermaid import (
     CODE_INVALID_ARROW,
     CODE_INVALID_HEADER,
     CODE_INVALID_NODE_ID,
+    CODE_UNBALANCED_BLOCK,
     CODE_UNBALANCED_DELIMITERS,
     CODE_UNBALANCED_QUOTES,
     CODE_UNBALANCED_SUBGRAPH,
@@ -510,7 +511,7 @@ def test_label_text_is_not_parsed_as_diagram_structure():
 
     # Non-message sequence lines keep their structural delimiters and quotes.
     assert _validate_snippet("sequenceDiagram\n  participant DB as Postgres (db:5432)\n") == []
-    assert _validate_snippet("sequenceDiagram\n  loop Every 5s (retry: 3)\n") == []
+    assert _validate_snippet("sequenceDiagram\n  loop Every 5s (retry: 3)\n  end\n") == []
     assert _validate_snippet('sequenceDiagram\n  participant A as "svc: api"\n') == []
     assert _validate_snippet("sequenceDiagram\n  Note over A: retry (max: 3)\n") == []
 
@@ -782,3 +783,121 @@ def test_invalid_corpus_reports_correct_line_number():
     block = ["flowchart TD", "  A --> B", "  C -> D"]
     errs = validate_mermaid_block(block, "docs/DESIGN.md", 10)
     assert [(e.code, e.line) for e in errs] == [(CODE_INVALID_ARROW, 13)]
+
+
+# --- sequenceDiagram block balance ---
+# Oracle: every sequence block opens with a header statement and closes with
+# 'end'; 'else', 'and' and 'option' only continue an 'alt', 'par' and
+# 'critical' block respectively.
+
+_SEQUENCE_BALANCED_CORPUS: list[str] = [
+    "loop Every 5s (retry: 3)\n  A->>B: poll\nend",
+    "alt ok (200)\n  A->>B: x\nelse error [5xx]\n  A->>B: y\nelse timeout\n  A->>B: z\nend",
+    "opt maybe\n  A->>B: x\nend",
+    "par A to B\n  A->>B: x\nand A to C\n  A->>C: y\nend",
+    "rect rgb(0, 0, 255)\n  A->>B: x\nend",
+    "critical connect\n  A->>B: x\noption timeout\n  A->>B: y\nend",
+    "break when (x > 0)\n  A->>B: abandoned\nend",
+    "box LightBlue Service\n  participant A\n  A->>B: x\nend",
+    # Nesting: each 'end' closes the innermost open block.
+    "alt outer\n  loop inner\n    A->>B: x\n  end\n"
+    "else other\n  opt deep\n    A->>B: y\n  end\nend",
+    (
+        "par a\n  critical c\n    A->>B: x\n  option o\n    A->>B: y\n  end\n"
+        "and b\n  rect rgb(0,0,0)\n    A->>B: z\n  end\nend"
+    ),
+    "loop a\n  alt b\n    A->>B: x\n  else c\n    A->>B: y\n  end\nend",
+]
+
+_SEQUENCE_UNBALANCED_CORPUS: list[tuple[str, str]] = [
+    # Every opener must close with 'end'.
+    ("sequenceDiagram\n  loop forever\n    A->>B: poll", "Unclosed 'loop' block"),
+    ("sequenceDiagram\n  alt ok\n    A->>B: x", "Unclosed 'alt' block"),
+    ("sequenceDiagram\n  opt maybe\n    A->>B: x", "Unclosed 'opt' block"),
+    ("sequenceDiagram\n  par a\n    A->>B: x", "Unclosed 'par' block"),
+    ("sequenceDiagram\n  rect rgb(0,0,0)\n    A->>B: x", "Unclosed 'rect' block"),
+    ("sequenceDiagram\n  critical c\n    A->>B: x", "Unclosed 'critical' block"),
+    ("sequenceDiagram\n  break x\n    A->>B: x", "Unclosed 'break' block"),
+    ("sequenceDiagram\n  box Blue\n    A->>B: x", "Unclosed 'box' block"),
+    # Only an inner block closed: the outer opener is still unbalanced.
+    (
+        "sequenceDiagram\n  loop a\n    A->>B: x\n    alt b\n      A->>C: y\n    end",
+        "Unclosed 'loop' block",
+    ),
+    # An 'end' without an open block is an error, including one extra 'end'.
+    ("sequenceDiagram\n  A->>B: x\n  end", "'end' without a matching block opener"),
+    ("sequenceDiagram\n  loop a\n  end\n  end", "'end' without a matching block opener"),
+    # Branch keywords are invalid outside their parent block.
+    ("sequenceDiagram\n  else nope\n  end", "'else' is only valid inside an enclosing 'alt'"),
+    ("sequenceDiagram\n  and nope\n  end", "'and' is only valid inside an enclosing 'par'"),
+    (
+        "sequenceDiagram\n  option nope\n  end",
+        "'option' is only valid inside an enclosing 'critical'",
+    ),
+    # Branch keywords are invalid inside the wrong parent block.
+    (
+        "sequenceDiagram\n  loop a\n    else b\n  end",
+        "'else' is only valid inside an enclosing 'alt'",
+    ),
+    (
+        "sequenceDiagram\n  alt a\n    and b\n  end",
+        "'and' is only valid inside an enclosing 'par'",
+    ),
+    (
+        "sequenceDiagram\n  par a\n    else b\n  end",
+        "'else' is only valid inside an enclosing 'alt'",
+    ),
+    (
+        "sequenceDiagram\n  critical a\n    and b\n  end",
+        "'and' is only valid inside an enclosing 'par'",
+    ),
+    # Branch keywords only see the innermost open block, not an outer one.
+    (
+        "sequenceDiagram\n  alt a\n    loop b\n      else c\n    end\n  end",
+        "'else' is only valid inside an enclosing 'alt'",
+    ),
+]
+
+
+def test_sequence_block_balance_valid_corpus():
+    failures = []
+    for statement in _SEQUENCE_BALANCED_CORPUS:
+        errs = _validate_snippet(f"sequenceDiagram\n{statement}\n")
+        if errs:
+            failures.append((statement, [e.format_line() for e in errs]))
+    assert failures == []
+
+
+def test_sequence_block_balance_invalid_corpus():
+    misses = []
+    for snippet, expected in _SEQUENCE_UNBALANCED_CORPUS:
+        errs = _validate_snippet(snippet)
+        if not any(e.code == CODE_UNBALANCED_BLOCK and expected in e.message for e in errs):
+            misses.append((snippet, expected, [e.format_line() for e in errs]))
+    assert misses == []
+
+
+def test_lone_loop_opener_fails_as_unbalanced_block():
+    # A 'loop' header without a matching 'end' is not a valid diagram.
+    errs = _validate_snippet("sequenceDiagram\n  loop Every 5s (retry: 3)\n")
+    assert [(e.code, e.line) for e in errs] == [(CODE_UNBALANCED_BLOCK, 3)]
+
+
+def test_unmatched_end_reports_line_and_fails_gate(tmp_path):
+    block = ["sequenceDiagram", "  A->>B: x", "  end"]
+    errs = validate_mermaid_block(block, "docs/DESIGN.md", 20)
+    assert [(e.code, e.line) for e in errs] == [(CODE_UNBALANCED_BLOCK, 23)]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "DESIGN.md").write_text(
+        "```mermaid\nsequenceDiagram\n  A->>B: x\n  end\n```\n",
+        encoding="utf-8",
+    )
+
+    out = io.StringIO()
+    code = run_check_mermaid(repo, out=out)
+    assert code == 3
+    assert "UNBALANCED_BLOCK: docs/DESIGN.md:4:" in out.getvalue()
