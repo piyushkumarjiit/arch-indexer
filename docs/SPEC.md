@@ -117,6 +117,8 @@ All external tools and parsers are pinned to exact versions:
 | `@sourcegraph/scip-typescript` | `0.6.2` | `<cache>/tools/node` | Tier 1 TypeScript indexer |
 | `scip-java` | `0.10.2` (coursier bootstrap of `com.sourcegraph:scip-java_2.13`) | `<cache>/tools/java` | Tier 1 Java/Maven indexer |
 | `coursier` | `2.1.27` (launcher verified by SHA-256) | `<cache>/tools/java` | Bootstraps the `scip-java` launcher |
+| Eclipse Temurin JDK | `17.0.21.1+2` (linux x64 / aarch64, SHA-256 verified) | `<cache>/runtimes` | Portable Java runtime for `--fetch-runtime` when host `java` is missing |
+| Apache Maven | `3.9.16` (binary tarball, SHA-256 verified) | `<cache>/runtimes` | Portable Maven for `--fetch-runtime` when host `mvn` is missing |
 | `protobuf` | `5.29.3` | `arch-indexer` venv | Parse `index.scip` binary directly (no `scip` CLI needed) |
 | `tree-sitter` | `0.23.2` | `arch-indexer` venv | Tier 2 fallback parser runtime |
 | `tree-sitter-python` | `0.23.6` | `arch-indexer` venv | Tier 2 Python grammar |
@@ -126,7 +128,7 @@ All external tools and parsers are pinned to exact versions:
 ### 3.3 Installation & Network Boundary
 - `arch-indexer toolchain ensure --repo <path>` detects languages in `<path>` and installs only the missing pinned indexers into `<cache>/tools/`.
 - `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed. With `--offline`, missing tools do not trigger network access: if a Tier 1 tool is missing, the plugin either falls back to Tier 2 (`--allow-fallback`, default) or exits with code `4` (`--strict-tier1`).
-- **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). If host `java`/`mvn` is absent, Java falls back cleanly to Tier 2 tree-sitter unless `--fetch-runtime` is explicitly passed (see Disagreements).
+- **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). If host `java`/`mvn` is absent, Java falls back cleanly to Tier 2 tree-sitter unless `--fetch-runtime` is explicitly passed (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK/Maven into `<cache>/runtimes/` only for Java/Maven repos where the host runtime is missing or too old, verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`.
 
 ---
 

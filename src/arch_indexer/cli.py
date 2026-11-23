@@ -60,8 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            f"Not supported yet: exits 1 with an error; install host java >= {java_min} "
-            "and mvn instead"
+            "Fetch the pinned Temurin JDK (min java "
+            f"{java_min}) and Apache Maven into <cache>/runtimes/ when host "
+            "java is too old or mvn is missing (Java/Maven repos only)"
         ),
     )
 

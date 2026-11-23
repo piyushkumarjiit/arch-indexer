@@ -5,15 +5,18 @@ import fnmatch
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 if sys.version_info >= (3, 11):
@@ -26,6 +29,7 @@ from arch_indexer.config import (
     get_java_tools_dir,
     get_manifest_lock_path,
     get_node_tools_dir,
+    get_runtimes_dir,
 )
 
 # Directories excluded from file scanning & language detection
@@ -380,9 +384,15 @@ def _scip_java_launcher_path(cfg: dict[str, Any], cache_dir: str | Path | None) 
     return get_java_tools_dir(cache_dir) / f"{cfg['filename']}-{cfg['version']}"
 
 
-def _launcher_help_ok(launcher: Path) -> bool:
+def _launcher_help_ok(launcher: Path, env: dict[str, str] | None = None) -> bool:
     try:
-        res = subprocess.run([str(launcher), "--help"], capture_output=True, text=True, check=False)
+        res = subprocess.run(
+            [str(launcher), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_merged_env(env),
+        )
     except (subprocess.SubprocessError, OSError):
         return False
     return res.returncode == 0
@@ -406,10 +416,372 @@ def _download_verified(url: str, expected_sha256: str, dest: Path) -> None:
         )
 
 
-def _install_scip_java(tools_cfg: dict[str, Any], cache_dir: Path) -> Path:
+def _merged_env(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Overlay subprocess-only environment overrides on the current environment."""
+    if not env:
+        return None
+    return {**os.environ, **env}
+
+
+_RUNTIME_MARKER = ".arch-indexer-runtime.json"
+
+_ARCH_ALIASES = {
+    "x86_64": "x64",
+    "amd64": "x64",
+    "x64": "x64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
+
+
+class UnsafeArchiveError(ValueError):
+    """A runtime archive member would escape the extraction directory."""
+
+
+@dataclass(frozen=True)
+class RuntimeArtifact:
+    """A pinned portable runtime archive from toolchain.toml."""
+
+    kind: str
+    vendor: str
+    version: str
+    install_name: str
+    executable: str
+    strip_components: int
+    filename: str
+    url: str
+    sha256: str
+
+
+@dataclass
+class RuntimeInstall:
+    """A portable runtime extracted into <cache>/runtimes/."""
+
+    kind: str
+    version: str
+    path: Path
+    executable: Path
+    sha256: str
+    url: str
+    reused: bool = False
+
+
+@dataclass
+class JavaRuntime:
+    """java/mvn commands plus the environment overlay used for their subprocesses."""
+
+    java_cmd: str
+    mvn_cmd: str | None
+    env: dict[str, str] = field(default_factory=dict)
+    portable: bool = False
+    java_home: Path | None = None
+
+
+def _host_arch() -> str:
+    machine = platform.machine().lower()
+    arch = _ARCH_ALIASES.get(machine)
+    if arch is None:
+        raise RuntimeError(
+            f"No pinned portable Java runtime for host architecture '{machine}' "
+            "(supported: linux x64, linux aarch64)"
+        )
+    if platform.system().lower() != "linux":
+        raise RuntimeError(
+            f"No pinned portable Java runtime for host OS '{platform.system()}' "
+            "(supported: linux x64, linux aarch64)"
+        )
+    return arch
+
+
+def _runtime_artifact(manifest: dict[str, Any], kind: str) -> RuntimeArtifact:
+    """Resolve the toolchain.toml pin for a portable runtime on this host."""
+    runtimes_cfg = manifest.get("runtimes", {})
+    if kind == "jdk":
+        cfg = runtimes_cfg.get("jdk")
+        if not cfg:
+            raise RuntimeError("toolchain.toml is missing the [runtimes.jdk] pin")
+        arch = _host_arch()
+        archive = cfg.get("archives", {}).get(arch)
+        if not archive:
+            raise RuntimeError(f"toolchain.toml has no pinned JDK archive for linux {arch}")
+    elif kind == "maven":
+        cfg = runtimes_cfg.get("maven")
+        if not cfg:
+            raise RuntimeError("toolchain.toml is missing the [runtimes.maven] pin")
+        archive = cfg
+    else:
+        raise ValueError(f"Unknown portable runtime: {kind}")
+
+    return RuntimeArtifact(
+        kind=kind,
+        vendor=cfg.get("vendor", kind),
+        version=cfg["version"],
+        install_name=cfg["install_name"],
+        executable=cfg["executable"],
+        strip_components=int(cfg.get("strip_components", 0)),
+        filename=archive["filename"],
+        url=archive["url"],
+        sha256=archive["sha256"],
+    )
+
+
+def _runtime_ready(install_dir: Path, artifact: RuntimeArtifact) -> bool:
+    """True when the pinned runtime is extracted, recorded, and runnable by path."""
+    marker = install_dir / _RUNTIME_MARKER
+    executable = install_dir / artifact.executable
+    if not marker.is_file() or not executable.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return data.get("version") == artifact.version and data.get("sha256") == artifact.sha256
+
+
+def _upsert_runtime_lock(
+    lock_data: dict[str, Any], artifact: RuntimeArtifact, install_dir: Path
+) -> bool:
+    entry = {
+        "vendor": artifact.vendor,
+        "version": artifact.version,
+        "url": artifact.url,
+        "sha256": artifact.sha256,
+        "path": str(install_dir),
+        "executable": str(install_dir / artifact.executable),
+    }
+    runtimes = lock_data.setdefault("runtimes", {})
+    current = runtimes.get(artifact.kind)
+    if current is not None and all(current.get(key) == value for key, value in entry.items()):
+        return False
+    runtimes[artifact.kind] = {
+        **entry,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return True
+
+
+def _safe_member_parts(name: str) -> tuple[str, ...]:
+    path = PurePosixPath(name)
+    if path.is_absolute():
+        raise UnsafeArchiveError(f"Absolute path in runtime archive: {name}")
+    parts = tuple(part for part in path.parts if part not in ("", "."))
+    if any(part == ".." for part in parts):
+        raise UnsafeArchiveError(f"Parent-directory path in runtime archive: {name}")
+    return parts
+
+
+def _require_within(root: Path, path: Path, member_name: str) -> None:
+    try:
+        path.resolve().relative_to(root)
+    except (ValueError, OSError):
+        raise UnsafeArchiveError(
+            f"Runtime archive member escapes extraction directory: {member_name}"
+        ) from None
+
+
+def _extract_tar_safely(archive: Path, dest: Path, strip_components: int = 0) -> None:
+    """Extract a tar archive while refusing absolute paths, '..', and escaping links."""
+    root = dest.resolve()
+    with tarfile.open(archive, "r:*") as tar:
+        for member in tar.getmembers():
+            parts = _safe_member_parts(member.name)
+            if len(parts) <= strip_components:
+                continue
+            rel_parts = parts[strip_components:]
+            target = dest.joinpath(*rel_parts)
+            _require_within(root, target, member.name)
+
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+
+            if member.issym():
+                link = PurePosixPath(member.linkname)
+                if link.is_absolute():
+                    raise UnsafeArchiveError(
+                        f"Absolute symlink in runtime archive: {member.name} -> {member.linkname}"
+                    )
+                resolved = target.parent.joinpath(*link.parts)
+                _require_within(root, resolved, f"{member.name} -> {member.linkname}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(member.linkname, target)
+                continue
+
+            if member.islnk():
+                link_parts = _safe_member_parts(member.linkname)
+                if len(link_parts) <= strip_components:
+                    raise UnsafeArchiveError(
+                        f"Hard link escapes runtime root: {member.name} -> {member.linkname}"
+                    )
+                source = dest.joinpath(*link_parts[strip_components:])
+                _require_within(root, source, f"{member.name} -> {member.linkname}")
+                if source.is_symlink() or not source.is_file():
+                    raise UnsafeArchiveError(
+                        f"Hard link target is missing or unsafe: {member.name} -> {member.linkname}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.link(source, target)
+                continue
+
+            if not member.isfile():
+                raise UnsafeArchiveError(
+                    f"Unsupported special file in runtime archive: {member.name}"
+                )
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                raise UnsafeArchiveError(
+                    f"Runtime archive would write through a symlink: {member.name}"
+                )
+            source_file = tar.extractfile(member)
+            if source_file is None:
+                raise UnsafeArchiveError(f"Unreadable file in runtime archive: {member.name}")
+            with source_file, open(target, "wb") as out:
+                shutil.copyfileobj(source_file, out)
+            os.chmod(target, member.mode & 0o777)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _install_runtime_archive(
+    artifact: RuntimeArtifact, archive: Path, install_dir: Path, runtimes_dir: Path
+) -> None:
+    runtimes_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{artifact.install_name}.tmp-", dir=runtimes_dir))
+    try:
+        _extract_tar_safely(archive, temp_dir, artifact.strip_components)
+        marker = {
+            "vendor": artifact.vendor,
+            "version": artifact.version,
+            "sha256": artifact.sha256,
+            "filename": artifact.filename,
+            "url": artifact.url,
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (temp_dir / _RUNTIME_MARKER).write_text(
+            json.dumps(marker, indent=2) + "\n", encoding="utf-8"
+        )
+        if install_dir.exists() or install_dir.is_symlink():
+            _remove_path(install_dir)
+        temp_dir.rename(install_dir)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def _ensure_runtime_archive(artifact: RuntimeArtifact, runtimes_dir: Path) -> Path:
+    archive = runtimes_dir / "archives" / artifact.filename
+    if archive.is_file():
+        if compute_file_sha256(archive) == artifact.sha256:
+            return archive
+        archive.unlink()
+    _download_verified(artifact.url, artifact.sha256, archive)
+    return archive
+
+
+def ensure_portable_runtimes(
+    cache_dir: str | Path | None = None,
+    kinds: tuple[str, ...] = ("jdk", "maven"),
+    manifest: dict[str, Any] | None = None,
+) -> dict[str, RuntimeInstall]:
+    """Download, verify, and extract pinned portable runtimes into <cache>/runtimes/.
+
+    Idempotent: when an extracted runtime matches its pin and marker, no archive is
+    downloaded and nothing is extracted again.
+    """
+    manifest = manifest if manifest is not None else load_toolchain_manifest()
+    c_dir = get_cache_dir(cache_dir)
+    runtimes_dir = get_runtimes_dir(c_dir)
+    lock_data = get_installed_manifest_lock(c_dir)
+    lock_dirty = False
+    installed: dict[str, RuntimeInstall] = {}
+
+    for kind in kinds:
+        artifact = _runtime_artifact(manifest, kind)
+        install_dir = runtimes_dir / artifact.install_name
+        reused = _runtime_ready(install_dir, artifact)
+        if not reused:
+            archive = _ensure_runtime_archive(artifact, runtimes_dir)
+            _install_runtime_archive(artifact, archive, install_dir, runtimes_dir)
+
+        installed[kind] = RuntimeInstall(
+            kind=kind,
+            version=artifact.version,
+            path=install_dir,
+            executable=install_dir / artifact.executable,
+            sha256=artifact.sha256,
+            url=artifact.url,
+            reused=reused,
+        )
+        if _upsert_runtime_lock(lock_data, artifact, install_dir):
+            lock_dirty = True
+
+    if lock_dirty:
+        save_manifest_lock(lock_data, c_dir)
+    return installed
+
+
+def _prepare_java_runtime(cache_dir: str | Path | None = None) -> JavaRuntime:
+    """Resolve java/mvn for scip-java, fetching portable runtimes only when needed."""
+    runtimes = check_host_runtimes()
+    java_ok = runtimes.get("java", RuntimeStatus("java", False)).available
+    mvn_ok = runtimes.get("mvn", RuntimeStatus("mvn", False)).available
+
+    if java_ok and mvn_ok:
+        return JavaRuntime(
+            java_cmd=shutil.which("java") or "java",
+            mvn_cmd=shutil.which("mvn") or "mvn",
+        )
+
+    kinds: list[str] = []
+    if not java_ok:
+        kinds.append("jdk")
+    if not mvn_ok:
+        kinds.append("maven")
+    installed = ensure_portable_runtimes(cache_dir, kinds=tuple(kinds))
+
+    env: dict[str, str] = {}
+    path_entries: list[str] = []
+    java_home: Path | None = None
+    java_cmd = shutil.which("java")
+    mvn_cmd = shutil.which("mvn")
+
+    if not java_ok:
+        jdk = installed["jdk"]
+        java_home = jdk.path
+        java_cmd = str(jdk.executable)
+        env["JAVA_HOME"] = str(jdk.path)
+        path_entries.append(str(jdk.path / "bin"))
+    if not mvn_ok:
+        maven = installed["maven"]
+        mvn_cmd = str(maven.executable)
+        path_entries.append(str(maven.path / "bin"))
+
+    if path_entries:
+        env["PATH"] = os.pathsep.join([*path_entries, os.environ.get("PATH", "")])
+    return JavaRuntime(
+        java_cmd=java_cmd or "java",
+        mvn_cmd=mvn_cmd,
+        env=env,
+        portable=True,
+        java_home=java_home,
+    )
+
+
+def _install_scip_java(
+    tools_cfg: dict[str, Any],
+    cache_dir: Path,
+    java_cmd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> Path:
     scip_java_cfg = tools_cfg["scip-java"]
     coursier_cfg = tools_cfg["coursier"]
-    java_cmd = shutil.which("java")
+    java_cmd = java_cmd or shutil.which("java")
     if not java_cmd:
         raise RuntimeError("java executable not found in PATH")
 
@@ -440,18 +812,23 @@ def _install_scip_java(tools_cfg: dict[str, Any], cache_dir: Path) -> Path:
         capture_output=True,
         text=True,
         check=False,
+        env=_merged_env(env),
     )
     if bootstrap.returncode != 0:
         launcher.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to bootstrap scip-java: {bootstrap.stderr or bootstrap.stdout}")
-    if not _launcher_help_ok(launcher):
+    if not _launcher_help_ok(launcher, env=env):
         launcher.unlink(missing_ok=True)
         raise RuntimeError("Bootstrapped scip-java launcher failed to run --help")
 
     return launcher
 
 
-def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> ToolStatus:
+def check_tool_status(
+    tool_name: str,
+    cache_dir: str | Path | None = None,
+    env: dict[str, str] | None = None,
+) -> ToolStatus:
     """Inspect installation and verification status of a tool in the local cache."""
     manifest = load_toolchain_manifest()
     tool_info = manifest.get("tools", {}).get(tool_name, {})
@@ -498,7 +875,7 @@ def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> To
 
     if tool_name == "scip-java":
         launcher = _scip_java_launcher_path(tool_info, cache_dir)
-        if launcher.is_file() and _launcher_help_ok(launcher):
+        if launcher.is_file() and _launcher_help_ok(launcher, env=env):
             return ToolStatus(
                 name=tool_name,
                 package_or_tag=pkg_or_tag,
@@ -605,30 +982,30 @@ def ensure_toolchain(
     - Installs only missing tools into <cache>/tools/
     - Node tools (scip-python, scip-typescript) installed via npm into <cache>/tools/node
     - Java tool (scip-java) bootstrapped with coursier into <cache>/tools/java
-    - Never downloads JDK/Maven; requires host java for scip-java
+    - Downloads a pinned portable JDK/Maven into <cache>/runtimes/ only when
+      fetch_runtime is set, Java files are detected, and host java/mvn are missing
+      or unusable; the scip-java subprocess then uses that runtime via JAVA_HOME/PATH
     - Updates <cache>/tools/manifest.lock.json
     """
     manifest = load_toolchain_manifest()
     tools_cfg = manifest["tools"]
     java_min = manifest["runtimes"]["java_min_version"]
 
-    if fetch_runtime:
-        raise RuntimeError(
-            "--fetch-runtime is not supported yet: portable JDK/Maven download is disabled; "
-            f"install host java >= {java_min} and mvn instead."
-        )
-
     repo = Path(repo_path).resolve()
     c_dir = get_cache_dir(cache_dir)
 
     active_langs = detect_languages(repo)
+    warnings: list[str] = []
+    java_runtime: JavaRuntime | None = None
+    if fetch_runtime and "java" in active_langs:
+        java_runtime = _prepare_java_runtime(c_dir)
+
     lock_data = get_installed_manifest_lock(c_dir)
     if "tools" not in lock_data:
         lock_data["tools"] = {}
 
     installed_now: list[str] = []
     skipped_existing: list[str] = []
-    warnings: list[str] = []
     lock_dirty = False
 
     # 1-2. Node tools -> scip-python, scip-typescript (one npm install keeps both)
@@ -687,19 +1064,23 @@ def ensure_toolchain(
     if "java" in active_langs:
         runtimes = check_host_runtimes()
         java_available = runtimes.get("java", RuntimeStatus("java", False)).available
+        if fetch_runtime:
+            # _prepare_java_runtime raised on failure; otherwise a binding exists.
+            java_available = java_runtime is not None
         if not java_available:
             warnings.append(
                 f"Host java >= {java_min} is absent; scip-java will not be installed and Java "
                 "indexing will fall back to Tier 2 tree-sitter."
             )
         else:
-            if not runtimes.get("mvn", RuntimeStatus("mvn", False)).available:
+            if not fetch_runtime and not runtimes.get("mvn", RuntimeStatus("mvn", False)).available:
                 warnings.append(
                     "Host mvn is absent; scip-java Maven builds may fall back to Tier 2 "
                     "tree-sitter."
                 )
             scip_java_cfg = tools_cfg["scip-java"]
-            status = check_tool_status("scip-java", cache_dir=c_dir)
+            runtime_env = java_runtime.env if java_runtime else None
+            status = check_tool_status("scip-java", cache_dir=c_dir, env=runtime_env)
             if status.installed:
                 skipped_existing.append("scip-java")
                 if status.install_path is not None and _refresh_skipped_tool_lock(
@@ -707,7 +1088,12 @@ def ensure_toolchain(
                 ):
                     lock_dirty = True
             else:
-                launcher = _install_scip_java(tools_cfg, c_dir)
+                launcher = _install_scip_java(
+                    tools_cfg,
+                    c_dir,
+                    java_cmd=java_runtime.java_cmd if java_runtime else None,
+                    env=runtime_env,
+                )
                 lock_data["tools"]["scip-java"] = {
                     **_lock_tool_entry(scip_java_cfg, launcher),
                     "installed_at": datetime.now(timezone.utc).isoformat(),

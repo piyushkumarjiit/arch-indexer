@@ -56,3 +56,38 @@ purpose = "Tier 2 Java grammar"
 [runtimes]
 node_min_version = "18.0.0"
 java_min_version = "17"
+
+# Portable Java runtime, downloaded only by `toolchain ensure --fetch-runtime`
+# when the host has no usable java >= java_min_version. Every archive is
+# verified against the pinned SHA-256 before it is extracted into
+# <cache>/runtimes/.
+[runtimes.jdk]
+vendor = "Eclipse Temurin"
+version = "17.0.21.1+2"
+install_name = "temurin-jdk-17.0.21.1+2"
+strip_components = 1
+executable = "bin/java"
+
+# Official Adoptium release assets. SHA-256 values were read from the
+# published <archive>.sha256.txt asset and matched the GitHub release digest.
+[runtimes.jdk.archives.x64]
+filename = "OpenJDK17U-jdk_x64_linux_hotspot_17.0.21.1_2.tar.gz"
+url = "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_x64_linux_hotspot_17.0.21.1_2.tar.gz"
+sha256 = "0b0ac5eab6db6abaec68c9913bcddb31321e5da411c45073d520d9c125e6f7b4"
+
+[runtimes.jdk.archives.aarch64]
+filename = "OpenJDK17U-jdk_aarch64_linux_hotspot_17.0.21.1_2.tar.gz"
+url = "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.21.1%2B2/OpenJDK17U-jdk_aarch64_linux_hotspot_17.0.21.1_2.tar.gz"
+sha256 = "1d808f4b558e9de63d8ba3ead21ffc8b9de204894eff3c19d52c1480aa17cc58"
+
+# Apache Maven binary distribution. SHA-256 was computed from the archive that
+# matched the official archive.apache.org .sha512 checksum.
+[runtimes.maven]
+vendor = "Apache Maven"
+version = "3.9.16"
+install_name = "apache-maven-3.9.16"
+strip_components = 1
+executable = "bin/mvn"
+filename = "apache-maven-3.9.16-bin.tar.gz"
+url = "https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz"
+sha256 = "80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb"
