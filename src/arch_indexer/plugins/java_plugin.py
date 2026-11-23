@@ -76,10 +76,11 @@ class JavaPlugin(LanguagePlugin):
         pom_files: list[Path] = []
         for rel in files:
             basename = os.path.basename(rel)
-            if basename == "pom.xml":
-                full_p = repo_path / rel
-                if not any(excluded in full_p.parts for excluded in EXCLUDED_DIR_NAMES):
-                    pom_files.append(full_p)
+            # Exclusions apply to repo-relative parts, never the checkout path.
+            if basename == "pom.xml" and not any(
+                excluded in Path(rel).parts for excluded in EXCLUDED_DIR_NAMES
+            ):
+                pom_files.append(repo_path / rel)
 
         # Sort pom.xml deepest first to assign to child modules before parents
         pom_files.sort(key=lambda p: (-len(p.parts), p.as_posix()))

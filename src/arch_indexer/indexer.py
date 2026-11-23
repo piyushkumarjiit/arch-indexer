@@ -20,6 +20,7 @@ from arch_indexer.store import IndexStore
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
+EXIT_DELTA_DETECTED: int = 2
 EXIT_TOOLCHAIN_MISSING: int = 4
 
 
@@ -44,11 +45,6 @@ def run_index(
             f"Error: Target repository does not exist or is not a directory: {target_repo}\n"
         )
         return EXIT_ERROR
-
-    # Check strict-tier1 constraint (Tier 1 is unavailable in this task)
-    if strict_tier1:
-        sys.stderr.write("Error: Tier 1 indexer unavailable and --strict-tier1 was requested\n")
-        return EXIT_TOOLCHAIN_MISSING
 
     # Initialize store at <cache>/repos/<repo-id>/index.db
     cache_paths = RepoCachePaths.from_repo(target_repo, cache_dir_override=cache_dir)
@@ -105,6 +101,7 @@ def run_index(
         "modules": modules_by_language,
         "names": names_by_language,
         "files": repo_files,
+        "file_records": files_by_language,
     }
 
     # Phase 2: Index each unit and stream to SQLite
@@ -123,6 +120,13 @@ def run_index(
 
             # 2. Check for fallback
             if isinstance(tier1_res, FallbackSignal):
+                # Spec 7.2: exit 4 only for --offline with --strict-tier1.
+                if offline and strict_tier1:
+                    sys.stderr.write(
+                        f"Error: Tier 1 indexer unavailable for unit {unit.unit_id} "
+                        f"({tier1_res.reason}) and --offline --strict-tier1 was requested\n"
+                    )
+                    return EXIT_TOOLCHAIN_MISSING
                 # Run Tier 2
                 res = plugin.index_unit_tier2(
                     unit,
@@ -145,4 +149,7 @@ def run_index(
         # Print one-line summary to stdout
         print(store.format_summary())
 
-    return EXIT_OK
+    # Spec 5.2/7.2: without a previous state.json (or with --force-full) this is a
+    # first run, which exits DELTA_DETECTED. This task never writes state.json, so
+    # delta computation is a later task and every run reports a first run.
+    return EXIT_DELTA_DETECTED

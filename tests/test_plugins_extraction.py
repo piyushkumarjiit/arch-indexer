@@ -420,6 +420,65 @@ axios.request({ url: '/api/request', method: 'post' });
         assert api_calls == {"/api/items": "GET", "/api/request": "POST"}
 
 
+def test_api_call_url_comes_from_url_argument(tmp_path: Path):
+    (tmp_path / "client.ts").write_text(
+        "fetch(url, { method: 'POST' });\n"
+        "fetch('/api/a', { method: 'put' });\n"
+        "axios.post(endpoint, { name: 'x' });\n"
+        "axios.get(url, { headers: { 'X-Token': t } });\n"
+        "axios.request({ method: 'post', url: '/api/x' });\n"
+        "axios({ method: 'delete', url: '/api/y' });\n"
+        "axios('/api/z', { method: 'patch' });\n"
+    )
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[tmp_path / "client.ts"],
+    )
+    res = TypeScriptPlugin().index_unit_tier2(unit)
+    calls = [
+        (e["line"], e["method"], e["route_or_trigger"])
+        for e in res.entrypoints
+        if e["kind"] == "api_call"
+    ]
+    assert calls == [
+        (1, "POST", "fetch"),
+        (2, "PUT", "/api/a"),
+        (3, "POST", "axios"),
+        (4, "GET", "axios"),
+        (5, "POST", "/api/x"),
+        (6, "DELETE", "/api/y"),
+        (7, "PATCH", "/api/z"),
+    ]
+
+
+def test_python_route_auth_from_signature_only(tmp_path: Path):
+    (tmp_path / "api.py").write_text(
+        "from fastapi import Depends, FastAPI, Security\n"
+        "app = FastAPI()\n"
+        "\n"
+        "@app.get('/a')\n"
+        "def a(db=Depends(get_db), user=Depends(get_current_user), k=Security(scheme)):\n"
+        "    Depends(verify_token)\n"
+        "\n"
+        "@app.get('/b')\n"
+        "def b(db=Depends(get_db)):\n"
+        "    pass\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=tmp_path,
+        files=[tmp_path / "api.py"],
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
+    assert auth == {"a": ["get_current_user", "scheme"], "b": []}
+
+
 def test_infra_compose_lines_dockerfile_flags_and_raw_sha(tmp_path: Path):
     compose = tmp_path / "docker-compose.yml"
     compose.write_text(

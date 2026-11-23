@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,32 +27,125 @@ def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
 
-def _source_root_parts(repo_root: Path, rel_path: str) -> list[str]:
+PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+
+# Python auth dependency names recognised in FastAPI ``Depends(...)`` parameters.
+AUTH_DEPENDENCY_HINTS = (
+    "auth",
+    "token",
+    "user",
+    "permission",
+    "scope",
+    "login",
+    "credential",
+    "jwt",
+    "oauth",
+    "api_key",
+)
+
+
+def _source_root_parts(
+    repo_root: Path, rel_path: str, cache: dict[tuple[str, ...], bool] | None = None
+) -> list[str]:
     """Find the nearest Python project root for a repository-relative file."""
     parts = [part for part in Path(rel_path).parts if part]
     for i in range(len(parts) - 1, -1, -1):
-        dir_parts = parts[:i]
-        dir_path = repo_root.joinpath(*dir_parts) if dir_parts else repo_root
-        if any(
-            (dir_path / marker).is_file() for marker in ("pyproject.toml", "setup.py", "setup.cfg")
-        ):
-            return dir_parts
+        dir_parts = tuple(parts[:i])
+        is_root = cache.get(dir_parts) if cache is not None else None
+        if is_root is None:
+            dir_path = repo_root.joinpath(*dir_parts) if dir_parts else repo_root
+            is_root = any((dir_path / marker).is_file() for marker in PROJECT_MARKERS)
+            if cache is not None:
+                cache[dir_parts] = is_root
+        if is_root:
+            return list(dir_parts)
     return []
 
 
-def _module_info(repo_root: Path, rel_path: str) -> tuple[str, bool]:
-    """Derive the importable module name and whether the file is a package."""
+def _module_info(
+    repo_root: Path, rel_path: str, cache: dict[tuple[str, ...], bool] | None = None
+) -> tuple[str, str, bool, str]:
+    """Derive a file's module identity.
+
+    Returns ``(stored_module, importable_module, is_package, project_root)``.
+    ``importable_module`` is the name other code uses to import the file, relative
+    to the nearest Python project root (and its ``src/`` layout directory).
+    ``stored_module`` prefixes it with the project root path so modules in sibling
+    projects keep unique fqnames.
+    """
     mod_path = rel_path[:-3] if rel_path.endswith(".py") else rel_path
     parts = [part for part in mod_path.split("/") if part]
     is_package = bool(parts) and parts[-1] == "__init__"
     if is_package:
         parts = parts[:-1]
-    root_parts = _source_root_parts(repo_root, rel_path)
+    root_parts = _source_root_parts(repo_root, rel_path, cache)
     if root_parts and parts[: len(root_parts)] == root_parts:
         parts = parts[len(root_parts) :]
     if parts and parts[0] == "src":
         parts = parts[1:]
-    return ".".join(parts), is_package
+    importable = ".".join(parts)
+    stored = ".".join([*root_parts, *parts])
+    return stored, importable, is_package, "/".join(root_parts)
+
+
+class _ImportMap:
+    """Map importable Python module names to stored (path-unique) module names."""
+
+    def __init__(self) -> None:
+        self.by_project: dict[str, dict[str, str]] = {}
+        self.unique: dict[str, str] = {}
+
+    @classmethod
+    def build(
+        cls,
+        repo_root: Path,
+        file_records: list[dict[str, Any]],
+        cache: dict[tuple[str, ...], bool],
+    ) -> _ImportMap:
+        result = cls()
+        candidates: dict[str, set[str]] = {}
+        for record in file_records:
+            _, importable, _, project = _module_info(repo_root, record["path"], cache)
+            if not importable:
+                continue
+            project_map = result.by_project.setdefault(project, {})
+            imp_parts = importable.split(".")
+            root_parts = project.split("/") if project else []
+            for i in range(1, len(imp_parts) + 1):
+                name = ".".join(imp_parts[:i])
+                target = ".".join([*root_parts, *imp_parts[:i]])
+                project_map[name] = target
+                candidates.setdefault(name, set()).add(target)
+        result.unique = {name: next(iter(t)) for name, t in candidates.items() if len(t) == 1}
+        return result
+
+    def translate(self, dotted: str, project: str) -> str:
+        """Rewrite an importable dotted name to its stored fqname.
+
+        The importing file's own project wins; otherwise a module name that only
+        one project provides is used. Unknown names are returned unchanged.
+        """
+        if not dotted:
+            return dotted
+        parts = dotted.split(".")
+        own = self.by_project.get(project, {})
+        for table in (own, self.unique):
+            for i in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:i])
+                target = table.get(prefix)
+                if target is not None:
+                    return ".".join([target, *parts[i:]])
+        return dotted
+
+
+def _auth_symbols_from_params(params_text: str) -> list[str]:
+    """Return auth dependencies declared in a route function's parameters."""
+    symbols: list[str] = []
+    for kind, name in re.findall(r"\b(Depends|Security)\s*\(\s*([A-Za-z_][\w.]*)", params_text):
+        lowered = name.lower()
+        if kind == "Security" or any(hint in lowered for hint in AUTH_DEPENDENCY_HINTS):
+            symbols.append(name)
+    return symbols
 
 
 def _resolve_relative_module(
@@ -85,6 +179,16 @@ class PythonPlugin(LanguagePlugin):
     def __init__(self) -> None:
         self.language = Language(tspython.language())
         self.parser = Parser(self.language)
+        self._root_cache: dict[tuple[str, ...], bool] = {}
+        self._import_map_key: tuple[int, int] | None = None
+        self._import_map: _ImportMap | None = None
+
+    def _get_import_map(self, repo_root: Path, file_records: list[dict[str, Any]]) -> _ImportMap:
+        key = (id(file_records), len(file_records))
+        if self._import_map is None or self._import_map_key != key:
+            self._import_map = _ImportMap.build(repo_root, file_records, self._root_cache)
+            self._import_map_key = key
+        return self._import_map
 
     @property
     def name(self) -> str:
@@ -179,7 +283,7 @@ class PythonPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            module_name, _ = _module_info(repo_root, rel_path)
+            module_name, _, _, _ = _module_info(repo_root, rel_path, self._root_cache)
 
             file_records.append(
                 {
@@ -304,17 +408,21 @@ class PythonPlugin(LanguagePlugin):
         known_fqnames: set[str] = set()
         known_names: dict[str, str] = {}
         known_modules: set[str] = set()
+        all_file_records = file_records
 
         if symbol_context:
             known_fqnames = symbol_context.get("fqnames", {}).get(self.name, set())
             known_names = symbol_context.get("names", {}).get(self.name, {})
             known_modules = symbol_context.get("modules", {}).get(self.name, set())
+            all_file_records = symbol_context.get("file_records", {}).get(self.name, file_records)
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
             known_names = build_name_table(symbol_records, file_records)
             for f in file_records:
                 known_modules.update(module_with_parents(f["module"]))
+
+        import_map = self._get_import_map(repo_root, all_file_records)
 
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
@@ -331,7 +439,9 @@ class PythonPlugin(LanguagePlugin):
             except OSError:
                 continue
 
-            module_name, is_package = _module_info(repo_root, rel_path)
+            module_name, importable, is_package, project = _module_info(
+                repo_root, rel_path, self._root_cache
+            )
 
             tree = self.parser.parse(source_bytes)
             self._analyze_file(
@@ -339,7 +449,9 @@ class PythonPlugin(LanguagePlugin):
                 source_bytes,
                 rel_path,
                 module_name,
+                importable,
                 is_package,
+                lambda dotted, project=project: import_map.translate(dotted, project),
                 known_fqnames,
                 known_names,
                 known_modules,
@@ -369,7 +481,9 @@ class PythonPlugin(LanguagePlugin):
         source_bytes: bytes,
         rel_path: str,
         module_name: str,
+        importable_module: str,
         is_package: bool,
+        translate: Callable[[str], str],
         known_fqnames: set[str],
         known_names: dict[str, str],
         known_modules: set[str],
@@ -381,6 +495,30 @@ class PythonPlugin(LanguagePlugin):
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
         bound_names: set[str] = set()
         has_argparse = False
+
+        def record_import(raw_symbol: str, local_name: str, line: int, col: int) -> None:
+            """Store an import as a reference when it is internal, else as unresolved."""
+            target = translate(raw_symbol)
+            if target in known_fqnames or target in known_modules:
+                references.append(
+                    {
+                        "symbol_fqname": target,
+                        "file_path": rel_path,
+                        "line": line,
+                        "col": col,
+                        "ref_kind": "import",
+                    }
+                )
+                file_imports[local_name] = target
+            else:
+                unresolved_refs.append(
+                    {
+                        "file_path": rel_path,
+                        "line": line,
+                        "raw_symbol": raw_symbol,
+                        "language": "python",
+                    }
+                )
 
         def walk(node: Node) -> None:
             nonlocal has_argparse
@@ -395,26 +533,7 @@ class PythonPlugin(LanguagePlugin):
                         bound_names.add(raw_sym.split(".", 1)[0])
                         if raw_sym == "argparse":
                             has_argparse = True
-                        if raw_sym in known_modules or raw_sym in known_fqnames:
-                            references.append(
-                                {
-                                    "symbol_fqname": raw_sym,
-                                    "file_path": rel_path,
-                                    "line": line,
-                                    "col": col,
-                                    "ref_kind": "import",
-                                }
-                            )
-                            file_imports[raw_sym] = raw_sym
-                        else:
-                            unresolved_refs.append(
-                                {
-                                    "file_path": rel_path,
-                                    "line": line,
-                                    "raw_symbol": raw_sym,
-                                    "language": "python",
-                                }
-                            )
+                        record_import(raw_sym, raw_sym, line, col)
                     elif child.type == "aliased_import":
                         orig_node = child.child_by_field_name("name")
                         alias_node = child.child_by_field_name("alias")
@@ -426,26 +545,7 @@ class PythonPlugin(LanguagePlugin):
                             else:
                                 alias = raw_sym
                                 bound_names.add(raw_sym.split(".", 1)[0])
-                            if raw_sym in known_modules or raw_sym in known_fqnames:
-                                references.append(
-                                    {
-                                        "symbol_fqname": raw_sym,
-                                        "file_path": rel_path,
-                                        "line": line,
-                                        "col": col,
-                                        "ref_kind": "import",
-                                    }
-                                )
-                                file_imports[alias] = raw_sym
-                            else:
-                                unresolved_refs.append(
-                                    {
-                                        "file_path": rel_path,
-                                        "line": line,
-                                        "raw_symbol": raw_sym,
-                                        "language": "python",
-                                    }
-                                )
+                            record_import(raw_sym, alias, line, col)
 
             elif node.type == "import_from_statement":
                 line = node.start_point[0] + 1
@@ -465,7 +565,7 @@ class PythonPlugin(LanguagePlugin):
 
                 if relative_dots > 0:
                     resolved_mod = _resolve_relative_module(
-                        module_name, is_package, relative_dots, rel_mod
+                        importable_module, is_package, relative_dots, rel_mod
                     )
                 else:
                     resolved_mod = rel_mod
@@ -478,26 +578,7 @@ class PythonPlugin(LanguagePlugin):
                         sym_name = _get_node_text(child, source_bytes)
                         bound_names.add(sym_name)
                         full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
-                        if full_sym in known_fqnames or full_sym in known_modules:
-                            references.append(
-                                {
-                                    "symbol_fqname": full_sym,
-                                    "file_path": rel_path,
-                                    "line": line,
-                                    "col": col,
-                                    "ref_kind": "import",
-                                }
-                            )
-                            file_imports[sym_name] = full_sym
-                        else:
-                            unresolved_refs.append(
-                                {
-                                    "file_path": rel_path,
-                                    "line": line,
-                                    "raw_symbol": full_sym,
-                                    "language": "python",
-                                }
-                            )
+                        record_import(full_sym, sym_name, line, col)
                     elif child.type == "aliased_import":
                         orig_node = child.child_by_field_name("name")
                         alias_node = child.child_by_field_name("alias")
@@ -508,26 +589,7 @@ class PythonPlugin(LanguagePlugin):
                             )
                             bound_names.add(alias)
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
-                            if full_sym in known_fqnames or full_sym in known_modules:
-                                references.append(
-                                    {
-                                        "symbol_fqname": full_sym,
-                                        "file_path": rel_path,
-                                        "line": line,
-                                        "col": col,
-                                        "ref_kind": "import",
-                                    }
-                                )
-                                file_imports[alias] = full_sym
-                            else:
-                                unresolved_refs.append(
-                                    {
-                                        "file_path": rel_path,
-                                        "line": line,
-                                        "raw_symbol": full_sym,
-                                        "language": "python",
-                                    }
-                                )
+                            record_import(full_sym, alias, line, col)
 
             # 2. Calls
             elif node.type == "call":
@@ -605,12 +667,11 @@ class PythonPlugin(LanguagePlugin):
                                     method_name = "GET"
 
                             # Extract auth symbols
-                            auth_symbols = []
-                            auth_matches = re.findall(
-                                r"(?:Depends|Security)\s*\(\s*([a-zA-Z0-9_]+)",
-                                _get_node_text(func_node, source_bytes),
+                            # Auth comes from the signature only, never the body.
+                            params_node = func_node.child_by_field_name("parameters")
+                            auth_symbols = _auth_symbols_from_params(
+                                _get_node_text(params_node, source_bytes) if params_node else ""
                             )
-                            auth_symbols.extend(auth_matches)
                             if any("@login_required" in d for d in decorators):
                                 auth_symbols.append("login_required")
 

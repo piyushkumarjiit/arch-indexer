@@ -40,6 +40,65 @@ def _module_name(rel_path: str) -> str:
     return mod_path.replace("/", ".")
 
 
+def _arg_nodes(args_node: Node | None) -> list[Node]:
+    """Return the argument expressions of a call's argument list."""
+    if args_node is None:
+        return []
+    return [c for c in args_node.children if c.type not in ("(", ")", ",", "comment")]
+
+
+def _string_value(node: Node | None, source_bytes: bytes) -> str | None:
+    """Return the text of a string or template literal node, without quotes."""
+    if node is None or node.type not in ("string", "template_string"):
+        return None
+    return _get_node_text(node, source_bytes)[1:-1]
+
+
+def _object_property(node: Node | None, key: str, source_bytes: bytes) -> Node | None:
+    """Return the value node of ``key`` in an object literal, if present."""
+    if node is None or node.type != "object":
+        return None
+    for pair in node.children:
+        if pair.type != "pair":
+            continue
+        key_node = pair.child_by_field_name("key")
+        if key_node is None:
+            continue
+        key_text = _get_node_text(key_node, source_bytes).strip("'\"`")
+        if key_text == key:
+            return pair.child_by_field_name("value")
+    return None
+
+
+def _require_bound_names(declarator: Node, source_bytes: bytes) -> list[str]:
+    """Return local names bound by ``const x = require(...)`` style declarations."""
+    value = declarator.child_by_field_name("value")
+    if value is None or value.type != "call_expression":
+        return []
+    fn = value.child_by_field_name("function")
+    if fn is None or _get_node_text(fn, source_bytes) != "require":
+        return []
+    target = declarator.child_by_field_name("name")
+    if target is None:
+        return []
+    if target.type == "identifier":
+        return [_get_node_text(target, source_bytes)]
+    names: list[str] = []
+    if target.type == "object_pattern":
+        for child in target.children:
+            if child.type == "shorthand_property_identifier_pattern":
+                names.append(_get_node_text(child, source_bytes))
+            elif child.type == "pair_pattern":
+                bound = child.child_by_field_name("value")
+                if bound is not None and bound.type == "identifier":
+                    names.append(_get_node_text(bound, source_bytes))
+            elif child.type == "object_assignment_pattern":
+                left = child.child_by_field_name("left")
+                if left is not None:
+                    names.append(_get_node_text(left, source_bytes))
+    return names
+
+
 def _imported_local_names(node: Node, source_bytes: bytes) -> list[str]:
     """Return the local names bound by a TypeScript/JavaScript import statement."""
     names: list[str] = []
@@ -106,10 +165,11 @@ class TypeScriptPlugin(LanguagePlugin):
         tsconfig_files: list[Path] = []
         for rel in files:
             basename = os.path.basename(rel)
-            if fnmatch.fnmatch(basename, "tsconfig*.json"):
-                full_p = repo_path / rel
-                if not any(excluded in full_p.parts for excluded in EXCLUDED_DIR_NAMES):
-                    tsconfig_files.append(full_p)
+            # Exclusions apply to repo-relative parts, never the checkout path.
+            if fnmatch.fnmatch(basename, "tsconfig*.json") and not any(
+                excluded in Path(rel).parts for excluded in EXCLUDED_DIR_NAMES
+            ):
+                tsconfig_files.append(repo_path / rel)
 
         tsconfig_files.sort(key=lambda p: (-len(p.parts), p.as_posix()))
 
@@ -581,6 +641,10 @@ class TypeScriptPlugin(LanguagePlugin):
                             }
                         )
 
+            elif node.type == "variable_declarator":
+                # CommonJS bindings shadow repo-level names just like ES imports.
+                bound_names.update(_require_bound_names(node, source_bytes))
+
             # 2. Calls & Entrypoints
             elif node.type == "call_expression":
                 fn_node = node.child_by_field_name("function")
@@ -656,73 +720,61 @@ class TypeScriptPlugin(LanguagePlugin):
                                 }
                             )
 
-                    # 4. Frontend API callers: fetch and axios
+                    # 4. Frontend API callers: fetch and axios. The URL comes from the
+                    # URL argument (or a config object's ``url``), never later args.
+                    args = _arg_nodes(args_node)
+                    first = args[0] if args else None
+                    second = args[1] if len(args) > 1 else None
+                    api_call: tuple[str, str, str] | None = None
                     if fn_text == "fetch" or fn_text.endswith(".fetch"):
-                        route_url = "fetch"
-                        method = "GET"
-                        if args_node:
-                            args_text = _get_node_text(args_node, source_bytes)
-                            url_match = re.search(r"['\"`]([^'\"`]+)['\"`]", args_text)
-                            if url_match:
-                                route_url = url_match.group(1)
-                            method_match = re.search(
-                                r"method\s*:\s*['\"`]([A-Z]+)['\"`]", args_text, re.IGNORECASE
+                        route_url = _string_value(first, source_bytes) or "fetch"
+                        method = (
+                            _string_value(
+                                _object_property(second, "method", source_bytes), source_bytes
                             )
-                            if method_match:
-                                method = method_match.group(1).upper()
-
-                        entrypoints.append(
-                            {
-                                "kind": "api_call",
-                                "name": "fetch",
-                                "method": method,
-                                "route_or_trigger": route_url,
-                                "file_path": rel_path,
-                                "line": line,
-                                "symbol_fqname": None,
-                                "auth_symbols_json": "[]",
-                            }
+                            or "GET"
                         )
-
+                        api_call = ("fetch", method.upper(), route_url)
                     else:
                         axios_match = re.fullmatch(
                             r"(?:[\w$.]+\.)?axios(?:\.(get|post|put|delete|patch|request))?",
                             fn_text,
                         )
                         if axios_match:
-                            route_url = "axios"
                             axios_method = (axios_match.group(1) or "").upper()
-                            method = (
-                                axios_method
-                                if axios_method in {"GET", "POST", "PUT", "DELETE", "PATCH"}
-                                else "GET"
-                            )
-                            if args_node:
-                                args_text = _get_node_text(args_node, source_bytes)
-                                url_match = re.search(r"['\"`]([^'\"`]+)['\"`]", args_text)
-                                if url_match:
-                                    route_url = url_match.group(1)
-                                if axios_method in ("", "REQUEST"):
-                                    method_match = re.search(
-                                        r"method\s*:\s*['\"`]([A-Z]+)['\"`]",
-                                        args_text,
-                                        re.IGNORECASE,
+                            if axios_method in ("", "REQUEST"):
+                                # axios(url[, config]) / axios(config) / axios.request(config)
+                                url_value = _string_value(first, source_bytes)
+                                config = second if url_value is not None else first
+                                if url_value is None:
+                                    url_value = _string_value(
+                                        _object_property(config, "url", source_bytes), source_bytes
                                     )
-                                    if method_match:
-                                        method = method_match.group(1).upper()
+                                method = (
+                                    _string_value(
+                                        _object_property(config, "method", source_bytes),
+                                        source_bytes,
+                                    )
+                                    or "GET"
+                                )
+                            else:
+                                url_value = _string_value(first, source_bytes)
+                                method = axios_method
+                            api_call = (fn_text, method.upper(), url_value or "axios")
 
-                            entrypoints.append(
-                                {
-                                    "kind": "api_call",
-                                    "name": fn_text,
-                                    "method": method,
-                                    "route_or_trigger": route_url,
-                                    "file_path": rel_path,
-                                    "line": line,
-                                    "symbol_fqname": None,
-                                    "auth_symbols_json": "[]",
-                                }
-                            )
+                    if api_call is not None:
+                        entrypoints.append(
+                            {
+                                "kind": "api_call",
+                                "name": api_call[0],
+                                "method": api_call[1],
+                                "route_or_trigger": api_call[2],
+                                "file_path": rel_path,
+                                "line": line,
+                                "symbol_fqname": None,
+                                "auth_symbols_json": "[]",
+                            }
+                        )
 
             for child in node.children:
                 walk(child)

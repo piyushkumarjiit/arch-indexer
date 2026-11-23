@@ -1,7 +1,12 @@
 import sqlite3
 from pathlib import Path
 
-from arch_indexer.cli import EXIT_ERROR, EXIT_OK, EXIT_TOOLCHAIN_MISSING, main
+from arch_indexer.cli import (
+    EXIT_DELTA_DETECTED,
+    EXIT_ERROR,
+    EXIT_TOOLCHAIN_MISSING,
+    main,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -11,7 +16,7 @@ def test_index_command_e2e_python(tmp_path: Path, capsys):
     repo = FIXTURES_DIR / "python"
 
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     captured = capsys.readouterr()
     assert "Indexed 1 files (python: 1 [tree-sitter]):" in captured.out
@@ -45,7 +50,7 @@ def test_index_command_e2e_mixed(tmp_path: Path, capsys):
     repo = FIXTURES_DIR / "mixed"
 
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     captured = capsys.readouterr()
     assert "Indexed 4 files" in captured.out
@@ -60,6 +65,9 @@ def test_index_strict_tier1_exits_toolchain_missing(tmp_path: Path, capsys):
     repo = FIXTURES_DIR / "python"
 
     code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
+    assert code == EXIT_DELTA_DETECTED
+
+    code = main(["index", str(repo), "--offline", "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_TOOLCHAIN_MISSING
 
     captured = capsys.readouterr()
@@ -95,7 +103,7 @@ def test_python_relative_and_src_layout_imports(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -144,7 +152,7 @@ def test_typescript_index_import_and_alias(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -173,7 +181,7 @@ def test_bare_call_names_are_language_and_kind_scoped(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -208,7 +216,7 @@ def test_python_project_root_imports(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -218,13 +226,16 @@ def test_python_project_root_imports(tmp_path: Path, capsys):
         'SELECT symbol_fqname FROM "references" '
         'WHERE file_path="backend/app/main.py" AND ref_kind="import"'
     )
-    assert "app.core.Engine" in {row[0] for row in c.fetchall()}
+    assert "backend.app.core.Engine" in {row[0] for row in c.fetchall()}
 
     c.execute(
         'SELECT symbol_fqname FROM "references" '
         'WHERE file_path="backend/app/main.py" AND ref_kind="call"'
     )
-    assert "app.core.Engine" in {row[0] for row in c.fetchall()}
+    assert "backend.app.core.Engine" in {row[0] for row in c.fetchall()}
+
+    c.execute('SELECT fqname FROM symbols WHERE name="Engine"')
+    assert [row[0] for row in c.fetchall()] == ["backend.app.core.Engine"]
 
     c.execute('SELECT raw_symbol FROM unresolved_refs WHERE file_path="backend/app/main.py"')
     assert not any(row[0].startswith("app") for row in c.fetchall())
@@ -242,7 +253,7 @@ def test_imported_names_shadow_external_imports(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -267,7 +278,7 @@ def test_cross_language_module_tables(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -295,7 +306,7 @@ def test_typescript_esm_js_specifier(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
@@ -325,7 +336,7 @@ def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
 
     cache = tmp_path / "cache"
     code = main(["index", str(repo), "--cache-dir", str(cache)])
-    assert code == EXIT_OK
+    assert code == EXIT_DELTA_DETECTED
 
     db_files = list((cache / "repos").glob("*/index.db"))
     assert len(db_files) == 1
@@ -351,3 +362,87 @@ def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
     assert call_row[0] == "utils.helper"
 
     conn.close()
+
+
+def test_index_offline_without_strict_tier1_falls_back(tmp_path: Path, capsys):
+    cache = tmp_path / "cache"
+    code = main(["index", str(FIXTURES_DIR / "python"), "--offline", "--cache-dir", str(cache)])
+    assert code == EXIT_DELTA_DETECTED
+
+
+def test_python_sibling_projects_keep_unique_fqnames(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    for service in ("users", "orders"):
+        app = repo / "services" / service / "app"
+        app.mkdir(parents=True)
+        (repo / "services" / service / "pyproject.toml").write_text("[project]\n")
+        (app / "__init__.py").write_text("")
+        (app / "db.py").write_text("def get_session():\n    return None\n")
+        (app / "main.py").write_text(
+            "from app.db import get_session\n\ndef run():\n    get_session()\n"
+        )
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_DELTA_DETECTED
+
+    conn = sqlite3.connect(next((cache / "repos").glob("*/index.db")))
+    c = conn.cursor()
+    c.execute('SELECT fqname FROM symbols WHERE name="get_session" ORDER BY fqname')
+    assert [row[0] for row in c.fetchall()] == [
+        "services.orders.app.db.get_session",
+        "services.users.app.db.get_session",
+    ]
+    for service in ("users", "orders"):
+        c.execute(
+            'SELECT DISTINCT symbol_fqname FROM "references" WHERE file_path=?',
+            (f"services/{service}/app/main.py",),
+        )
+        assert {row[0] for row in c.fetchall()} == {f"services.{service}.app.db.get_session"}
+    c.execute("SELECT COUNT(*) FROM unresolved_refs")
+    assert c.fetchone()[0] == 0
+    conn.close()
+
+
+def test_commonjs_require_shadows_repo_names(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "util.ts").write_text("export function format(v: string) { return v; }\n")
+    (repo / "a.js").write_text("const { format } = require('date-fns');\nformat(d);\n")
+    (repo / "b.js").write_text("const format = require('date-fns/format');\nformat(d);\n")
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_DELTA_DETECTED
+
+    conn = sqlite3.connect(next((cache / "repos").glob("*/index.db")))
+    c = conn.cursor()
+    c.execute(
+        'SELECT DISTINCT symbol_fqname FROM "references" '
+        'WHERE file_path IN ("a.js", "b.js") AND ref_kind="call"'
+    )
+    assert {row[0] for row in c.fetchall()} == {"require", "format"}
+    conn.close()
+
+
+def test_unit_detection_ignores_excluded_names_above_repo(tmp_path: Path, capsys):
+    repo = tmp_path / "build" / "app"
+    for module in ("svc", "web"):
+        src = repo / module / "src"
+        src.mkdir(parents=True)
+        (repo / module / "pom.xml").write_text(
+            f"<project><artifactId>{module}</artifactId></project>"
+        )
+        (src / "A.java").write_text("package x;\nclass A {}\n")
+        (repo / module / "tsconfig.json").write_text("{}")
+        (src / "a.ts").write_text("export function a() {}\n")
+    (repo / "pom.xml").write_text("<project><artifactId>root</artifactId></project>")
+
+    from arch_indexer.plugins.java_plugin import JavaPlugin
+    from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
+
+    assert [u.unit_id for u in JavaPlugin().detect(repo)] == ["java:svc", "java:web"]
+    assert [u.unit_id for u in TypeScriptPlugin().detect(repo)] == [
+        "typescript:svc",
+        "typescript:web",
+    ]

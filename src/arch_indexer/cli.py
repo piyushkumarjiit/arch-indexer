@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-tier1",
         action="store_true",
         default=False,
-        help="Fail if Tier 1 indexer is unavailable",
+        help="With --offline, exit 4 if a Tier 1 indexer is unavailable",
     )
     index_parser.add_argument(
         "--force-full",
