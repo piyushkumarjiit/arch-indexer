@@ -42,10 +42,14 @@ arch-indexer/
 │   │   └── state.py                 # Snapshot hashes, symbol hashes, delta calculation
 │   ├── graph/
 │   │   ├── builder.py               # Deterministic graph.json builder
-│   │   ├── mermaid.py               # Deterministic Mermaid diagram generator
-│   │   └── viewer.py                # Single-file static HTML viewer generator
-│   ├── viewer_assets/
-│   │   └── template.html            # Self-contained offline HTML/CSS/JS viewer template
+│   │   └── mermaid.py               # Deterministic Mermaid diagram generator
+│   ├── viewer/
+│   │   ├── renderer.py              # Single-file static HTML viewer renderer
+│   │   └── assets/                  # Offline HTML/CSS/JS viewer assets (package data)
+│   │       ├── template.html
+│   │       ├── viewer.css
+│   │       ├── viewer.js
+│   │       └── viewer_logic.js
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── checks/
 │   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
@@ -275,8 +279,9 @@ Data stores and external sinks are detected deterministically from known ORM/DB/
 Generated as a **single self-contained HTML file** with inline CSS and vanilla JS/SVG layout (no external CDN, no web server, no network):
 - **Works directly over `file://`**: `arch-indexer` embeds the current `graph.json` payload inside a `<script id="arch-graph-data" type="application/json">` block *and* provides a "Load `graph.json`" file picker (`FileReader`) so users can also open any standalone `graph.json` without hitting browser `file://` CORS blocks.
 - **Capabilities**:
+  - **Hierarchical drill-down**: navigate system -> module -> file group (directory) -> file -> symbol/endpoint via breadcrumbs, with aggregated edges and node counts at each level.
   - Pan/zoom interactive directed graph (deterministic layered layout by kind: Frontend -> Entrypoints -> Services/Modules -> Data Stores / External Sinks).
-  - **Filter by module** (multi-select sidebar), node kind, and indexing tier (`scip` vs `tree-sitter`).
+  - **Filter by module** (multi-select sidebar), node kind, and indexing tier (`scip` vs `tree-sitter`), plus a client-side search over labels, symbols, files and IDs.
   - **Trace flow**: select any Entrypoint to highlight and isolate the transitive subgraph from that Entrypoint to all reachable Data Stores and External Sinks, showing the step-by-step call chain with `file:line` and auth guards.
   - **Inspector panel**: clicking any node or edge displays its `file:line`, symbol, indexing tier, and incoming/outgoing edges.
 
