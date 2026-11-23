@@ -72,6 +72,128 @@ def test_index_unreadable_repo_exits_error(tmp_path: Path, capsys):
     assert code == EXIT_ERROR
 
 
+def test_chunk_files_must_be_positive(tmp_path: Path, capsys):
+    cache = tmp_path / "cache"
+    repo = FIXTURES_DIR / "python"
+
+    code = main(["index", str(repo), "--chunk-files", "-5", "--cache-dir", str(cache)])
+    assert code == EXIT_ERROR
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_python_relative_and_src_layout_imports(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    pkg = repo / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from .utils import helper\n")
+    (pkg / "utils.py").write_text("def helper():\n    return 1\n")
+    (pkg / "core.py").write_text("class Engine:\n    pass\n")
+    (pkg / "cli.py").write_text(
+        "from .core import Engine\nfrom . import core\nimport pkg.core\n"
+        "\ndef build():\n    return Engine()\n"
+    )
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" '
+        'WHERE file_path="src/pkg/cli.py" AND ref_kind="import"'
+    )
+    cli_imports = {row[0] for row in c.fetchall()}
+    assert {"pkg.core.Engine", "pkg.core"} <= cli_imports
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" '
+        'WHERE file_path="src/pkg/__init__.py" AND ref_kind="import"'
+    )
+    assert "pkg.utils.helper" in {row[0] for row in c.fetchall()}
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" '
+        'WHERE file_path="src/pkg/cli.py" AND ref_kind="call"'
+    )
+    assert "pkg.core.Engine" in {row[0] for row in c.fetchall()}
+
+    c.execute(
+        "SELECT raw_symbol FROM unresolved_refs "
+        'WHERE file_path IN ("src/pkg/cli.py", "src/pkg/__init__.py")'
+    )
+    assert not any(row[0].startswith("pkg") for row in c.fetchall())
+
+    conn.close()
+
+
+def test_typescript_index_import_and_alias(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    lib = repo / "lib" / "utils"
+    lib.mkdir(parents=True)
+    (lib / "index.ts").write_text(
+        "export function helper() { return 1; }\nexport function original() { return 2; }\n"
+    )
+    (repo / "lib" / "app.ts").write_text(
+        "import { helper } from './utils';\n"
+        "import { original as aliased } from './utils';\n"
+        "export function run() { helper(); aliased(); }\n"
+    )
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="lib/app.ts" AND ref_kind="import"'
+    )
+    assert {row[0] for row in c.fetchall()} == {"lib.utils.helper", "lib.utils.original"}
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="lib/app.ts" AND ref_kind="call"'
+    )
+    assert {row[0] for row in c.fetchall()} == {"lib.utils.helper", "lib.utils.original"}
+
+    conn.close()
+
+
+def test_bare_call_names_are_language_and_kind_scoped(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "storage.py").write_text("class Storage:\n    def open(self):\n        pass\n")
+    (repo / "pyfetch.py").write_text("def fetch():\n    return None\n")
+    (repo / "main.py").write_text('def run():\n    open("data")\n')
+    (repo / "app.ts").write_text("export function callFetch() { fetch('http://x'); }\n")
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="main.py" AND ref_kind="call"'
+    )
+    python_calls = {row[0] for row in c.fetchall()}
+    assert "open" in python_calls
+    assert "storage.Storage.open" not in python_calls
+
+    c.execute('SELECT symbol_fqname FROM "references" WHERE file_path="app.ts" AND ref_kind="call"')
+    ts_calls = {row[0] for row in c.fetchall()}
+    assert "fetch" in ts_calls
+    assert "pyfetch.fetch" not in ts_calls
+
+    conn.close()
+
+
 def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
     repo = tmp_path / "multi_file_repo"
     repo.mkdir()

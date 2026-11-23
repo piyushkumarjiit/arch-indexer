@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -281,6 +282,177 @@ public class OrderController {
         assert eps_by_method["POST"]["route_or_trigger"] == "/api/orders"
         assert "DELETE" in eps_by_method
         assert eps_by_method["DELETE"]["route_or_trigger"] == "/api/orders/{id}"
+
+
+def test_python_main_single_quotes_and_login_required():
+    code = b"""
+from flask import Flask
+app = Flask(__name__)
+
+@app.route("/secure")
+@login_required
+def secure():
+    pass
+
+if __name__ == '__main__':
+    app.run()
+"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        (p / "app.py").write_bytes(code)
+        plugin = PythonPlugin()
+        unit = IndexUnit(
+            unit_id="python:root",
+            name="root",
+            language="python",
+            root_dir=p,
+            files=[p / "app.py"],
+        )
+        res = plugin.index_unit_tier2(unit)
+        eps = {(e["kind"], e["name"]): e for e in res.entrypoints}
+        assert ("main", "__main__") in eps
+        secure = eps[("http", "secure")]
+        assert json.loads(secure["auth_symbols_json"]) == ["login_required"]
+
+
+def test_java_spring_route_ignores_non_path_attributes():
+    code = b"""
+package com.example.demo;
+
+@RestController
+@RequestMapping(produces = "application/json")
+public class ReportController {
+    @GetMapping(value = "/reports")
+    public String list() { return ""; }
+
+    @PostMapping(produces = "text/plain")
+    public String create() { return ""; }
+}
+"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        (p / "ReportController.java").write_bytes(code)
+        plugin = JavaPlugin()
+        unit = IndexUnit(
+            unit_id="java:root",
+            name="root",
+            language="java",
+            root_dir=p,
+            files=[p / "ReportController.java"],
+        )
+        res = plugin.index_unit_tier2(unit)
+        eps = {e["name"]: e for e in res.entrypoints if e["kind"] == "http"}
+        assert eps["list"]["route_or_trigger"] == "/reports"
+        assert eps["create"]["route_or_trigger"] == "/"
+
+
+def test_typescript_express_and_axios_filtering():
+    code = b"""
+import express from 'express';
+import cors from 'cors';
+import axios from 'axios';
+
+const app = express();
+const handler = () => {};
+
+app.use(express.json());
+app.use(cors());
+app.get('port');
+app.use('/static', express.static('public'));
+app.get('/health', handler);
+axios.create({ baseURL: '/api' });
+axios.interceptors.response.use((r) => r);
+axios.get('/api/items');
+"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        (p / "server.ts").write_bytes(code)
+        plugin = TypeScriptPlugin()
+        unit = IndexUnit(
+            unit_id="typescript:root",
+            name="root",
+            language="typescript",
+            root_dir=p,
+            files=[p / "server.ts"],
+        )
+        res = plugin.index_unit_tier2(unit)
+        http_eps = {
+            (e["method"], e["route_or_trigger"]) for e in res.entrypoints if e["kind"] == "http"
+        }
+        assert http_eps == {("ALL", "/static"), ("GET", "/health")}
+        api_routes = {e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "api_call"}
+        assert api_routes == {"/api/items"}
+
+
+def test_infra_compose_lines_dockerfile_flags_and_raw_sha(tmp_path: Path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """version: "3"
+services:
+    "app":
+        image: test
+    db:
+        image: postgres
+"""
+    )
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_bytes(b"from --platform=linux/amd64 python:3.11 as build\r\nEXPOSE 8080\r\n")
+
+    scanner = InfraScanner()
+    units = scanner.detect(tmp_path)
+    res = scanner.index_unit_tier2(units[0])
+
+    compose_lines = {
+        json.loads(a["summary_json"])["service"]: a["line"]
+        for a in res.infra_artifacts
+        if a["kind"] == "compose"
+    }
+    assert compose_lines == {"app": 3, "db": 5}
+
+    docker_items = {
+        json.loads(a["summary_json"])["type"]: a
+        for a in res.infra_artifacts
+        if a["kind"] == "docker"
+    }
+    base = json.loads(docker_items["base_image"]["summary_json"])
+    assert base["image"] == "python:3.11"
+    assert base["stage"] == "build"
+    expose = json.loads(docker_items["expose"]["summary_json"])
+    assert expose["ports"] == ["8080"]
+
+    files = {f["path"]: f for f in res.files}
+    assert files["Dockerfile"]["sha256"] == hashlib.sha256(dockerfile.read_bytes()).hexdigest()
+
+
+def test_maven_and_tsconfig_units_partition_deepest_first(tmp_path: Path):
+    maven = tmp_path / "maven"
+    (maven / "src").mkdir(parents=True)
+    (maven / "svc" / "src").mkdir(parents=True)
+    (maven / "pom.xml").write_text("<project><artifactId>root-app</artifactId></project>\n")
+    (maven / "svc" / "pom.xml").write_text(
+        "<project><parent><artifactId>root-app</artifactId></parent>"
+        "<artifactId>svc</artifactId></project>\n"
+    )
+    (maven / "src" / "Root.java").write_text("class Root {}\n")
+    (maven / "svc" / "src" / "Svc.java").write_text("class Svc {}\n")
+
+    java_units = {u.unit_id: u for u in JavaPlugin().detect(maven)}
+    assert java_units["java:root"].name == "root-app"
+    assert java_units["java:svc"].name == "svc"
+    assert [p.name for p in java_units["java:root"].files] == ["Root.java"]
+    assert [p.name for p in java_units["java:svc"].files] == ["Svc.java"]
+
+    ts = tmp_path / "tsrepo"
+    (ts / "src").mkdir(parents=True)
+    (ts / "web" / "src").mkdir(parents=True)
+    (ts / "tsconfig.json").write_text("{}\n")
+    (ts / "web" / "tsconfig.json").write_text("{}\n")
+    (ts / "src" / "a.ts").write_text("export const a = 1;\n")
+    (ts / "web" / "src" / "b.ts").write_text("export const b = 1;\n")
+
+    ts_units = {u.unit_id: u for u in TypeScriptPlugin().detect(ts)}
+    assert [p.name for p in ts_units["typescript:root"].files] == ["a.ts"]
+    assert [p.name for p in ts_units["typescript:web"].files] == ["b.ts"]
 
 
 def test_infra_scanner_extraction():

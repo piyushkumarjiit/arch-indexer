@@ -10,12 +10,14 @@ from typing import Any
 import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Node, Parser
 
+from arch_indexer.config import DEFAULT_CHUNK_FILES
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
     IndexResult,
     IndexUnit,
     LanguagePlugin,
+    build_name_table,
 )
 from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, get_repo_files
 
@@ -24,6 +26,18 @@ TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _module_name(rel_path: str) -> str:
+    """Derive the module key for a TypeScript/JavaScript file path."""
+    mod_path = rel_path
+    for ext in TS_EXTENSIONS:
+        if mod_path.endswith(ext):
+            mod_path = mod_path[: -len(ext)]
+            break
+    if mod_path.endswith("/index"):
+        mod_path = mod_path[:-6]
+    return mod_path.replace("/", ".")
 
 
 class TypeScriptPlugin(LanguagePlugin):
@@ -44,7 +58,7 @@ class TypeScriptPlugin(LanguagePlugin):
             return self.tsx_parser
         return self.ts_parser
 
-    def detect(self, repo: Path) -> list[IndexUnit]:
+    def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover TypeScript/JavaScript projects per tsconfig.json workspace/package."""
         repo_path = repo.resolve()
         files = get_repo_files(repo_path)
@@ -62,13 +76,13 @@ class TypeScriptPlugin(LanguagePlugin):
                 if not any(excluded in full_p.parts for excluded in EXCLUDED_DIR_NAMES):
                     tsconfig_files.append(full_p)
 
-        tsconfig_files.sort(key=lambda p: len(p.parts), reverse=True)
+        tsconfig_files.sort(key=lambda p: (-len(p.parts), p.as_posix()))
 
         assigned_files: set[Path] = set()
         units: list[IndexUnit] = []
 
         # 1. Units for each tsconfig.json directory
-        for tsconf in sorted(tsconfig_files, key=lambda p: p.as_posix()):
+        for tsconf in tsconfig_files:
             conf_dir = tsconf.parent
             rel_dir = conf_dir.relative_to(repo_path).as_posix()
             unit_name = rel_dir if rel_dir != "." else "root"
@@ -141,14 +155,7 @@ class TypeScriptPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            mod_path = rel_path
-            for ext in TS_EXTENSIONS:
-                if mod_path.endswith(ext):
-                    mod_path = mod_path[: -len(ext)]
-                    break
-            if mod_path.endswith("/index"):
-                mod_path = mod_path[:-6]
-            module_name = mod_path.replace("/", ".")
+            module_name = _module_name(rel_path)
 
             file_records.append(
                 {
@@ -324,11 +331,16 @@ class TypeScriptPlugin(LanguagePlugin):
                 )
 
     def index_unit_tier2(
-        self, unit: IndexUnit, symbol_context: dict[str, Any] | None = None
+        self,
+        unit: IndexUnit,
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult:
         """Extract definitions, imports, calls, unresolved refs, and entrypoints."""
         repo_root = unit.root_dir
-        file_records, symbol_records = self.extract_definitions(unit)
+        file_records, symbol_records = (
+            definitions if definitions is not None else self.extract_definitions(unit)
+        )
 
         known_fqnames: set[str] = set()
         known_names: dict[str, str] = {}
@@ -336,13 +348,12 @@ class TypeScriptPlugin(LanguagePlugin):
 
         if symbol_context:
             known_fqnames = symbol_context.get("fqnames", set())
-            known_names = symbol_context.get("names", {})
+            known_names = symbol_context.get("names", {}).get(self.name, {})
             known_files = symbol_context.get("files", set())
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
-                if s["name"] not in known_names:
-                    known_names[s["name"]] = s["fqname"]
+            known_names = build_name_table(symbol_records, file_records)
             for f in file_records:
                 known_files.add(f["path"])
 
@@ -361,14 +372,7 @@ class TypeScriptPlugin(LanguagePlugin):
             except OSError:
                 continue
 
-            mod_path = rel_path
-            for ext in TS_EXTENSIONS:
-                if mod_path.endswith(ext):
-                    mod_path = mod_path[: -len(ext)]
-                    break
-            if mod_path.endswith("/index"):
-                mod_path = mod_path[:-6]
-            module_name = mod_path.replace("/", ".")
+            module_name = _module_name(rel_path)
 
             parser = self._get_parser_for_path(rel_path)
             tree = parser.parse(source_bytes)
@@ -450,12 +454,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                 resolved_path = candidate
                                 break
 
-                        mod_key = resolved_path
-                        for ext in TS_EXTENSIONS:
-                            if mod_key.endswith(ext):
-                                mod_key = mod_key[: -len(ext)]
-                                break
-                        mod_key = mod_key.replace("/", ".")
+                        mod_key = _module_name(resolved_path)
 
                         # Extract imported specifiers
                         spec_nodes = []
@@ -476,8 +475,13 @@ class TypeScriptPlugin(LanguagePlugin):
 
                         if spec_nodes:
                             for sp in spec_nodes:
-                                sym_name = _get_node_text(
-                                    sp.child_by_field_name("name") or sp, source_bytes
+                                name_node = sp.child_by_field_name("name")
+                                alias_node = sp.child_by_field_name("alias")
+                                sym_name = _get_node_text(name_node or sp, source_bytes)
+                                local_name = (
+                                    _get_node_text(alias_node, source_bytes)
+                                    if alias_node
+                                    else sym_name
                                 )
                                 fq = f"{mod_key}.{sym_name}"
                                 if target_matched:
@@ -490,7 +494,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                             "ref_kind": "import",
                                         }
                                     )
-                                    file_imports[sym_name] = fq
+                                    file_imports[local_name] = fq
                                 else:
                                     unresolved_refs.append(
                                         {
@@ -543,18 +547,16 @@ class TypeScriptPlugin(LanguagePlugin):
                     fn_text = _get_node_text(fn_node, source_bytes).strip()
                     target_fqname = fn_text
 
-                    if fn_text in file_imports:
-                        target_fqname = file_imports[fn_text]
-                    elif "." in fn_text:
-                        prefix, rest = fn_text.split(".", 1)
-                        if prefix in file_imports:
-                            target_fqname = f"{file_imports[prefix]}.{rest}"
-                        elif f"{module_name}.{fn_text}" in known_fqnames:
-                            target_fqname = f"{module_name}.{fn_text}"
-                    elif f"{module_name}.{fn_text}" in known_fqnames:
-                        target_fqname = f"{module_name}.{fn_text}"
-                    elif fn_text in known_names:
-                        target_fqname = known_names[fn_text]
+                    for alias in sorted(file_imports, key=len, reverse=True):
+                        if fn_text == alias or fn_text.startswith(f"{alias}."):
+                            target_fqname = file_imports[alias] + fn_text[len(alias) :]
+                            break
+                    else:
+                        local_fqname = f"{module_name}.{fn_text}"
+                        if local_fqname in known_fqnames:
+                            target_fqname = local_fqname
+                        elif fn_text in known_names:
+                            target_fqname = known_names[fn_text]
 
                     references.append(
                         {
@@ -571,36 +573,43 @@ class TypeScriptPlugin(LanguagePlugin):
                     express_match = re.search(
                         r"(?:app|router)\.(get|post|put|delete|patch|options|all|use)$", fn_text
                     )
-                    if express_match and args_node and args_node.children:
+                    if express_match and args_node:
                         http_method = express_match.group(1).upper()
-                        # Extract route path from first argument
-                        first_arg = None
-                        for c in args_node.children:
-                            if c.type in ("string", "template_string"):
-                                first_arg = _get_node_text(c, source_bytes).strip("'\"`")
-                                break
+                        arg_nodes = [
+                            c
+                            for c in args_node.children
+                            if c.type not in ("(", ")", ",", "comment")
+                        ]
+                        first_arg = arg_nodes[0] if arg_nodes else None
+                        route_path = None
+                        if first_arg is not None and first_arg.type in (
+                            "string",
+                            "template_string",
+                        ):
+                            route_path = _get_node_text(first_arg, source_bytes).strip("'\"`")
 
-                        route_path = first_arg if first_arg else "/"
-                        # If route is handler identifier
-                        handler_name = ""
-                        for c in args_node.children:
-                            if c.type == "identifier":
-                                handler_name = _get_node_text(c, source_bytes)
+                        has_handler = len(arg_nodes) >= 2
+                        if route_path is not None and (http_method == "USE" or has_handler):
+                            handler_name = ""
+                            for c in arg_nodes[1:]:
+                                if c.type == "identifier":
+                                    handler_name = _get_node_text(c, source_bytes)
+                                    break
 
-                        entrypoints.append(
-                            {
-                                "kind": "http",
-                                "name": handler_name or route_path,
-                                "method": http_method if http_method != "USE" else "ALL",
-                                "route_or_trigger": route_path,
-                                "file_path": rel_path,
-                                "line": line,
-                                "symbol_fqname": f"{module_name}.{handler_name}"
-                                if handler_name
-                                else None,
-                                "auth_symbols_json": "[]",
-                            }
-                        )
+                            entrypoints.append(
+                                {
+                                    "kind": "http",
+                                    "name": handler_name or route_path,
+                                    "method": "ALL" if http_method == "USE" else http_method,
+                                    "route_or_trigger": route_path,
+                                    "file_path": rel_path,
+                                    "line": line,
+                                    "symbol_fqname": f"{module_name}.{handler_name}"
+                                    if handler_name
+                                    else None,
+                                    "auth_symbols_json": "[]",
+                                }
+                            )
 
                     # 4. Frontend API callers: fetch and axios
                     if fn_text == "fetch" or fn_text.endswith(".fetch"):
@@ -630,36 +639,40 @@ class TypeScriptPlugin(LanguagePlugin):
                             }
                         )
 
-                    elif fn_text.startswith("axios") or ".axios" in fn_text:
-                        route_url = "axios"
-                        method = "GET"
-                        if ".post" in fn_text:
-                            method = "POST"
-                        elif ".put" in fn_text:
-                            method = "PUT"
-                        elif ".delete" in fn_text:
-                            method = "DELETE"
-                        elif ".patch" in fn_text:
-                            method = "PATCH"
-
-                        if args_node:
-                            args_text = _get_node_text(args_node, source_bytes)
-                            url_match = re.search(r"['\"`]([^'\"`]+)['\"`]", args_text)
-                            if url_match:
-                                route_url = url_match.group(1)
-
-                        entrypoints.append(
-                            {
-                                "kind": "api_call",
-                                "name": fn_text,
-                                "method": method,
-                                "route_or_trigger": route_url,
-                                "file_path": rel_path,
-                                "line": line,
-                                "symbol_fqname": None,
-                                "auth_symbols_json": "[]",
-                            }
+                    else:
+                        axios_match = re.fullmatch(
+                            r"(?:[\w$.]+\.)?axios(?:\.(get|post|put|delete|patch|request))?",
+                            fn_text,
                         )
+                        if axios_match:
+                            route_url = "axios"
+                            method = (axios_match.group(1) or "GET").upper()
+                            if args_node:
+                                args_text = _get_node_text(args_node, source_bytes)
+                                url_match = re.search(r"['\"`]([^'\"`]+)['\"`]", args_text)
+                                if url_match:
+                                    route_url = url_match.group(1)
+                                if axios_match.group(1) is None:
+                                    method_match = re.search(
+                                        r"method\s*:\s*['\"`]([A-Z]+)['\"`]",
+                                        args_text,
+                                        re.IGNORECASE,
+                                    )
+                                    if method_match:
+                                        method = method_match.group(1).upper()
+
+                            entrypoints.append(
+                                {
+                                    "kind": "api_call",
+                                    "name": fn_text,
+                                    "method": method,
+                                    "route_or_trigger": route_url,
+                                    "file_path": rel_path,
+                                    "line": line,
+                                    "symbol_fqname": None,
+                                    "auth_symbols_json": "[]",
+                                }
+                            )
 
             for child in node.children:
                 walk(child)

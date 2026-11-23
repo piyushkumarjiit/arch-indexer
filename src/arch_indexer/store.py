@@ -125,6 +125,10 @@ class IndexStore:
 
     def insert_files(self, files: Iterable[dict[str, Any]]) -> None:
         """Insert file records in deterministic row order by path."""
+        with self.conn:
+            self._insert_files(files)
+
+    def _insert_files(self, files: Iterable[dict[str, Any]]) -> None:
         sorted_files = sorted(files, key=lambda f: f["path"])
         records = [
             (
@@ -138,18 +142,21 @@ class IndexStore:
             )
             for f in sorted_files
         ]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT OR REPLACE INTO files
-                (path, language, sha256, line_count, module, tier, fallback_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT OR REPLACE INTO files
+            (path, language, sha256, line_count, module, tier, fallback_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
         """Insert symbol records in deterministic row order."""
+        with self.conn:
+            self._insert_symbols(symbols)
+
+    def _insert_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
         sorted_symbols = sorted(
             symbols,
             key=lambda s: (s["file_path"], s["start_line"], s["end_line"], s["fqname"]),
@@ -168,19 +175,22 @@ class IndexStore:
             )
             for s in sorted_symbols
         ]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT INTO symbols
-                (fqname, name, kind, file_path, start_line, end_line,
-                 body_sha256, visibility, decorators_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT INTO symbols
+            (fqname, name, kind, file_path, start_line, end_line,
+             body_sha256, visibility, decorators_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_references(self, refs: Iterable[dict[str, Any]]) -> None:
         """Insert reference records in deterministic row order into quoted "references" table."""
+        with self.conn:
+            self._insert_references(refs)
+
+    def _insert_references(self, refs: Iterable[dict[str, Any]]) -> None:
         sorted_refs = sorted(
             refs,
             key=lambda r: (r["file_path"], r["line"], r["col"], r["symbol_fqname"], r["ref_kind"]),
@@ -189,18 +199,21 @@ class IndexStore:
             (r["symbol_fqname"], r["file_path"], r["line"], r["col"], r["ref_kind"])
             for r in sorted_refs
         ]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT INTO "references"
-                (symbol_fqname, file_path, line, col, ref_kind)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT INTO "references"
+            (symbol_fqname, file_path, line, col, ref_kind)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_entrypoints(self, entrypoints: Iterable[dict[str, Any]]) -> None:
         """Insert entrypoints in deterministic row order."""
+        with self.conn:
+            self._insert_entrypoints(entrypoints)
+
+    def _insert_entrypoints(self, entrypoints: Iterable[dict[str, Any]]) -> None:
         sorted_entries = sorted(
             entrypoints,
             key=lambda e: (e["file_path"], e["line"], e["kind"], e["name"]),
@@ -218,36 +231,42 @@ class IndexStore:
             )
             for e in sorted_entries
         ]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT INTO entrypoints
-                (kind, name, method, route_or_trigger, file_path, line,
-                 symbol_fqname, auth_symbols_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT INTO entrypoints
+            (kind, name, method, route_or_trigger, file_path, line,
+             symbol_fqname, auth_symbols_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_infra_artifacts(self, infra: Iterable[dict[str, Any]]) -> None:
         """Insert infra artifacts in deterministic row order."""
+        with self.conn:
+            self._insert_infra_artifacts(infra)
+
+    def _insert_infra_artifacts(self, infra: Iterable[dict[str, Any]]) -> None:
         sorted_infra = sorted(
             infra,
             key=lambda a: (a["file_path"], a["line"], a["kind"]),
         )
         records = [(a["kind"], a["file_path"], a["line"], a["summary_json"]) for a in sorted_infra]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT INTO infra_artifacts
-                (kind, file_path, line, summary_json)
-                VALUES (?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT INTO infra_artifacts
+            (kind, file_path, line, summary_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_unresolved_refs(self, unresolved: Iterable[dict[str, Any]]) -> None:
         """Insert unresolved refs in deterministic row order."""
+        with self.conn:
+            self._insert_unresolved_refs(unresolved)
+
+    def _insert_unresolved_refs(self, unresolved: Iterable[dict[str, Any]]) -> None:
         sorted_unresolved = sorted(
             unresolved,
             key=lambda u: (u["file_path"], u["line"], u["raw_symbol"]),
@@ -255,15 +274,14 @@ class IndexStore:
         records = [
             (u["file_path"], u["line"], u["raw_symbol"], u["language"]) for u in sorted_unresolved
         ]
-        with self.conn:
-            self.conn.executemany(
-                """
-                INSERT INTO unresolved_refs
-                (file_path, line, raw_symbol, language)
-                VALUES (?, ?, ?, ?)
-                """,
-                records,
-            )
+        self.conn.executemany(
+            """
+            INSERT INTO unresolved_refs
+            (file_path, line, raw_symbol, language)
+            VALUES (?, ?, ?, ?)
+            """,
+            records,
+        )
 
     def insert_unit_data(
         self,
@@ -278,17 +296,17 @@ class IndexStore:
         """Stream insertion of all artifacts extracted from a unit within a single transaction."""
         with self.conn:
             if files:
-                self.insert_files(files)
+                self._insert_files(files)
             if symbols:
-                self.insert_symbols(symbols)
+                self._insert_symbols(symbols)
             if references:
-                self.insert_references(references)
+                self._insert_references(references)
             if entrypoints:
-                self.insert_entrypoints(entrypoints)
+                self._insert_entrypoints(entrypoints)
             if infra_artifacts:
-                self.insert_infra_artifacts(infra_artifacts)
+                self._insert_infra_artifacts(infra_artifacts)
             if unresolved_refs:
-                self.insert_unresolved_refs(unresolved_refs)
+                self._insert_unresolved_refs(unresolved_refs)
 
     def get_summary(self) -> dict[str, Any]:
         """Collect index summary metrics."""

@@ -16,12 +16,40 @@ from arch_indexer.plugins.base import (
     IndexResult,
     IndexUnit,
     LanguagePlugin,
+    build_name_table,
+    module_with_parents,
 )
 from arch_indexer.toolchain import get_repo_files
 
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _module_info(rel_path: str) -> tuple[str, bool]:
+    """Derive the importable module name and whether the file is a package."""
+    mod_path = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+    parts = [part for part in mod_path.split("/") if part]
+    is_package = bool(parts) and parts[-1] == "__init__"
+    if is_package:
+        parts = parts[:-1]
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    return ".".join(parts), is_package
+
+
+def _resolve_relative_module(
+    module_name: str, is_package: bool, level: int, relative_module: str
+) -> str:
+    """Resolve a relative import against the importing file's package."""
+    package_parts = module_name.split(".") if is_package else module_name.split(".")[:-1]
+    drop = level - 1
+    if drop > 0:
+        package_parts = package_parts[:-drop] if drop <= len(package_parts) else []
+    prefix = ".".join(package_parts)
+    if prefix and relative_module:
+        return f"{prefix}.{relative_module}"
+    return prefix or relative_module
 
 
 def _get_decorators(node: Node, source_bytes: bytes) -> list[str]:
@@ -48,6 +76,8 @@ class PythonPlugin(LanguagePlugin):
 
     def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover Python packages / units in repo per spec section 4.1."""
+        if chunk_files <= 0:
+            raise ValueError("chunk_files must be a positive integer")
         repo_path = repo.resolve()
         files = get_repo_files(repo_path)
         py_files = [repo_path / f for f in files if f.endswith(".py")]
@@ -133,13 +163,7 @@ class PythonPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            # Compute module name
-            mod_path = rel_path
-            if mod_path.endswith(".py"):
-                mod_path = mod_path[:-3]
-            if mod_path.endswith("/__init__"):
-                mod_path = mod_path[:-9]
-            module_name = mod_path.replace("/", ".")
+            module_name, _ = _module_info(rel_path)
 
             file_records.append(
                 {
@@ -249,28 +273,32 @@ class PythonPlugin(LanguagePlugin):
                 )
 
     def index_unit_tier2(
-        self, unit: IndexUnit, symbol_context: dict[str, Any] | None = None
+        self,
+        unit: IndexUnit,
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult:
         """Extract definitions, imports, calls, unresolved refs, and entrypoints."""
         repo_root = unit.root_dir
-        file_records, symbol_records = self.extract_definitions(unit)
+        file_records, symbol_records = (
+            definitions if definitions is not None else self.extract_definitions(unit)
+        )
 
         # Build symbol table for cross-file resolution if not provided
         known_fqnames: set[str] = set()
         known_names: dict[str, str] = {}
-        known_files: set[str] = set()
+        known_modules: set[str] = set()
 
         if symbol_context:
             known_fqnames = symbol_context.get("fqnames", set())
-            known_names = symbol_context.get("names", {})
-            known_files = symbol_context.get("files", set())
+            known_names = symbol_context.get("names", {}).get(self.name, {})
+            known_modules = symbol_context.get("modules", set())
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
-                if s["name"] not in known_names:
-                    known_names[s["name"]] = s["fqname"]
+            known_names = build_name_table(symbol_records, file_records)
             for f in file_records:
-                known_files.add(f["path"])
+                known_modules.update(module_with_parents(f["module"]))
 
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
@@ -287,12 +315,7 @@ class PythonPlugin(LanguagePlugin):
             except OSError:
                 continue
 
-            mod_path = rel_path
-            if mod_path.endswith(".py"):
-                mod_path = mod_path[:-3]
-            if mod_path.endswith("/__init__"):
-                mod_path = mod_path[:-9]
-            module_name = mod_path.replace("/", ".")
+            module_name, is_package = _module_info(rel_path)
 
             tree = self.parser.parse(source_bytes)
             self._analyze_file(
@@ -300,9 +323,10 @@ class PythonPlugin(LanguagePlugin):
                 source_bytes,
                 rel_path,
                 module_name,
+                is_package,
                 known_fqnames,
                 known_names,
-                known_files,
+                known_modules,
                 references,
                 unresolved_refs,
                 entrypoints,
@@ -329,9 +353,10 @@ class PythonPlugin(LanguagePlugin):
         source_bytes: bytes,
         rel_path: str,
         module_name: str,
+        is_package: bool,
         known_fqnames: set[str],
         known_names: dict[str, str],
-        known_files: set[str],
+        known_modules: set[str],
         references: list[dict[str, Any]],
         unresolved_refs: list[dict[str, Any]],
         entrypoints: list[dict[str, Any]],
@@ -352,9 +377,7 @@ class PythonPlugin(LanguagePlugin):
                         raw_sym = _get_node_text(child, source_bytes)
                         if raw_sym == "argparse":
                             has_argparse = True
-                        if raw_sym in known_fqnames or any(
-                            f.startswith(raw_sym.replace(".", "/")) for f in known_files
-                        ):
+                        if raw_sym in known_modules or raw_sym in known_fqnames:
                             references.append(
                                 {
                                     "symbol_fqname": raw_sym,
@@ -382,9 +405,7 @@ class PythonPlugin(LanguagePlugin):
                             alias = (
                                 _get_node_text(alias_node, source_bytes) if alias_node else raw_sym
                             )
-                            if raw_sym in known_fqnames or any(
-                                f.startswith(raw_sym.replace(".", "/")) for f in known_files
-                            ):
+                            if raw_sym in known_modules or raw_sym in known_fqnames:
                                 references.append(
                                     {
                                         "symbol_fqname": raw_sym,
@@ -410,21 +431,20 @@ class PythonPlugin(LanguagePlugin):
                 col = node.start_point[1]
                 mod_name_node = node.child_by_field_name("module_name")
                 rel_mod = ""
-                if mod_name_node:
-                    rel_mod = _get_node_text(mod_name_node, source_bytes)
-
-                # Check if relative import e.g. from .utils import helper
                 relative_dots = 0
-                for c in node.children:
-                    if c.type == "import_prefix":
-                        relative_dots = len(_get_node_text(c, source_bytes))
+                if mod_name_node:
+                    if mod_name_node.type == "relative_import":
+                        for c in mod_name_node.children:
+                            if c.type == "import_prefix":
+                                relative_dots = len(_get_node_text(c, source_bytes))
+                            elif c.type == "dotted_name":
+                                rel_mod = _get_node_text(c, source_bytes)
+                    else:
+                        rel_mod = _get_node_text(mod_name_node, source_bytes)
 
                 if relative_dots > 0:
-                    base_parts = module_name.split(".")
-                    slice_len = max(0, len(base_parts) - relative_dots)
-                    prefix = ".".join(base_parts[:slice_len])
-                    resolved_mod = (
-                        f"{prefix}.{rel_mod}" if (prefix and rel_mod) else (prefix or rel_mod)
+                    resolved_mod = _resolve_relative_module(
+                        module_name, is_package, relative_dots, rel_mod
                     )
                 else:
                     resolved_mod = rel_mod
@@ -436,7 +456,7 @@ class PythonPlugin(LanguagePlugin):
                     if child.type == "dotted_name" and child != mod_name_node:
                         sym_name = _get_node_text(child, source_bytes)
                         full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
-                        if full_sym in known_fqnames or resolved_mod in known_fqnames:
+                        if full_sym in known_fqnames or full_sym in known_modules:
                             references.append(
                                 {
                                     "symbol_fqname": full_sym,
@@ -465,7 +485,7 @@ class PythonPlugin(LanguagePlugin):
                                 _get_node_text(alias_node, source_bytes) if alias_node else sym_name
                             )
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
-                            if full_sym in known_fqnames or resolved_mod in known_fqnames:
+                            if full_sym in known_fqnames or full_sym in known_modules:
                                 references.append(
                                     {
                                         "symbol_fqname": full_sym,
@@ -499,18 +519,16 @@ class PythonPlugin(LanguagePlugin):
                     if "parse_args" in fn_text:
                         has_argparse = True
 
-                    if fn_text in file_imports:
-                        target_fqname = file_imports[fn_text]
-                    elif "." in fn_text:
-                        prefix, rest = fn_text.split(".", 1)
-                        if prefix in file_imports:
-                            target_fqname = f"{file_imports[prefix]}.{rest}"
-                        elif f"{module_name}.{fn_text}" in known_fqnames:
-                            target_fqname = f"{module_name}.{fn_text}"
-                    elif f"{module_name}.{fn_text}" in known_fqnames:
-                        target_fqname = f"{module_name}.{fn_text}"
-                    elif fn_text in known_names:
-                        target_fqname = known_names[fn_text]
+                    for alias in sorted(file_imports, key=len, reverse=True):
+                        if fn_text == alias or fn_text.startswith(f"{alias}."):
+                            target_fqname = file_imports[alias] + fn_text[len(alias) :]
+                            break
+                    else:
+                        local_fqname = f"{module_name}.{fn_text}"
+                        if local_fqname in known_fqnames:
+                            target_fqname = local_fqname
+                        elif fn_text in known_names:
+                            target_fqname = known_names[fn_text]
 
                     references.append(
                         {
@@ -570,7 +588,7 @@ class PythonPlugin(LanguagePlugin):
                                 _get_node_text(func_node, source_bytes),
                             )
                             auth_symbols.extend(auth_matches)
-                            if "@login_required" in dec:
+                            if any("@login_required" in d for d in decorators):
                                 auth_symbols.append("login_required")
 
                             entrypoints.append(
@@ -605,8 +623,10 @@ class PythonPlugin(LanguagePlugin):
             elif node.type == "if_statement":
                 cond = node.child_by_field_name("condition")
                 if cond:
-                    cond_text = _get_node_text(cond, source_bytes).replace(" ", "")
-                    if '__name__=="__main__"' in cond_text or "'__main__'==__name__" in cond_text:
+                    cond_text = (
+                        _get_node_text(cond, source_bytes).replace(" ", "").replace("'", '"')
+                    )
+                    if '__name__=="__main__"' in cond_text or '"__main__"==__name__' in cond_text:
                         entrypoints.append(
                             {
                                 "kind": "main",

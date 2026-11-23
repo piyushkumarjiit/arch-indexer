@@ -10,18 +10,30 @@ from typing import Any
 import tree_sitter_java as tsjava
 from tree_sitter import Language, Node, Parser
 
+from arch_indexer.config import DEFAULT_CHUNK_FILES
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
     IndexResult,
     IndexUnit,
     LanguagePlugin,
+    build_fqname_prefixes,
+    build_name_table,
 )
 from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, get_repo_files
 
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _annotation_path(annotation_args: str) -> str:
+    """Read a route path from a bare positional string or a value/path attribute."""
+    attr_match = re.search(r"\b(?:value|path)\b\s*=\s*\{?\s*['\"]([^'\"]+)['\"]", annotation_args)
+    if attr_match:
+        return attr_match.group(1)
+    bare_match = re.match(r"\s*['\"]([^'\"]+)['\"]", annotation_args)
+    return bare_match.group(1) if bare_match else ""
 
 
 def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str, list[str]]:
@@ -51,7 +63,7 @@ class JavaPlugin(LanguagePlugin):
     def name(self) -> str:
         return "java"
 
-    def detect(self, repo: Path) -> list[IndexUnit]:
+    def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover Java units per Maven module (pom.xml reactor modules)."""
         repo_path = repo.resolve()
         files = get_repo_files(repo_path)
@@ -70,12 +82,12 @@ class JavaPlugin(LanguagePlugin):
                     pom_files.append(full_p)
 
         # Sort pom.xml deepest first to assign to child modules before parents
-        pom_files.sort(key=lambda p: len(p.parts), reverse=True)
+        pom_files.sort(key=lambda p: (-len(p.parts), p.as_posix()))
 
         assigned_files: set[Path] = set()
         units: list[IndexUnit] = []
 
-        for pom in sorted(pom_files, key=lambda p: p.as_posix()):
+        for pom in pom_files:
             module_dir = pom.parent
             rel_dir = module_dir.relative_to(repo_path).as_posix()
             unit_name = rel_dir if rel_dir != "." else "root"
@@ -83,7 +95,10 @@ class JavaPlugin(LanguagePlugin):
             # Parse artifactId if possible
             try:
                 pom_content = pom.read_text(encoding="utf-8", errors="replace")
-                m = re.search(r"<artifactId>([^<]+)</artifactId>", pom_content)
+                pom_without_parent = re.sub(
+                    r"<parent\b[^>]*>.*?</parent>", "", pom_content, flags=re.DOTALL
+                )
+                m = re.search(r"<artifactId>\s*([^<]+?)\s*</artifactId>", pom_without_parent)
                 if m:
                     unit_name = m.group(1).strip()
             except OSError:
@@ -265,27 +280,30 @@ class JavaPlugin(LanguagePlugin):
                 self._collect_definitions(child, source_bytes, rel_path, scope, symbols)
 
     def index_unit_tier2(
-        self, unit: IndexUnit, symbol_context: dict[str, Any] | None = None
+        self,
+        unit: IndexUnit,
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult:
         """Extract definitions, imports, calls, unresolved refs, and Spring entrypoints."""
         repo_root = unit.root_dir
-        file_records, symbol_records = self.extract_definitions(unit)
+        file_records, symbol_records = (
+            definitions if definitions is not None else self.extract_definitions(unit)
+        )
 
         known_fqnames: set[str] = set()
         known_names: dict[str, str] = {}
-        known_files: set[str] = set()
+        known_prefixes: set[str] = set()
 
         if symbol_context:
             known_fqnames = symbol_context.get("fqnames", set())
-            known_names = symbol_context.get("names", {})
-            known_files = symbol_context.get("files", set())
+            known_names = symbol_context.get("names", {}).get(self.name, {})
+            known_prefixes = symbol_context.get("prefixes", set())
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
-                if s["name"] not in known_names:
-                    known_names[s["name"]] = s["fqname"]
-            for f in file_records:
-                known_files.add(f["path"])
+            known_names = build_name_table(symbol_records, file_records)
+            known_prefixes = build_fqname_prefixes(known_fqnames)
 
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
@@ -312,6 +330,7 @@ class JavaPlugin(LanguagePlugin):
                 pkg_name,
                 known_fqnames,
                 known_names,
+                known_prefixes,
                 references,
                 unresolved_refs,
                 entrypoints,
@@ -340,6 +359,7 @@ class JavaPlugin(LanguagePlugin):
         pkg_name: str,
         known_fqnames: set[str],
         known_names: dict[str, str],
+        known_prefixes: set[str],
         references: list[dict[str, Any]],
         unresolved_refs: list[dict[str, Any]],
         entrypoints: list[dict[str, Any]],
@@ -355,10 +375,13 @@ class JavaPlugin(LanguagePlugin):
                 if c.type == "class_declaration":
                     _, annotations = _get_modifiers_and_annotations(c, source_bytes)
                     for ann in annotations:
-                        if "@RequestMapping" in ann:
-                            m = re.search(r"['\"]([^'\"]+)['\"]", ann)
-                            if m:
-                                class_base_path = m.group(1).rstrip("/")
+                        ann_match = re.search(
+                            r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
+                        )
+                        if ann_match:
+                            path = _annotation_path(ann_match.group(1) or "")
+                            if path:
+                                class_base_path = path.rstrip("/")
                 find_class_base_path(c)
 
         find_class_base_path(root)
@@ -374,9 +397,7 @@ class JavaPlugin(LanguagePlugin):
                     if c.type in ("scoped_identifier", "identifier"):
                         raw_sym = _get_node_text(c, source_bytes).strip()
                         simple_name = raw_sym.split(".")[-1]
-                        if raw_sym in known_fqnames or any(
-                            k.startswith(f"{raw_sym}.") for k in known_fqnames
-                        ):
+                        if raw_sym in known_fqnames or raw_sym in known_prefixes:
                             references.append(
                                 {
                                     "symbol_fqname": raw_sym,
@@ -469,14 +490,7 @@ class JavaPlugin(LanguagePlugin):
                                 http_method = req_m.group(1)
 
                         # Extract route path
-                        route_path = ""
-                        p_match = re.search(r"(?:value|path)\s*=\s*['\"]([^'\"]+)['\"]", ann_args)
-                        if p_match:
-                            route_path = p_match.group(1)
-                        else:
-                            s_match = re.search(r"['\"]([^'\"]+)['\"]", ann_args)
-                            if s_match:
-                                route_path = s_match.group(1)
+                        route_path = _annotation_path(ann_args)
 
                         full_route = (
                             f"{class_base_path}/{route_path.lstrip('/')}"

@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from arch_indexer.config import DEFAULT_CHUNK_FILES
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
@@ -27,7 +28,7 @@ class InfraScanner(LanguagePlugin):
     def name(self) -> str:
         return "infra"
 
-    def detect(self, repo: Path) -> list[IndexUnit]:
+    def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover infrastructure files in target repository."""
         repo_path = repo.resolve()
         files = get_repo_files(repo_path)
@@ -68,7 +69,12 @@ class InfraScanner(LanguagePlugin):
             message="Tier 1 SCIP indexing unavailable for infrastructure artifacts",
         )
 
-    def index_unit_tier2(self, unit: IndexUnit) -> IndexResult:
+    def index_unit_tier2(
+        self,
+        unit: IndexUnit,
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
+    ) -> IndexResult:
         """Extract infra artifacts from detected files."""
         repo_root = unit.root_dir
         file_records: list[dict[str, Any]] = []
@@ -81,13 +87,14 @@ class InfraScanner(LanguagePlugin):
                 rel_path = str(full_path)
 
             try:
-                content = full_path.read_text(encoding="utf-8", errors="replace")
+                raw_bytes = full_path.read_bytes()
             except OSError:
                 continue
 
+            content = raw_bytes.decode("utf-8", errors="replace")
             lines = content.splitlines()
             line_count = len(lines)
-            sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
             file_records.append(
                 {
@@ -108,13 +115,19 @@ class InfraScanner(LanguagePlugin):
                 basename, "*.dockerfile"
             ):
                 for idx, line in enumerate(lines, start=1):
-                    stripped = line.strip()
-                    if stripped.startswith("FROM "):
-                        parts = stripped[5:].strip().split()
-                        image = parts[0] if parts else ""
+                    parts = line.strip().split(None, 1)
+                    if not parts:
+                        continue
+                    instruction = parts[0].upper()
+                    rest = parts[1].strip() if len(parts) > 1 else ""
+                    if instruction == "FROM":
+                        from_parts = rest.split()
+                        while from_parts and from_parts[0].startswith("--"):
+                            from_parts.pop(0)
+                        image = from_parts[0] if from_parts else ""
                         stage = None
-                        if len(parts) >= 3 and parts[1].upper() == "AS":
-                            stage = parts[2]
+                        if len(from_parts) >= 3 and from_parts[1].upper() == "AS":
+                            stage = from_parts[2]
                         infra_artifacts.append(
                             {
                                 "kind": "docker",
@@ -130,8 +143,8 @@ class InfraScanner(LanguagePlugin):
                                 ),
                             }
                         )
-                    elif stripped.startswith("EXPOSE "):
-                        ports = stripped[7:].strip().split()
+                    elif instruction == "EXPOSE":
+                        ports = rest.split()
                         infra_artifacts.append(
                             {
                                 "kind": "docker",
@@ -142,8 +155,7 @@ class InfraScanner(LanguagePlugin):
                                 ),
                             }
                         )
-                    elif stripped.startswith("ENTRYPOINT "):
-                        cmd = stripped[11:].strip()
+                    elif instruction == "ENTRYPOINT":
                         infra_artifacts.append(
                             {
                                 "kind": "docker",
@@ -153,20 +165,19 @@ class InfraScanner(LanguagePlugin):
                                     {
                                         "type": "entrypoint",
                                         "directive": "ENTRYPOINT",
-                                        "command": cmd,
+                                        "command": rest,
                                     }
                                 ),
                             }
                         )
-                    elif stripped.startswith("CMD "):
-                        cmd = stripped[4:].strip()
+                    elif instruction == "CMD":
                         infra_artifacts.append(
                             {
                                 "kind": "docker",
                                 "file_path": rel_path,
                                 "line": idx,
                                 "summary_json": json.dumps(
-                                    {"type": "cmd", "directive": "CMD", "command": cmd}
+                                    {"type": "cmd", "directive": "CMD", "command": rest}
                                 ),
                             }
                         )
@@ -184,20 +195,22 @@ class InfraScanner(LanguagePlugin):
                     ):
                         # Locate line of each service in file
                         service_lines: dict[str, int] = {}
-                        in_services = False
-                        for idx, line in enumerate(lines, start=1):
-                            if re.match(r"^services\s*:", line):
-                                in_services = True
-                                continue
-                            if in_services:
-                                m = re.match(r"^\s{2}([a-zA-Z0-9._-]+)\s*:", line)
-                                if m:
-                                    service_lines[m.group(1)] = idx
-                                elif re.match(r"^[a-zA-Z0-9._-]+\s*:", line):
-                                    in_services = False
+                        root_node = yaml.compose(content)
+                        if isinstance(root_node, yaml.MappingNode):
+                            for key_node, value_node in root_node.value:
+                                if (
+                                    isinstance(key_node, yaml.ScalarNode)
+                                    and key_node.value == "services"
+                                    and isinstance(value_node, yaml.MappingNode)
+                                ):
+                                    for svc_key, _ in value_node.value:
+                                        if isinstance(svc_key, yaml.ScalarNode):
+                                            service_lines[str(svc_key.value)] = (
+                                                svc_key.start_mark.line + 1
+                                            )
 
                         for svc_name, svc_cfg in data["services"].items():
-                            svc_line = service_lines.get(svc_name, 1)
+                            svc_line = service_lines.get(str(svc_name), 1)
                             cfg = svc_cfg if isinstance(svc_cfg, dict) else {}
                             infra_artifacts.append(
                                 {

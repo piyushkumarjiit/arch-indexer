@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from arch_indexer.config import DEFAULT_CHUNK_FILES, RepoCachePaths
-from arch_indexer.plugins.base import FallbackSignal, IndexUnit
+from arch_indexer.plugins.base import (
+    FallbackSignal,
+    IndexUnit,
+    build_fqname_prefixes,
+    build_name_table,
+    module_with_parents,
+)
 from arch_indexer.plugins.infra_scanner import InfraScanner
 from arch_indexer.plugins.java_plugin import JavaPlugin
 from arch_indexer.plugins.python_plugin import PythonPlugin
@@ -58,43 +64,41 @@ def run_index(
     # Discover units across plugins
     all_units: list[tuple[Any, IndexUnit]] = []
     for plugin in plugins:
-        if plugin.name == "python":
-            units = plugin.detect(target_repo, chunk_files=chunk_files)
-        else:
-            units = plugin.detect(target_repo)
+        units = plugin.detect(target_repo, chunk_files=chunk_files)
         for u in units:
             all_units.append((plugin, u))
 
     # Phase 1: Pre-extract symbols to build global repository symbol table
     repo_fqnames: set[str] = set()
-    name_counts: dict[str, int] = {}
-    name_to_fqname: dict[str, str] = {}
+    repo_modules: set[str] = set()
     repo_files: set[str] = set()
+    symbols_by_language: dict[str, list[dict[str, Any]]] = {}
+    files_by_language: dict[str, list[dict[str, Any]]] = {}
+    definitions_by_unit: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
 
     for plugin, unit in all_units:
-        if hasattr(plugin, "extract_definitions"):
-            file_recs, sym_recs = plugin.extract_definitions(unit)
-            for f in file_recs:
-                repo_files.add(f["path"])
-            for s in sym_recs:
-                repo_fqnames.add(s["fqname"])
-                name = s["name"]
-                name_counts[name] = name_counts.get(name, 0) + 1
-                if name_counts[name] == 1:
-                    name_to_fqname[name] = s["fqname"]
-                elif name in name_to_fqname:
-                    del name_to_fqname[name]  # ambiguous name
-        else:
-            for f in unit.files:
-                try:
-                    rel = f.relative_to(target_repo).as_posix()
-                    repo_files.add(rel)
-                except ValueError:
-                    pass
+        file_recs, sym_recs = plugin.extract_definitions(unit)
+        definitions_by_unit[unit.unit_id] = (file_recs, sym_recs)
+        for f in file_recs:
+            repo_files.add(f["path"])
+            repo_modules.update(module_with_parents(f["module"]))
+        for s in sym_recs:
+            repo_fqnames.add(s["fqname"])
+        symbols_by_language.setdefault(plugin.name, []).extend(sym_recs)
+        files_by_language.setdefault(plugin.name, []).extend(file_recs)
+
+    names_by_language = {
+        language: build_name_table(
+            symbols_by_language.get(language, []), files_by_language.get(language, [])
+        )
+        for language in symbols_by_language
+    }
 
     symbol_context = {
         "fqnames": repo_fqnames,
-        "names": name_to_fqname,
+        "prefixes": build_fqname_prefixes(repo_fqnames),
+        "modules": repo_modules,
+        "names": names_by_language,
         "files": repo_files,
     }
 
@@ -115,16 +119,11 @@ def run_index(
             # 2. Check for fallback
             if isinstance(tier1_res, FallbackSignal):
                 # Run Tier 2
-                if hasattr(plugin, "index_unit_tier2"):
-                    import inspect
-
-                    sig = inspect.signature(plugin.index_unit_tier2)
-                    if "symbol_context" in sig.parameters:
-                        res = plugin.index_unit_tier2(unit, symbol_context=symbol_context)
-                    else:
-                        res = plugin.index_unit_tier2(unit)
-                else:
-                    continue
+                res = plugin.index_unit_tier2(
+                    unit,
+                    symbol_context=symbol_context,
+                    definitions=definitions_by_unit.get(unit.unit_id),
+                )
             else:
                 res = tier1_res
 

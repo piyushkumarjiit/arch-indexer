@@ -32,6 +32,16 @@ EXIT_VALIDATION_FAILED: int = 3
 EXIT_TOOLCHAIN_MISSING: int = 4
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser matching the full command surface in spec section 7.1."""
     parser = argparse.ArgumentParser(
@@ -110,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.add_argument(
         "--chunk-files",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_CHUNK_FILES,
         help="Max files per indexing chunk",
     )

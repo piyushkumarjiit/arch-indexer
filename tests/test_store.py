@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from arch_indexer.store import IndexStore
 
 
@@ -170,6 +172,44 @@ def test_deterministic_row_order_on_insert(tmp_path: Path):
     ref_syms = [r[0] for r in c.fetchall()]
     assert ref_syms == ["targetA", "targetC", "targetB"]
 
+    store.close()
+
+
+def test_insert_unit_data_rolls_back_all_tables_on_failure(tmp_path: Path):
+    db_file = tmp_path / "test_atomic.db"
+    store = IndexStore(db_file)
+
+    with pytest.raises(KeyError):
+        store.insert_unit_data(
+            files=[
+                {
+                    "path": "a.py",
+                    "language": "python",
+                    "sha256": "h1",
+                    "line_count": 1,
+                    "module": "a",
+                    "tier": "tree-sitter",
+                }
+            ],
+            symbols=[
+                {
+                    "fqname": "a.func",
+                    "name": "func",
+                    "kind": "function",
+                    "file_path": "a.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+            ],
+        )
+
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM files")
+    assert c.fetchone()[0] == 0
+    c.execute("SELECT COUNT(*) FROM symbols")
+    assert c.fetchone()[0] == 0
+    conn.close()
     store.close()
 
 
