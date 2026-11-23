@@ -94,6 +94,15 @@ FLOWCHART_ARROW_SPLIT_RE = re.compile(
 )
 
 
+# Closing token of a labeled flowchart edge: label text sits between an opening
+# token ('--', '==', '-.') and one of these closing tokens.
+FLOWCHART_EDGE_LABEL_CLOSE_RE = re.compile(r"\s+(-->|---|==>|===|\.->|\.-)")
+
+# A sequenceDiagram message statement carries an arrow before its ':' payload
+SEQUENCE_MESSAGE_ARROW_RE = re.compile(r"-{1,2}(?:>>?|x|\))")
+SEQUENCE_NOTE_RE = re.compile(r"^\s*note\b", re.IGNORECASE)
+
+
 @dataclass(frozen=True)
 class MermaidError:
     """Structured Mermaid syntax validation error."""
@@ -199,6 +208,74 @@ def _split_tokens_outside_brackets(text: str, seps: str = "&;") -> list[str]:
     return tokens
 
 
+def _mask_edge_label_text(line: str) -> str:
+    """Blank flowchart edge-label text outside brackets, preserving structure."""
+    out = list(line)
+    depth = 0
+    in_quote = False
+    escape = False
+    idx = 0
+    n = len(line)
+
+    while idx < n:
+        ch = line[idx]
+        if in_quote:
+            if ch == "\\" and not escape:
+                escape = True
+            elif ch == '"' and not escape:
+                in_quote = False
+            else:
+                escape = False
+            idx += 1
+            continue
+
+        if ch == '"':
+            in_quote = True
+            idx += 1
+            continue
+
+        if ch in "([{":
+            depth += 1
+            idx += 1
+            continue
+
+        if ch in ")]}":
+            if depth > 0:
+                depth -= 1
+            idx += 1
+            continue
+
+        if depth > 0:
+            idx += 1
+            continue
+
+        if ch == "|":
+            end = line.find("|", idx + 1)
+            if end != -1:
+                for pos in range(idx + 1, end):
+                    out[pos] = " "
+                idx = end + 1
+                continue
+            idx += 1
+            continue
+
+        if (
+            line.startswith(("--", "==", "-."), idx)
+            and idx + 2 < n
+            and line[idx + 2].isspace()
+        ):
+            close = FLOWCHART_EDGE_LABEL_CLOSE_RE.search(line, idx + 2)
+            if close is not None:
+                for pos in range(idx + 2, close.start()):
+                    out[pos] = " "
+                idx = close.end()
+                continue
+
+        idx += 1
+
+    return "".join(out)
+
+
 def _mask_bracket_contents(line: str) -> str:
     """Blank out label text inside bracket delimiters, preserving the delimiters."""
     out = list(line)
@@ -240,8 +317,15 @@ def _mask_bracket_contents(line: str) -> str:
 
 
 def _mask_sequence_message(line: str) -> str:
-    """Blank out free-text sequenceDiagram message text after the first ':'."""
-    idx = line.find(":")
+    """Blank free-text payload on sequenceDiagram message and note lines."""
+    if SEQUENCE_NOTE_RE.match(line):
+        idx = line.find(":")
+    else:
+        arrow = SEQUENCE_MESSAGE_ARROW_RE.search(line)
+        if arrow is None:
+            return line
+        idx = line.find(":", arrow.end())
+
     if idx < 0:
         return line
     return line[: idx + 1] + " " * (len(line) - idx - 1)
@@ -469,10 +553,13 @@ def validate_mermaid_block(
     curly_stack: list[int] = []
 
     for line_no, raw in body_lines_with_idx:
-        # Check quotes and line delimiters, ignoring free-text sequence messages
-        bracket_line = (
-            _mask_sequence_message(raw) if diagram_type == "sequenceDiagram" else raw
-        )
+        # Check quotes and line delimiters, ignoring free-text label payloads
+        if diagram_type == "sequenceDiagram":
+            bracket_line = _mask_sequence_message(raw)
+        elif diagram_type in ("flowchart", "graph"):
+            bracket_line = _mask_edge_label_text(raw)
+        else:
+            bracket_line = raw
         err = _validate_brackets_in_line(
             bracket_line,
             doc_rel=doc_rel,
@@ -526,7 +613,7 @@ def validate_mermaid_block(
 
         if diagram_type in ("flowchart", "graph"):
             # Validate structure only: label text is not diagram syntax
-            structural_content = _mask_bracket_contents(line_content)
+            structural_content = _mask_bracket_contents(_mask_edge_label_text(line_content))
 
             # Check edge arrows
             has_arrow_err = False

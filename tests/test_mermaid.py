@@ -500,8 +500,19 @@ def test_label_text_is_not_parsed_as_diagram_structure():
     assert _validate_snippet("flowchart TD\n  A[a -> b] --> B\n") == []
     assert _validate_snippet("flowchart TD\n  A[x --> y] --> B\n") == []
     assert _validate_snippet("flowchart TD\n  A(step -> next) --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A -->|Map<K,V>| B\n") == []
+    assert _validate_snippet("flowchart TD\n  A -->|count>0| B\n") == []
+    assert _validate_snippet("flowchart TD\n  A -->|a -> b| B\n") == []
+    assert _validate_snippet("flowchart TD\n  A -- x>0 --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A -- a -> b --> B\n") == []
     assert _validate_snippet("sequenceDiagram\n  A->>B: smile :)\n") == []
     assert _validate_snippet("sequenceDiagram\n  A->>B: x ==> y\n") == []
+
+    # Non-message sequence lines keep their structural delimiters and quotes.
+    assert _validate_snippet("sequenceDiagram\n  participant DB as Postgres (db:5432)\n") == []
+    assert _validate_snippet("sequenceDiagram\n  loop Every 5s (retry: 3)\n") == []
+    assert _validate_snippet('sequenceDiagram\n  participant A as "svc: api"\n') == []
+    assert _validate_snippet("sequenceDiagram\n  Note over A: retry (max: 3)\n") == []
 
     # Structural errors outside label text are still detected.
     assert any(
