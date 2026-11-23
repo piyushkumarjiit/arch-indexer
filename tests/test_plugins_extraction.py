@@ -855,6 +855,71 @@ def ping(): pass
     assert [e for e in res.entrypoints if e["kind"] == "cli"] == []
 
 
+def test_python_unresolvable_receiver_factories_are_not_entrypoints(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "app.py",
+        b"""
+from fastapi import APIRouter, FastAPI
+
+
+class CustomRouter(APIRouter):
+    pass
+
+
+def create_app():
+    return FastAPI()
+
+
+app = create_app()
+router = CustomRouter()
+alias = app
+
+@app.get("/health")
+def health(): pass
+
+@router.get("/items")
+def items(): pass
+
+@alias.get("/alias")
+def alias_route(): pass
+""",
+    )
+    assert [e for e in res.entrypoints if e["kind"] == "http"] == []
+    unresolved = {u["raw_symbol"] for u in res.unresolved_refs}
+    assert {"app.get", "router.get", "alias.get"} <= unresolved
+
+
+def test_python_stacked_routes_record_signature_dependencies_once(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "app.py",
+        b"""
+from fastapi import Depends, FastAPI
+
+app = FastAPI()
+
+
+def get_db():
+    return object()
+
+
+@app.get("/")
+@app.get("/home")
+def home(db=Depends(get_db)):
+    return db
+""",
+    )
+    http = {e["route_or_trigger"]: e for e in res.entrypoints if e["kind"] == "http"}
+    assert set(http) == {"/", "/home"}
+    assert all(e["metadata"]["dependencies"] == ["get_db"] for e in http.values())
+    depends_on = [r for r in res.references if r["ref_kind"] == "depends_on"]
+    assert len(depends_on) == 1
+    assert depends_on[0]["symbol_fqname"] == "app.get_db"
+
+
 def test_python_routes_and_commands_from_imported_modules(tmp_path: Path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text(

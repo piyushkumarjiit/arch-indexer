@@ -480,24 +480,29 @@ class _Resolver:
         return ("external", dotted, "")
 
     def factory_kind(self, module: str, callee: str, depth: int = 0) -> str | None:
+        """Kind of the object a factory call creates, or ``None`` when unresolved."""
         target = self.resolve(module, callee, depth + 1)
-        if target is not None and target[0] == "external":
-            return FRAMEWORK_FACTORIES.get(target[1])
-        return None
+        if target is None or target[0] != "external":
+            return None
+        return FRAMEWORK_FACTORIES.get(target[1], "other")
 
-    def target_kind(self, target: _Target, depth: int = 0) -> str:
-        """Classify a resolved target as a framework receiver kind, else ``other``."""
+    def target_kind(self, target: _Target, depth: int = 0) -> str | None:
+        """Classify a resolved target as a framework receiver kind.
+
+        ``None`` when the target is internal and does not resolve to a known
+        factory; ``other`` only for a known external non-framework target.
+        """
         kind, where, name = target
         if kind == "external":
             return CLICK_MODULE if where == "click" else "other"
         if kind != "internal":
-            return "other"
+            return None
         facts = self.facts(where)
         if facts is None:
-            return "other"
+            return None
         if name in facts.variables:
             callee = facts.variables[name]
-            return (self.factory_kind(where, callee, depth) if callee else None) or "other"
+            return self.factory_kind(where, callee, depth) if callee else None
         function = facts.functions.get(name)
         if function is not None:
             for receiver, attr in function.decorators:
@@ -505,7 +510,7 @@ class _Resolver:
                     where, receiver, depth + 1, scoped=False
                 ) in (CLICK_MODULE, "click"):
                     return "click"
-        return "other"
+        return None
 
     def receiver_kind(
         self, module: str, receiver: str, depth: int = 0, scoped: bool = True
@@ -516,7 +521,7 @@ class _Resolver:
             return None
         callee = facts.scoped_calls.get(receiver)
         if scoped and callee is not None and receiver not in facts.variables:
-            return self.factory_kind(module, callee, depth) or "other"
+            return self.factory_kind(module, callee, depth)
         target = self.resolve(module, receiver, depth)
         return None if target is None else self.target_kind(target, depth)
 
@@ -940,6 +945,7 @@ class PythonPlugin(LanguagePlugin):
         func_fqname: str,
         resolver: _Resolver,
         references: list[dict[str, Any]],
+        dependency_refs: set[tuple[int, int, str]],
     ) -> dict[str, Any]:
         """Build an ``http`` entrypoint for a resolved route decorator."""
         args_match = re.search(r"\(([^)]*)\)", dec)
@@ -968,15 +974,19 @@ class PythonPlugin(LanguagePlugin):
             if not text:
                 continue
             dependencies.append(text)
-            references.append(
-                {
-                    "symbol_fqname": resolver.fqname(resolver.resolve(module_name, text), text),
-                    "file_path": rel_path,
-                    "line": dep_call.start_point[0] + 1,
-                    "col": dep_call.start_point[1],
-                    "ref_kind": "depends_on",
-                }
-            )
+            symbol_fqname = resolver.fqname(resolver.resolve(module_name, text), text)
+            ref_key = (dep_call.start_point[0], dep_call.start_point[1], symbol_fqname)
+            if ref_key not in dependency_refs:
+                dependency_refs.add(ref_key)
+                references.append(
+                    {
+                        "symbol_fqname": symbol_fqname,
+                        "file_path": rel_path,
+                        "line": dep_call.start_point[0] + 1,
+                        "col": dep_call.start_point[1],
+                        "ref_kind": "depends_on",
+                    }
+                )
             if (
                 marker == "Security" or resolver.is_auth_dependency(module_name, text)
             ) and text not in auth_symbols:
@@ -1215,6 +1225,7 @@ class PythonPlugin(LanguagePlugin):
                     func_line = func_node.start_point[0] + 1
                     func_fqname = f"{scope}.{func_name}" if scope else func_name
                     decorators = [_get_node_text(d, source_bytes).strip() for d in decorator_nodes]
+                    dependency_refs: set[tuple[int, int, str]] = set()
 
                     for dec_node, dec in zip(decorator_nodes, decorators, strict=True):
                         split = _split_decorator(dec_node, source_bytes)
@@ -1248,6 +1259,7 @@ class PythonPlugin(LanguagePlugin):
                                     func_fqname,
                                     resolver,
                                     references,
+                                    dependency_refs,
                                 )
                             )
                         elif attr in RECEIVER_CLI_ATTRS.get(kind, ()):
