@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     java_min = load_toolchain_manifest()["runtimes"]["java_min_version"]
 
     # toolchain status
-    tc_status = toolchain_sub.add_parser("status", help="Inspect host runtimes and toolchain")
+    tc_status = toolchain_sub.add_parser("status", help="Inspect resolved runtimes and toolchain")
     tc_status.add_argument("--repo", required=True, help="Target repository path")
     tc_status.add_argument("--cache-dir", default=None, help="Cache directory override")
 
@@ -60,8 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            f"Not supported yet: exits 1 with an error; install host java >= {java_min} "
-            "and mvn instead"
+            "Fetch the pinned Temurin JDK (min java "
+            f"{java_min}) into <cache>/runtimes/ when host java is missing or too old, and "
+            "Apache Maven too when the repo has a pom.xml and host mvn is "
+            "missing (Java repos only). Only "
+            "this flag downloads; an already fetched runtime is reused and "
+            "reported without it"
         ),
     )
 
@@ -253,6 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"  Installed tools:  {', '.join(result['installed'])}")
                 if result["skipped"]:
                     print(f"  Already present:  {', '.join(result['skipped'])}")
+                for line in result.get("runtimes", []):
+                    print(f"  Runtimes:         {line}")
                 for w in result["warnings"]:
                     sys.stderr.write(f"Warning: {w}\n")
                 return EXIT_OK

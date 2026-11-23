@@ -14,7 +14,6 @@ from arch_indexer.cli import (
     main,
 )
 from arch_indexer.config import get_jvm_heap_mb, get_node_heap_mb
-from arch_indexer.toolchain import load_toolchain_manifest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -123,23 +122,91 @@ def test_cli_toolchain_ensure(tmp_path, capsys):
         assert "scip-python" in captured.out
 
 
-def test_cli_fetch_runtime_is_rejected(tmp_path, capsys):
-    code = main(
-        [
-            "toolchain",
-            "ensure",
-            "--repo",
-            str(FIXTURES_DIR / "java_maven"),
-            "--cache-dir",
-            str(tmp_path / "cache"),
-            "--fetch-runtime",
-        ]
-    )
+def test_cli_toolchain_ensure_prints_runtime_lines(tmp_path, capsys):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+
+    with patch(
+        "arch_indexer.cli.ensure_toolchain",
+        return_value={
+            "active_languages": ["java", "infra"],
+            "installed": ["scip-java"],
+            "skipped": [],
+            "warnings": [],
+            "runtimes": [
+                "java: portable runtime 17.0.21.1+2 (downloaded) at /cache/runtimes/jdk",
+                "mvn: portable runtime 3.9.16 (reused) at /cache/runtimes/maven",
+            ],
+            "cache_dir": str(cache),
+        },
+    ):
+        code = main(
+            [
+                "toolchain",
+                "ensure",
+                "--repo",
+                str(repo),
+                "--cache-dir",
+                str(cache),
+                "--fetch-runtime",
+            ]
+        )
+
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "(downloaded) at /cache/runtimes/jdk" in out
+    assert "(reused) at /cache/runtimes/maven" in out
+
+
+def test_cli_fetch_runtime_passes_flag_through(tmp_path, capsys):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+    with patch(
+        "arch_indexer.cli.ensure_toolchain",
+        return_value={
+            "active_languages": ["java", "infra"],
+            "installed": ["scip-java"],
+            "skipped": [],
+            "warnings": [],
+            "cache_dir": str(cache),
+        },
+    ) as ensure:
+        code = main(
+            [
+                "toolchain",
+                "ensure",
+                "--repo",
+                str(repo),
+                "--cache-dir",
+                str(cache),
+                "--fetch-runtime",
+            ]
+        )
+
+    assert code == EXIT_OK
+    assert ensure.call_args.kwargs["fetch_runtime"] is True
+    assert "scip-java" in capsys.readouterr().out
+
+
+def test_cli_fetch_runtime_reports_errors(tmp_path, capsys):
+    with patch(
+        "arch_indexer.cli.ensure_toolchain",
+        side_effect=RuntimeError("Checksum mismatch downloading jdk"),
+    ):
+        code = main(
+            [
+                "toolchain",
+                "ensure",
+                "--repo",
+                str(FIXTURES_DIR / "java_maven"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--fetch-runtime",
+            ]
+        )
+
     assert code == EXIT_ERROR
-    captured = capsys.readouterr()
-    java_min = load_toolchain_manifest()["runtimes"]["java_min_version"]
-    assert "--fetch-runtime is not supported yet" in captured.err
-    assert f"java >= {java_min}" in captured.err
+    assert "Checksum mismatch downloading jdk" in capsys.readouterr().err
 
 
 def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
@@ -150,7 +217,8 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
         assert main(["toolchain", "ensure", "--help"]) == EXIT_OK
 
     captured = capsys.readouterr()
-    assert "java >= 21" in captured.out
+    assert "min java 21" in captured.out
+    assert "<cache>/runtimes/" in captured.out
 
 
 @pytest.mark.parametrize(
