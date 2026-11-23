@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -181,7 +183,13 @@ def test_node_js_viewer_suite() -> None:
     test_js = Path(__file__).parent / "test_viewer.js"
     assert test_js.exists(), f"Test file {test_js} does not exist"
 
-    proc = subprocess.run([node, str(test_js)], capture_output=True, text=True)
+    proc = subprocess.run(
+        [node, str(test_js)],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent.parent,
+        env={**os.environ, "ARCH_VIEWER_PYTHON": sys.executable},
+    )
     msg = f"Node.js tests failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert proc.returncode == 0, msg
     assert "All viewer logic tests passed successfully!" in proc.stdout

@@ -53,7 +53,7 @@
     const moduleByPath = new Map();
     modules.forEach((mod) => {
       if (mod.path) {
-        moduleByPath.set(mod.path, mod.id);
+        moduleByPath.set(mod.path.replace(/\/+$/, ""), mod.id);
       }
     });
 
@@ -145,7 +145,10 @@
         let bestModId = null;
         let longestPath = -1;
         for (const [modPath, modId] of moduleByPath.entries()) {
-          if (node.file.startsWith(modPath) && modPath.length > longestPath) {
+          if (
+            (node.file === modPath || node.file.startsWith(`${modPath}/`)) &&
+            modPath.length > longestPath
+          ) {
             longestPath = modPath.length;
             bestModId = modId;
           }
@@ -882,7 +885,6 @@
           symbol: n.symbol,
           score: labelMatch ? 1 : symbolMatch ? 2 : idMatch ? 3 : 4,
         });
-        if (results.length >= maxResults * 2) break;
       }
     }
 
@@ -1009,6 +1011,20 @@
       this.trace = null;
     }
 
+    setBreadcrumbs(ancestors, scopeId) {
+      const systemCrumb = {
+        level: "system",
+        id: "system",
+        label: this.hierarchy.systemNode.label,
+      };
+      if (scopeId === "system") {
+        this.breadcrumbs = [systemCrumb];
+        return;
+      }
+      const scopeIndex = ancestors.findIndex((crumb) => crumb.id === scopeId);
+      this.breadcrumbs = scopeIndex >= 0 ? ancestors.slice(0, scopeIndex + 1) : [systemCrumb];
+    }
+
     /**
      * Drill down one level into a node.
      */
@@ -1035,14 +1051,14 @@
 
       if (!nextLevel) return false;
 
-      this.currentLevel = nextLevel;
-      this.currentScope = nodeId;
+      const ancestors = this.hierarchy.ancestorMap.get(nodeId);
+      if (!ancestors) return false;
+
       this.selectedNodeId = nodeId;
-      this.breadcrumbs.push({
-        level: nextLevel,
-        id: nodeId,
-        label: node.label || nodeId,
-      });
+      this.setBreadcrumbs(ancestors, nodeId);
+      const scope = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = scope.level;
+      this.currentScope = scope.id;
       return true;
     }
 
@@ -1088,33 +1104,25 @@
 
       this.selectedNodeId = nodeId;
 
-      if (node.level === "symbol") {
-        // Navigate to parent file level so symbol is visible
-        const fileAncestor = ancestors.find((a) => a.level === "file");
-        if (fileAncestor) {
-          this.currentLevel = "file";
-          this.currentScope = fileAncestor.id;
-        } else {
-          this.currentLevel = "symbol";
-          this.currentScope = nodeId;
+      const parentLevels = {
+        symbol: "file",
+        file: "file_group",
+        file_group: "module",
+        module: "system",
+      };
+      const parentLevel = parentLevels[node.level];
+      let scopeId = "system";
+      if (parentLevel && parentLevel !== "system") {
+        const parent = ancestors.find((crumb) => crumb.level === parentLevel);
+        if (parent) {
+          scopeId = parent.id;
         }
-      } else if (node.level === "file") {
-        const dirAncestor = ancestors.find((a) => a.level === "file_group");
-        this.currentLevel = "file_group";
-        this.currentScope = dirAncestor ? dirAncestor.id : nodeId;
-      } else if (node.level === "file_group") {
-        const modAncestor = ancestors.find((a) => a.level === "module");
-        this.currentLevel = "module";
-        this.currentScope = modAncestor ? modAncestor.id : nodeId;
-      } else if (node.level === "module") {
-        this.currentLevel = "system";
-        this.currentScope = "system";
-      } else {
-        this.currentLevel = "system";
-        this.currentScope = "system";
       }
 
-      this.breadcrumbs = ancestors.slice();
+      this.setBreadcrumbs(ancestors, scopeId);
+      const scope = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = scope.level;
+      this.currentScope = scope.id;
       return true;
     }
 

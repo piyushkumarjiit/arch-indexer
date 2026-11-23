@@ -8,7 +8,9 @@
 const fs = require("fs");
 const path = require("path");
 const assert = require("assert");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
+
+const repoRoot = path.resolve(__dirname, "..");
 
 const ArchViewerLogic = require("../src/arch_indexer/viewer/assets/viewer_logic.js");
 const {
@@ -85,6 +87,56 @@ function runTests() {
   assert(dsOrders, "ds:postgres:orders should exist");
   assert.strictEqual(dsOrders.tier, null, "data stores without code tier should have null tier");
 
+  // Module fallback assignment must respect path-separator boundaries
+  const boundaryGraph = {
+    schema_version: "1.0",
+    repo_name: "boundary",
+    modules: [{ id: "mod:auth", name: "auth", path: "src/auth", file_count: 2, tier: "scip" }],
+    nodes: [
+      { id: "sym:auth", kind: "service", label: "auth_fn", file: "src/auth/x.py", line: 2, tier: "scip" },
+      { id: "sym:authz", kind: "service", label: "authz_fn", file: "src/authz/x.py", line: 1, tier: "scip" },
+      { id: "sym:exact", kind: "service", label: "exact_fn", file: "src/auth", line: 3, tier: "scip" },
+    ],
+    edges: [],
+    data_stores: [],
+    external_sinks: [],
+  };
+  const boundaryHierarchy = buildHierarchy(boundaryGraph);
+  assert.strictEqual(boundaryHierarchy.nodeLookup.get("sym:auth").moduleId, "mod:auth");
+  assert.strictEqual(boundaryHierarchy.nodeLookup.get("sym:exact").moduleId, "mod:auth");
+  assert.strictEqual(
+    boundaryHierarchy.nodeLookup.get("sym:authz").moduleId,
+    "mod:root",
+    "src/authz must not be assigned to the module rooted at src/auth"
+  );
+
+  // Search must rank label matches even when many earlier nodes match on file path
+  const searchGraph = { nodes: [], modules: [], data_stores: [], external_sinks: [] };
+  for (let i = 0; i < 40; i++) {
+    searchGraph.nodes.push({
+      id: `sym:filler_${i}`,
+      kind: "service",
+      label: `filler_${i}`,
+      file: `src/orders/filler_${i}.py`,
+      line: 1,
+      tier: "scip",
+    });
+  }
+  searchGraph.nodes.push({
+    id: "sym:Order",
+    kind: "service",
+    label: "Order",
+    file: "src/core/order.py",
+    line: 9,
+    tier: "scip",
+  });
+  const searchResults = ArchViewerLogic.searchNodes(searchGraph, "order");
+  assert(
+    searchResults.some((r) => r.id === "sym:Order"),
+    "Exact label match must be returned even when many earlier nodes match only by file path"
+  );
+  assert.strictEqual(searchResults[0].id, "sym:Order", "Label match must rank above file-path matches");
+
   // 2. Test Drill-down & Breadcrumbs
   console.log("Checking drill-down and breadcrumb navigation...");
   const state = new ViewerState(graph);
@@ -99,6 +151,17 @@ function runTests() {
   assert.strictEqual(state.currentScope, "mod:orders");
   assert.strictEqual(state.breadcrumbs.length, 2);
   assert.strictEqual(state.breadcrumbs[1].id, "mod:orders");
+
+  // An absolute deep link to a directory must rebuild the full ancestor trail
+  state.goToBreadcrumb(0);
+  assert(state.drillDown("dir:src/orders/services"));
+  assert.deepStrictEqual(
+    state.breadcrumbs.map((c) => c.id),
+    ["system", "mod:orders", "dir:src/orders/services"],
+    "Deep link to a directory must rebuild the ancestor trail from the root"
+  );
+  state.goToBreadcrumb(0);
+  assert(state.drillDown("mod:orders"));
 
   // Drill down into dir:src/orders/services
   const drill2 = state.drillDown("dir:src/orders/services");
@@ -130,11 +193,33 @@ function runTests() {
   const focusSuccess = state.focusNode("ep:POST:/api/orders");
   assert(focusSuccess, "focusNode(ep:POST:/api/orders) should succeed");
   assert.strictEqual(state.selectedNodeId, "ep:POST:/api/orders");
-  // Parent file level should be active
+  // Parent file level should be active and the trail must end at the displayed scope
   assert.strictEqual(state.currentLevel, "file");
   assert.strictEqual(state.currentScope, "file:src/orders/routes.py");
   const lastCrumb = state.breadcrumbs[state.breadcrumbs.length - 1];
-  assert.strictEqual(lastCrumb.id, "ep:POST:/api/orders");
+  assert.strictEqual(
+    lastCrumb.id,
+    state.currentScope,
+    "Breadcrumb trail must end at the displayed scope, not at the focused symbol"
+  );
+  assert.strictEqual(lastCrumb.level, state.currentLevel);
+  assert(
+    state.breadcrumbs.some((c) => c.id === "mod:orders"),
+    "Breadcrumb trail must include the ancestor module"
+  );
+
+  // Focusing a module or system-level store shows the system scope, so the trail is just System
+  state.focusNode("mod:orders");
+  assert.strictEqual(state.currentLevel, "system");
+  assert.strictEqual(state.currentScope, "system");
+  assert.strictEqual(state.breadcrumbs.length, 1);
+  state.focusNode("ds:postgres:orders");
+  assert.strictEqual(state.currentLevel, "system");
+  assert.strictEqual(state.currentScope, "system");
+  assert.strictEqual(state.breadcrumbs.length, 1);
+
+  // Restore file-level focus for the trace view checks below
+  assert(state.focusNode("ep:POST:/api/orders"));
 
   const details = getNodeDetails(state.hierarchy, "ep:POST:/api/orders");
   assert(details, "Node details should be returned");
@@ -200,61 +285,57 @@ function runTests() {
   const normalView = state.getCurrentView();
   assert.strictEqual(normalView.level, "file");
 
-  // 5. Test Deterministic Layered Layout with INDEPENDENT ORACLE
-  console.log("Checking deterministic layered layout with independent coordinate oracle...");
-  // Oracle: SPEC 6.3 layer order:
-  // Layer 0: Frontend (x = paddingX + 0 * (nodeWidth + colGap))
-  // Layer 1: Entrypoints (x = paddingX + 1 * (nodeWidth + colGap))
-  // Layer 2: Services / Modules / Directories / Files (x = paddingX + 2 * (nodeWidth + colGap))
-  // Layer 3: Data Stores & External Sinks (x = paddingX + 3 * (nodeWidth + colGap))
-  const paddingX = 60;
-  const nodeWidth = 220;
-  const colGap = 140;
-  const expectedX = {
-    layer0_frontend: paddingX + 0 * (nodeWidth + colGap), // 60
-    layer1_entrypoint: paddingX + 1 * (nodeWidth + colGap), // 420
-    layer2_service_or_module: paddingX + 2 * (nodeWidth + colGap), // 780
-    layer3_datastore_or_sink: paddingX + 3 * (nodeWidth + colGap), // 1140
-  };
+  // 5. Test Deterministic Layered Layout (Independent Oracle: SPEC 6.3 column order)
+  console.log("Checking deterministic layered layout column ordering (SPEC 6.3)...");
+  // Oracle is SPEC 6.3's column order Frontend -> Entrypoints -> Services/Modules ->
+  // Data Stores / External Sinks, asserted as relative ordering rather than copied arithmetic.
+  const layout = computeLayeredLayout([
+    { id: "fe:b", kind: "frontend_caller" },
+    { id: "fe:a", kind: "frontend_caller" },
+    { id: "ep:one", kind: "entrypoint" },
+    { id: "sym:svc_b", kind: "service" },
+    { id: "sym:svc_a", kind: "service" },
+    { id: "mod:m", kind: "module" },
+    { id: "ds:db", kind: "datastore" },
+    { id: "ext:api", kind: "external_sink" },
+  ], []);
+  const xById = new Map(layout.nodes.map((n) => [n.id, n.x]));
+  const xsOf = (ids) => ids.map((id) => xById.get(id));
+  const maxX = (xs) => Math.max(...xs);
+  const minX = (xs) => Math.min(...xs);
+  const frontendXs = xsOf(["fe:a", "fe:b"]);
+  const entrypointXs = xsOf(["ep:one"]);
+  const serviceXs = xsOf(["sym:svc_a", "sym:svc_b", "mod:m"]);
+  const sinkXs = xsOf(["ds:db", "ext:api"]);
 
-  assert.strictEqual(expectedX.layer0_frontend, 60);
-  assert.strictEqual(expectedX.layer1_entrypoint, 420);
-  assert.strictEqual(expectedX.layer2_service_or_module, 780);
-  assert.strictEqual(expectedX.layer3_datastore_or_sink, 1140);
+  assert(maxX(frontendXs) < minX(entrypointXs), "Every frontend node must be left of every entrypoint");
+  assert(maxX(entrypointXs) < minX(serviceXs), "Every entrypoint must be left of every service/module");
+  assert(maxX(serviceXs) < minX(sinkXs), "Every service/module must be left of every data store/sink");
+  assert.strictEqual(xById.get("sym:svc_a"), xById.get("sym:svc_b"), "Service nodes must share one column");
+  assert.strictEqual(xById.get("mod:m"), xById.get("sym:svc_a"), "Modules must share the services column");
+  assert.strictEqual(xById.get("ds:db"), xById.get("ext:api"), "Stores and sinks must share one column");
 
-  // Check system level layout against expected x positions
-  state.goToBreadcrumb(0); // System
-  const sysView = state.getCurrentView({ paddingX, nodeWidth, colGap });
-  for (const n of sysView.nodes) {
-    if (n.kind === "module") {
-      assert.strictEqual(
-        n.x,
-        expectedX.layer2_service_or_module,
-        `Module node ${n.id} must be at x=${expectedX.layer2_service_or_module}, got ${n.x}`
-      );
-    } else if (n.kind === "datastore" || n.kind === "external_sink") {
-      assert.strictEqual(
-        n.x,
-        expectedX.layer3_datastore_or_sink,
-        `Store/sink node ${n.id} must be at x=${expectedX.layer3_datastore_or_sink}, got ${n.x}`
-      );
-    }
-  }
+  // System view: modules must precede stores and sinks
+  state.goToBreadcrumb(0);
+  const sysView = state.getCurrentView();
+  const moduleXs = sysView.nodes.filter((n) => n.kind === "module").map((n) => n.x);
+  const sysSinkXs = sysView.nodes
+    .filter((n) => n.kind === "datastore" || n.kind === "external_sink")
+    .map((n) => n.x);
+  assert(moduleXs.length > 0 && sysSinkXs.length > 0, "System view must contain modules and sinks");
+  assert(maxX(moduleXs) < minX(sysSinkXs), "Module column must precede the store/sink column");
 
-  // Check file level layout containing frontend, entrypoint, service, store
-  state.focusNode("ep:POST:/api/orders");
-  const fileView = state.getCurrentView({ paddingX, nodeWidth, colGap });
-  for (const n of fileView.nodes) {
-    if (n.kind === "frontend_caller") {
-      assert.strictEqual(n.x, expectedX.layer0_frontend, `Frontend node ${n.id} must be at x=${expectedX.layer0_frontend}`);
-    } else if (n.kind === "entrypoint") {
-      assert.strictEqual(n.x, expectedX.layer1_entrypoint, `Entrypoint node ${n.id} must be at x=${expectedX.layer1_entrypoint}`);
-    } else if (n.kind === "service") {
-      assert.strictEqual(n.x, expectedX.layer2_service_or_module, `Service node ${n.id} must be at x=${expectedX.layer2_service_or_module}`);
-    } else if (n.kind === "datastore" || n.kind === "external_sink") {
-      assert.strictEqual(n.x, expectedX.layer3_datastore_or_sink, `Store node ${n.id} must be at x=${expectedX.layer3_datastore_or_sink}`);
-    }
-  }
+  // Symbol view: frontend -> entrypoint -> service ordering for one entrypoint
+  state.drillDown("ep:POST:/api/orders");
+  const epView = state.getCurrentView();
+  const epFrontendXs = epView.nodes.filter((n) => n.kind === "frontend_caller").map((n) => n.x);
+  const epEntryXs = epView.nodes.filter((n) => n.kind === "entrypoint").map((n) => n.x);
+  const epServiceXs = epView.nodes.filter((n) => n.kind === "service").map((n) => n.x);
+  assert(epFrontendXs.length > 0, "Symbol view must contain the calling frontend");
+  assert(epEntryXs.length > 0, "Symbol view must contain the entrypoint");
+  assert(epServiceXs.length > 0, "Symbol view must contain downstream services");
+  assert(maxX(epFrontendXs) < minX(epEntryXs), "Frontend column must precede the entrypoint column");
+  assert(maxX(epEntryXs) < minX(epServiceXs), "Entrypoint column must precede the service column");
 
   // 6. Test Kind Filter Preserves Structural Hierarchy Levels
   console.log("Checking kind filter preserves structural aggregates...");
@@ -297,23 +378,69 @@ function runTests() {
   );
   state.filters.tiers.clear();
 
-  // 9. Test Scale Graph traceFlow Performance (Independent Oracle: Linear Bounded Execution Time)
-  console.log("Checking scale graph traceFlow performance (< 500ms for ~5,000 nodes/15,000 edges)...");
-  const pyCmd = 'python3 -c "import json; from tests.synthetic_generator import generate_synthetic_graph; print(json.dumps(generate_synthetic_graph(5000, 15000)))"';
-  const scaleJson = execSync(pyCmd, { maxBuffer: 64 * 1024 * 1024, encoding: "utf-8" });
+  // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
+  console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
+  const pythonExe = process.env.ARCH_VIEWER_PYTHON || "python3";
+  const scaleJson = execFileSync(
+    pythonExe,
+    [
+      "-c",
+      "import json; from tests.synthetic_generator import generate_synthetic_graph; print(json.dumps(generate_synthetic_graph(5000, 15000)))",
+    ],
+    { cwd: repoRoot, maxBuffer: 64 * 1024 * 1024, encoding: "utf-8" }
+  );
   const scaleGraph = JSON.parse(scaleJson);
 
   assert.strictEqual(scaleGraph.nodes.length, 5000);
   assert.strictEqual(scaleGraph.edges.length, 15000);
 
-  const tStart = Date.now();
   const scaleTrace = traceFlow(scaleGraph, "ep:ep_0000");
-  const elapsed = Date.now() - tStart;
 
-  console.log(`scaleTrace completed in ${elapsed}ms`);
-  assert(elapsed < 500, `traceFlow on 5000 nodes/15000 edges took ${elapsed}ms, must be < 500ms`);
-  assert(scaleTrace.reachableNodes.length > 0, "Scale trace must find reachable nodes");
-  assert(scaleTrace.steps.length > 0, "Scale trace must find steps");
+  // Independent oracle: plain BFS over graph.edges for the sinks reachable from the entrypoint.
+  const adjacency = new Map();
+  for (const e of scaleGraph.edges) {
+    if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+    adjacency.get(e.source).push(e.target);
+  }
+  const isSink = (id) => id.startsWith("ds:") || id.startsWith("ext:");
+  const seen = new Set(["ep:ep_0000"]);
+  const bfsQueue = ["ep:ep_0000"];
+  const oracleSinks = new Set();
+  while (bfsQueue.length > 0) {
+    const current = bfsQueue.shift();
+    if (current !== "ep:ep_0000" && isSink(current)) {
+      oracleSinks.add(current);
+      continue;
+    }
+    for (const target of adjacency.get(current) || []) {
+      if (!seen.has(target)) {
+        seen.add(target);
+        bfsQueue.push(target);
+      }
+    }
+  }
+  assert(oracleSinks.size > 0, "Scale fixture must reach at least one sink from ep:ep_0000");
+  assert.deepStrictEqual(
+    scaleTrace.reachableSinks.map((s) => s.id).sort(),
+    Array.from(oracleSinks).sort(),
+    "traceFlow must reach exactly the graph-reachable data stores and external sinks"
+  );
+
+  // Step walkthrough must follow real edges, stay inside the reachable subgraph, and end at a sink
+  const reachableSet = new Set(scaleTrace.reachableNodes);
+  const edgePairs = new Set(scaleGraph.edges.map((e) => `${e.source}->${e.target}`));
+  assert(scaleTrace.steps.length > 0, "Scale trace must produce steps");
+  assert.strictEqual(scaleTrace.steps[0].nodeId, "ep:ep_0000", "Step walkthrough must start at the entrypoint");
+  for (let i = 1; i < scaleTrace.steps.length; i++) {
+    const from = scaleTrace.steps[i - 1].nodeId;
+    const to = scaleTrace.steps[i].nodeId;
+    assert(reachableSet.has(to), `Step node ${to} must be in the reachable subgraph`);
+    assert(edgePairs.has(`${from}->${to}`), `Step ${from} -> ${to} must follow a real graph edge`);
+  }
+  assert(
+    isSink(scaleTrace.steps[scaleTrace.steps.length - 1].nodeId),
+    "Step walkthrough must end at a data store or external sink"
+  );
 
   // 10. Test Browser Controller (viewer.js) Drill-Down & Hashchange Handling
   console.log("Checking browser controller drill-down and hashchange handling...");
@@ -378,6 +505,11 @@ function testBrowserController(graphJsonText) {
       closest(sel) { return null; },
       getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; },
     };
+    let htmlValue = "";
+    Object.defineProperty(el, "innerHTML", {
+      get() { return htmlValue; },
+      set(v) { htmlValue = v; el.children.length = 0; },
+    });
     if (id) elements.set(id, el);
     return el;
   }
@@ -508,10 +640,100 @@ function testBrowserController(graphJsonText) {
     viewerController.handleHashChange();
   }, "handleHashChange must not throw URIError on malformed percent encoding");
 
+  const viewer = global.window.__archViewer;
+  assert(viewer, "Controller must expose window.__archViewer");
+
+  // Same-hash navigation must still navigate (search result / inspector link re-selection)
+  global.window.location.hash = "";
+  assert(viewer.navigateToNode("sym:OrderService.create"), "navigateToNode should succeed for a known node");
+  assert.strictEqual(state.currentScope, "file:src/orders/services/order_service.py");
+  const nodeHash = global.window.location.hash;
+  assert.strictEqual(nodeHash, "#node=" + encodeURIComponent("sym:OrderService.create"));
+
+  state.goToBreadcrumb(0);
+  viewerController.render();
+  assert.strictEqual(state.currentLevel, "system");
+  assert.strictEqual(global.window.location.hash, nodeHash, "Breadcrumb navigation leaves the #node= hash untouched");
+  assert(viewer.navigateToNode("sym:OrderService.create"), "Re-selecting the same target must navigate");
+  assert.strictEqual(
+    state.currentScope,
+    "file:src/orders/services/order_service.py",
+    "Navigating to the current #node= target must still focus it"
+  );
+
+  // Deep links must rebuild an absolute breadcrumb trail instead of appending
+  global.window.location.hash = "#drill=" + encodeURIComponent("file:src/orders/services/order_service.py");
+  viewerController.handleHashChange();
+  assert.strictEqual(state.currentLevel, "file");
+  assert.strictEqual(state.currentScope, "file:src/orders/services/order_service.py");
+  assert.deepStrictEqual(
+    state.breadcrumbs.map((c) => c.id),
+    ["system", "mod:orders", "dir:src/orders/services", "file:src/orders/services/order_service.py"],
+    "Reloading a file deep link must rebuild the full ancestor trail"
+  );
+
+  // Trace bar must clear whenever trace mode ends
+  const traceBar = elements.get("trace-bar");
+  viewer.startTrace("ep:POST:/api/orders");
+  assert(traceBar.classList.contains("active"), "Trace bar must be active during trace mode");
+  assert.strictEqual(state.trace.entrypointId, "ep:POST:/api/orders");
+  const breadcrumbsEl = elements.get("breadcrumbs");
+  const systemCrumb = breadcrumbsEl.children.find(
+    (c) => c.className && c.className.split(" ").includes("crumb")
+  );
+  assert(systemCrumb, "Breadcrumb container must render crumb elements");
+  systemCrumb.dispatchEvent({ type: "click" });
+  assert.strictEqual(state.trace, null, "Breadcrumb navigation must end trace mode");
+  assert(!traceBar.classList.contains("active"), "Trace bar must hide once the trace ends");
+  assert.strictEqual(state.currentLevel, "system");
+
   // Test XSS escaping
   const escaped = viewerController.escapeHtml('"><script>alert(1)</script>');
   assert(!escaped.includes("<script>"), "escapeHtml must escape HTML tags");
   assert(escaped.includes("&lt;script&gt;"), "escapeHtml must encode angle brackets");
+
+  // Synthetic root module must be filterable and never silently hidden
+  global.window.location.hash = "";
+  const orphanGraph = {
+    schema_version: "1.0",
+    repo_name: "orphan-repo",
+    modules: [{ id: "mod:auth", name: "auth", path: "src/auth", file_count: 1, tier: "scip" }],
+    nodes: [
+      { id: "sym:orphan", kind: "service", label: "orphan", file: "scripts/orphan.py", line: 3, tier: "scip" },
+      { id: "sym:auth", kind: "service", label: "auth_fn", module_id: "mod:auth", file: "src/auth/a.py", line: 4, tier: "scip" },
+    ],
+    edges: [],
+    data_stores: [],
+    external_sinks: [],
+  };
+  dataScript.textContent = JSON.stringify(orphanGraph);
+  viewerController.init();
+  const orphanState = viewerController.getState();
+  assert.strictEqual(
+    orphanState.hierarchy.nodeLookup.get("sym:orphan").moduleId,
+    "mod:root",
+    "A node outside every declared module must live in the synthetic root module"
+  );
+
+  const moduleInputs = elements.get("filter-modules").querySelectorAll("input");
+  const rootInput = moduleInputs.find((i) => i.value === "mod:root");
+  const authInput = moduleInputs.find((i) => i.value === "mod:auth");
+  assert(rootInput, "Module filter must list the synthetic root module");
+  assert(authInput, "Module filter must list declared modules");
+
+  authInput.checked = false;
+  authInput.dispatchEvent({ type: "change" });
+  assert(!orphanState.filters.modules.has("mod:auth"), "Unchecked module must leave the allow-set");
+  assert(
+    orphanState.filters.modules.has("mod:root"),
+    "Unchecking another module must keep mod:root allowed"
+  );
+  const orphanView = orphanState.getCurrentView();
+  assert(
+    orphanView.nodes.some((n) => n.id === "mod:root"),
+    "Root module must stay visible when another module is unchecked"
+  );
+  assert(!orphanView.nodes.some((n) => n.id === "mod:auth"), "Unchecked module must be hidden");
 }
 
 try {

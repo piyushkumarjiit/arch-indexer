@@ -71,7 +71,7 @@
 
     if (modulesContainer) {
       modulesContainer.innerHTML = "";
-      (state.graph.modules || []).forEach((mod) => {
+      state.hierarchy.modules.forEach((mod) => {
         const label = document.createElement("label");
         label.className = "filter-item";
 
@@ -81,11 +81,11 @@
         input.checked = true;
 
         const span = document.createElement("span");
-        span.textContent = mod.name || mod.id;
+        span.textContent = mod.name || mod.label || mod.id;
 
         const count = document.createElement("span");
         count.className = "count-pill";
-        count.textContent = String(mod.file_count || 0);
+        count.textContent = String(mod.fileCount || 0);
 
         label.appendChild(input);
         label.appendChild(span);
@@ -194,6 +194,8 @@
   }
 
   function render() {
+    if (!state.trace) activeTraceStep = 0;
+    updateTraceBar();
     renderBreadcrumbs();
     renderGraph();
   }
@@ -385,6 +387,17 @@
     renderGraph();
   }
 
+  function navigateToNode(nodeId) {
+    if (!state || !nodeId || !state.focusNode(nodeId)) return false;
+    render();
+    selectNode(nodeId);
+    const target = `#node=${encodeURIComponent(nodeId)}`;
+    if (window.location.hash !== target) {
+      window.location.hash = target;
+    }
+    return true;
+  }
+
   function showInspector(details) {
     const panel = document.getElementById("inspector-panel");
     const content = document.getElementById("inspector-content");
@@ -485,7 +498,7 @@
       el.addEventListener("click", () => {
         const targetId = el.getAttribute("data-id");
         if (targetId) {
-          window.location.hash = `#node=${encodeURIComponent(targetId)}`;
+          navigateToNode(targetId);
         }
       });
     });
@@ -521,7 +534,7 @@
       el.addEventListener("click", () => {
         const targetId = el.getAttribute("data-id");
         if (targetId) {
-          window.location.hash = `#node=${encodeURIComponent(targetId)}`;
+          navigateToNode(targetId);
         }
       });
     });
@@ -530,10 +543,9 @@
   }
 
   function startTrace(entrypointId) {
-    const trace = state.startTrace(entrypointId);
+    state.startTrace(entrypointId);
     activeTraceStep = 0;
-    updateTraceBar();
-    renderGraph();
+    render();
   }
 
   function updateTraceBar() {
@@ -655,7 +667,7 @@
           item.addEventListener("click", () => {
             dropdown.classList.remove("active");
             input.value = "";
-            window.location.hash = `#node=${encodeURIComponent(res.id)}`;
+            navigateToNode(res.id);
           });
           dropdown.appendChild(item);
         });
@@ -739,8 +751,7 @@
         if (!state.trace) return;
         if (activeTraceStep > 0) {
           activeTraceStep--;
-          updateTraceBar();
-          renderGraph();
+          render();
         }
       });
     }
@@ -750,8 +761,7 @@
         if (!state.trace) return;
         if (activeTraceStep < state.trace.steps.length - 1) {
           activeTraceStep++;
-          updateTraceBar();
-          renderGraph();
+          render();
         }
       });
     }
@@ -759,8 +769,7 @@
     if (btnExitTrace) {
       btnExitTrace.addEventListener("click", () => {
         state.stopTrace();
-        updateTraceBar();
-        renderGraph();
+        render();
       });
     }
   }
@@ -819,6 +828,7 @@
       handleHashChange,
       render,
       selectNode,
+      navigateToNode,
       startTrace,
     };
   }
@@ -828,6 +838,8 @@
       init,
       getState: () => state,
       handleHashChange,
+      render,
+      navigateToNode,
       escapeHtml,
     };
   }
