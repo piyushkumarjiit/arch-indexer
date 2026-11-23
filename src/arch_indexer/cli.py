@@ -5,6 +5,8 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
+from arch_indexer.checks.citations import run_check_citations
+from arch_indexer.checks.mermaid import run_check_mermaid
 from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
     DEFAULT_DOCS_DIR,
@@ -195,6 +197,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
     )
     cite_parser.add_argument(
+        "--file",
+        action="append",
+        dest="files",
+        default=None,
+        help="Check only specified file(s) instead of canonical docs (repeatable)",
+    )
+    cite_parser.add_argument(
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
     cite_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
@@ -208,7 +217,6 @@ def build_parser() -> argparse.ArgumentParser:
     mermaid_parser.add_argument(
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
-    mermaid_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     return parser
 
@@ -251,6 +259,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
                 sys.stderr.write(f"Error ensuring toolchain: {e}\n")
                 return EXIT_ERROR
+
+    elif args.command == "check-citations":
+        try:
+            return run_check_citations(
+                repo=args.repo,
+                docs_dir=args.docs_dir,
+                output_format=args.format,
+                cache_dir=args.cache_dir,
+                files=args.files,
+            )
+        except Exception as e:
+            sys.stderr.write(f"Error checking citations: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "check-mermaid":
+        try:
+            return run_check_mermaid(
+                repo=args.repo,
+                docs_dir=args.docs_dir,
+                output_format=args.format,
+            )
+        except Exception as e:
+            sys.stderr.write(f"Error checking mermaid diagrams: {e}\n")
+            return EXIT_ERROR
 
     # All other commands are out of scope for this task and exit 1
     sys.stderr.write(f"Command '{args.command}' is not implemented yet\n")
