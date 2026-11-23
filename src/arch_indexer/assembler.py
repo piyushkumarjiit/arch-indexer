@@ -34,6 +34,8 @@ SLICE_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
+AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
+MERMAID_FENCE_RE = re.compile(r"^\s*(?:```|~~~)\s*mermaid\b", re.IGNORECASE | re.MULTILINE)
 
 
 class DraftFormatError(ValueError):
@@ -209,6 +211,13 @@ def parse_draft_file(path: Path) -> DraftPacket:
             raise DraftFormatError("draft body has text outside its SECTION markers")
     if SLICE_MARKER_RE.search(rewritten_body):
         raise DraftFormatError("draft body must not contain SLICE markers")
+    if AUTO_DIAGRAM_MARKER_RE.search(rewritten_body):
+        raise DraftFormatError(
+            "draft body must not contain AUTO-DIAGRAM markers; diagram slots are "
+            "owned by the canonical document"
+        )
+    if MERMAID_FENCE_RE.search(rewritten_body):
+        raise DraftFormatError("draft body must not contain Mermaid blocks")
     undeclared_sections = [sec_id for sec_id in sections if sec_id not in section_ids]
     if undeclared_sections:
         raise DraftFormatError(
@@ -267,19 +276,6 @@ def _strip_leading_heading(text: str, max_level: int) -> str:
     return text
 
 
-def _keep_first_auto_diagram_slot(text: str, seen: set[str]) -> str:
-    """Drop AUTO-DIAGRAM slots whose id was already emitted earlier in the section."""
-
-    def keep_first(m: re.Match[str]) -> str:
-        slot_id = m.group("id").strip()
-        if slot_id in seen:
-            return ""
-        seen.add(slot_id)
-        return m.group(0)
-
-    return AUTO_DIAGRAM_SLOT_RE.sub(keep_first, text)
-
-
 def patch_section_in_doc(
     doc_text: str, sec_id: str, draft_bodies: Sequence[tuple[str, str]]
 ) -> str:
@@ -331,9 +327,6 @@ def patch_section_in_doc(
         f"<!-- SLICE:{packet_id}:END -->"
         for packet_id in sorted(slice_bodies)
     ]
-    seen_slot_ids: set[str] = set()
-    blocks = [_keep_first_auto_diagram_slot(block, seen_slot_ids) for block in blocks]
-    owned_parts = [_keep_first_auto_diagram_slot(part, seen_slot_ids) for part in owned_parts]
     content = "\n\n".join(part for part in [*owned_parts, *blocks] if part)
 
     # Preserve start marker and end marker

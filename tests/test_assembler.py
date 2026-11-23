@@ -1096,44 +1096,118 @@ def test_assemble_deletes_only_consumed_draft_files(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("section_id", "slot_id", "citation"),
+    ("section_id", "body", "reason"),
     [
-        ("design-sec1", "module-overview", "`src/app.py:1` — `alpha`"),
-        ("design-sec3", "flow-overview", "`src/app.py:4` — `beta`"),
+        pytest.param(
+            "design-sec1",
+            "Prose beside a slot[^1].\n\n"
+            "<!-- AUTO-DIAGRAM:module-overview:START -->\n"
+            "<!-- AUTO-DIAGRAM:module-overview:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            "AUTO-DIAGRAM",
+            id="module-overview-slot",
+        ),
+        pytest.param(
+            "design-sec3",
+            "Prose beside a slot[^1].\n\n"
+            "<!-- AUTO-DIAGRAM:flow-overview:START -->\n"
+            "<!-- AUTO-DIAGRAM:flow-overview:END -->\n\n"
+            "[^1]: `src/app.py:4` — `beta`\n",
+            "AUTO-DIAGRAM",
+            id="flow-overview-slot",
+        ),
+        pytest.param(
+            "design-sec3",
+            "Prose with a hand-written diagram[^1].\n\n"
+            "```mermaid\nflowchart TD\n  A --> B\n```\n\n"
+            "[^1]: `src/app.py:4` — `beta`\n",
+            "Mermaid",
+            id="mermaid-block",
+        ),
     ],
 )
-def test_assemble_keeps_one_copy_of_a_draft_authored_diagram_slot(
-    tmp_path, section_id, slot_id, citation
-):
-    """A draft's own AUTO-DIAGRAM slot replaces the document's, so the diagram renders once."""
+def test_assemble_rejects_drafts_that_author_diagrams(tmp_path, section_id, body, reason):
+    """Diagram slots and Mermaid blocks belong to the document, never to a draft."""
     repo, drafts = _repo_with_app(tmp_path)
+    draft = drafts / "diagram.md"
+    _write_design_draft(drafts, draft.name, "diagram", [section_id], body)
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert str(draft) in err.getvalue()
+    assert reason in err.getvalue()
+    assert draft.is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_preserves_diagram_slots_across_redraft_and_slice_removal(tmp_path):
+    """Document-owned slots survive a slice re-draft and a later --remove-slice."""
+    repo, drafts = _repo_with_app(tmp_path)
+    diagrams_file = tmp_path / "diagrams.json"
+    diagrams_file.write_text(
+        json.dumps({"flow-overview": "flowchart TD\n  A --> B"}), encoding="utf-8"
+    )
     _write_design_draft(
         drafts,
-        "slot.md",
-        "slot",
-        [section_id],
-        f"Prose beside a slot[^1].\n\n"
-        f"<!-- AUTO-DIAGRAM:{slot_id}:START -->\n"
-        f"<!-- AUTO-DIAGRAM:{slot_id}:END -->\n\n"
-        f"[^1]: {citation}\n",
+        "flow.md",
+        "p3",
+        ["design-sec3"],
+        "Flow prose v1[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
     )
-    diagrams_file = tmp_path / "diagrams.json"
-    diagrams_file.write_text(json.dumps({slot_id: "flowchart TD\n  A --> B"}), encoding="utf-8")
+    assert (
+        assemble(
+            repo=repo,
+            drafts_dir="docs/.drafts",
+            diagrams=diagrams_file,
+            out=io.StringIO(),
+            err=io.StringIO(),
+        )
+        == 0
+    )
+    first = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert first.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert "A --> B" in first
 
-    code = assemble(
-        repo=repo,
-        drafts_dir="docs/.drafts",
-        diagrams=diagrams_file,
-        out=io.StringIO(),
-        err=io.StringIO(),
+    drafts.mkdir(parents=True)
+    _write_design_draft(
+        drafts,
+        "flow.md",
+        "p3",
+        ["design-sec3"],
+        "Flow prose v2[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
     )
-    assert code == 0
-    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    assert content.count(f"<!-- AUTO-DIAGRAM:{slot_id}:START -->") == 1
-    assert content.count("A --> B") == 1
-    assert content.index("Prose beside a slot") < content.index(
-        f"<!-- AUTO-DIAGRAM:{slot_id}:START -->"
+    assert (
+        assemble(
+            repo=repo,
+            drafts_dir="docs/.drafts",
+            diagrams=diagrams_file,
+            out=io.StringIO(),
+            err=io.StringIO(),
+        )
+        == 0
     )
+    second = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert second.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert "A --> B" in second
+    assert "Flow prose v2" in second
+    assert "Flow prose v1" not in second
+
+    assert (
+        assemble(
+            repo=repo,
+            drafts_dir="docs/.drafts",
+            diagrams=diagrams_file,
+            remove_slices=["p3"],
+            out=io.StringIO(),
+            err=io.StringIO(),
+        )
+        == 0
+    )
+    third = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert third.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert "A --> B" in third
+    assert "Flow prose v2" not in third
 
 
 def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):
