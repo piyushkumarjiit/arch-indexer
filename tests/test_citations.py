@@ -93,6 +93,93 @@ def test_valid_citations_with_index_db(tmp_path):
     assert "Note: docs/USER_GUIDE.md not found, skipping." in out.getvalue()
 
 
+def test_index_symbol_lookup_is_case_sensitive_and_literal(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    src = repo / "src"
+    src.mkdir()
+
+    lines = ["    value = 1" for _ in range(30)]
+    lines[0] = "class Order:"
+    lines[24] = "def createXorder():"
+    (src / "models.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    cache_dir = tmp_path / "cache"
+    cache_paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache_dir)
+    _create_symbols_table(cache_paths.index_db)
+
+    conn = sqlite3.connect(str(cache_paths.index_db))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO symbols (
+            id, fqname, name, kind, file_path, start_line, end_line,
+            body_sha256, visibility, decorators_json
+        )
+        VALUES (
+            1, 'models.Order', 'Order', 'class',
+            'src/models.py', 1, 5, 'hash1', 'public', '[]'
+        )
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO symbols (
+            id, fqname, name, kind, file_path, start_line, end_line,
+            body_sha256, visibility, decorators_json
+        )
+        VALUES (
+            2, 'svc.createXorder', 'createXorder', 'function',
+            'src/models.py', 25, 30, 'hash2', 'public', '[]'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    design = docs / "DESIGN.md"
+    design.write_text(
+        "# Design\n\n"
+        "Valid [^1]. Wrong case [^2]. Wrong wildcard [^3]. Drift [^4].\n\n"
+        "## References\n\n"
+        "[^1]: `src/models.py:1` \u2014 `Order`\n"
+        "[^2]: `src/models.py:2` \u2014 `order`\n"
+        "[^3]: `src/models.py:26` \u2014 `create_order`\n"
+        "[^4]: `src/models.py:10` \u2014 `order`\n",
+        encoding="utf-8",
+    )
+
+    errors, _ = check_citations(repo, cache_dir=cache_dir)
+
+    # Spec 8.2 requires the cited symbol to match a symbol in index.db; symbol
+    # identity is exact, so different case or '_' is not the same symbol.
+    assert {e.footnote_id: e.code for e in errors} == {
+        "2": CODE_SYMBOL_MISMATCH,
+        "3": CODE_SYMBOL_MISMATCH,
+        "4": CODE_SYMBOL_MISMATCH,
+    }
+
+
+def test_explicit_missing_file_is_an_error_not_a_skip(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    out = io.StringIO()
+    err = io.StringIO()
+    code = run_check_citations(
+        repo,
+        files=["docs/.drafts/missing.md"],
+        out=out,
+        err=err,
+    )
+
+    assert code == 1
+    assert "docs/.drafts/missing.md" in err.getvalue()
+    assert out.getvalue() == ""
+
+
 def test_valid_citations_no_index_fallback(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

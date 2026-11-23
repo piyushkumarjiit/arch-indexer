@@ -91,13 +91,22 @@ def _strip_fenced_blocks_and_comments(text: str) -> str:
     return "\n".join(cleaned)
 
 
-def _find_symbol_in_index(
+def _symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
+    """Return True if symbol is exactly the name or a qualified-name suffix."""
+    if name is not None and name == symbol:
+        return True
+    if fqname is not None and fqname == symbol:
+        return True
+    if fqname is not None:
+        return fqname.endswith(f".{symbol}") or fqname.endswith(f"::{symbol}")
+    return False
+
+
+def _fetch_symbol_rows(
     conn: sqlite3.Connection,
     file_path: str,
-    line: int,
-    symbol: str,
-) -> bool:
-    """Check if symbol starts at or spans line in index.db symbols table."""
+) -> list[tuple[int | None, int | None, str | None, str | None]]:
+    """Select symbol rows for a file for exact in-Python symbol matching."""
     norm_path = os.path.normpath(file_path)
     cur = conn.cursor()
     cur.execute(
@@ -105,15 +114,26 @@ def _find_symbol_in_index(
         SELECT start_line, end_line, name, fqname
         FROM symbols
         WHERE (file_path = ? OR file_path = ?)
-          AND (name = ? OR fqname = ? OR fqname LIKE ? OR fqname LIKE ?)
         """,
-        (norm_path, file_path, symbol, symbol, f"%.{symbol}", f"%::{symbol}"),
+        (norm_path, file_path),
     )
-    rows = cur.fetchall()
-    for start_line, end_line, _name, _fqname in rows:
+    return cur.fetchall()
+
+
+def _find_symbol_in_index(
+    conn: sqlite3.Connection,
+    file_path: str,
+    line: int,
+    symbol: str,
+) -> bool:
+    """Check if symbol starts at or spans line in index.db symbols table."""
+    rows = _fetch_symbol_rows(conn, file_path)
+    for start_line, end_line, name, fqname in rows:
+        if not _symbol_matches(name, fqname, symbol):
+            continue
         if start_line == line:
             return True
-        if end_line is not None and start_line <= line <= end_line:
+        if start_line is not None and end_line is not None and start_line <= line <= end_line:
             return True
     return False
 
@@ -126,19 +146,14 @@ def _find_drift_in_index(
     max_drift: int = DEFAULT_DRIFT_WINDOW,
 ) -> int | None:
     """Find closest line where symbol starts in index.db for file_path within max_drift."""
-    norm_path = os.path.normpath(file_path)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT start_line
-        FROM symbols
-        WHERE (file_path = ? OR file_path = ?)
-          AND (name = ? OR fqname = ? OR fqname LIKE ? OR fqname LIKE ?)
-        """,
-        (norm_path, file_path, symbol, symbol, f"%.{symbol}", f"%::{symbol}"),
-    )
-    rows = cur.fetchall()
-    candidates = [r[0] for r in rows if r[0] is not None and r[0] != line]
+    rows = _fetch_symbol_rows(conn, file_path)
+    candidates = [
+        start_line
+        for start_line, _end_line, name, fqname in rows
+        if start_line is not None
+        and start_line != line
+        and _symbol_matches(name, fqname, symbol)
+    ]
     if not candidates:
         return None
     closest = min(candidates, key=lambda c: abs(c - line))
@@ -397,10 +412,6 @@ def check_citations(
             f_path = Path(f)
             resolved_f = repo_path / f_path if not f_path.is_absolute() else f_path
 
-            if not resolved_f.is_file():
-                notes.append(f"Note: {f} not found, skipping.")
-                continue
-
             doc_rel = str(f)
             doc_errors = check_document_citations(
                 repo_path=repo_path,
@@ -457,6 +468,14 @@ def run_check_citations(
     if not repo_path.is_dir():
         stderr.write(f"Error: Target repository directory '{repo}' does not exist\n")
         return 1
+
+    if files:
+        for f in files:
+            f_path = Path(f)
+            resolved_f = f_path if f_path.is_absolute() else repo_path / f_path
+            if not resolved_f.is_file():
+                stderr.write(f"Error: File '{f}' does not exist\n")
+                return 1
 
     errors, notes = check_citations(
         repo=repo_path,

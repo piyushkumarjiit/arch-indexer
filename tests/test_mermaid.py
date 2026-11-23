@@ -489,3 +489,29 @@ def test_form_feed_in_mermaid_document(tmp_path):
 
     errors, _ = check_mermaid(repo)
     assert errors == []
+
+
+def test_label_text_is_not_parsed_as_diagram_structure():
+    # Mermaid shape labels and sequence messages are free text: comparison
+    # operators, generics and arrow-like text inside them are not diagram
+    # structure. Oracle: Mermaid shape/label and sequence-message grammar.
+    assert _validate_snippet("flowchart TD\n  A[count > 0] --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A[Map<K, V>] --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A[a -> b] --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A[x --> y] --> B\n") == []
+    assert _validate_snippet("flowchart TD\n  A(step -> next) --> B\n") == []
+    assert _validate_snippet("sequenceDiagram\n  A->>B: smile :)\n") == []
+    assert _validate_snippet("sequenceDiagram\n  A->>B: x ==> y\n") == []
+
+    # Structural errors outside label text are still detected.
+    assert any(
+        e.code == CODE_INVALID_ARROW for e in _validate_snippet("flowchart TD\n  A -> B\n")
+    )
+    assert any(
+        e.code == CODE_UNBALANCED_DELIMITERS
+        for e in _validate_snippet("flowchart TD\n  A[unclosed --> B\n")
+    )
+    assert any(
+        e.code == CODE_INVALID_ARROW
+        for e in _validate_snippet("sequenceDiagram\n  Alice ==> Bob: text\n")
+    )

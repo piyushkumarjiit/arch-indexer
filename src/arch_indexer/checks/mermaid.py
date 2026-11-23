@@ -199,6 +199,54 @@ def _split_tokens_outside_brackets(text: str, seps: str = "&;") -> list[str]:
     return tokens
 
 
+def _mask_bracket_contents(line: str) -> str:
+    """Blank out label text inside bracket delimiters, preserving the delimiters."""
+    out = list(line)
+    stack: list[str] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closers = {")": "(", "]": "[", "}": "{"}
+    in_quote = False
+    escape = False
+
+    for idx, ch in enumerate(line):
+        if in_quote:
+            if ch == "\\" and not escape:
+                escape = True
+            elif ch == '"' and not escape:
+                in_quote = False
+            else:
+                escape = False
+            out[idx] = " "
+            continue
+
+        if ch == '"':
+            in_quote = True
+            out[idx] = " "
+            continue
+
+        if ch in pairs:
+            stack.append(ch)
+            continue
+
+        if ch in closers:
+            if stack and stack[-1] == closers[ch]:
+                stack.pop()
+            continue
+
+        if stack:
+            out[idx] = " "
+
+    return "".join(out)
+
+
+def _mask_sequence_message(line: str) -> str:
+    """Blank out free-text sequenceDiagram message text after the first ':'."""
+    idx = line.find(":")
+    if idx < 0:
+        return line
+    return line[: idx + 1] + " " * (len(line) - idx - 1)
+
+
 def _validate_brackets_in_line(
     line_without_comments: str,
     doc_rel: str,
@@ -240,15 +288,21 @@ def _validate_brackets_in_line(
             continue
 
         if allow_asymmetric and ch == ">":
-            # Asymmetric shape opener 'A>flag]' - check if '>' is part of edge arrow
-            prev_arrow = col > 0 and line_without_comments[col - 1] in arrow_chars
+            # Asymmetric shape opener 'A>flag]' - only when outside any bracket and
+            # directly following a node-id character, never inside label text.
+            prev_char = line_without_comments[col - 1] if col > 0 else ""
+            prev_arrow = bool(prev_char) and prev_char in arrow_chars
             next_arrow = (
                 col + 1 < len(line_without_comments)
                 and line_without_comments[col + 1] in arrow_chars
             )
-            if prev_arrow or next_arrow:
-                continue
-            stack.append((">", col))
+            if (
+                not stack
+                and not prev_arrow
+                and not next_arrow
+                and (prev_char.isalnum() or prev_char in "_-")
+            ):
+                stack.append((">", col))
             continue
 
         if ch in pairs:
@@ -415,9 +469,12 @@ def validate_mermaid_block(
     curly_stack: list[int] = []
 
     for line_no, raw in body_lines_with_idx:
-        # Check quotes and line delimiters
+        # Check quotes and line delimiters, ignoring free-text sequence messages
+        bracket_line = (
+            _mask_sequence_message(raw) if diagram_type == "sequenceDiagram" else raw
+        )
         err = _validate_brackets_in_line(
-            raw,
+            bracket_line,
             doc_rel=doc_rel,
             doc_line=line_no,
             ignore_curly=multi_line_curly,
@@ -468,10 +525,13 @@ def validate_mermaid_block(
             continue
 
         if diagram_type in ("flowchart", "graph"):
+            # Validate structure only: label text is not diagram syntax
+            structural_content = _mask_bracket_contents(line_content)
+
             # Check edge arrows
             has_arrow_err = False
             for malformed_re in MALFORMED_FLOWCHART_ARROW_RES:
-                if malformed_re.search(line_content):
+                if malformed_re.search(structural_content):
                     errors.append(
                         MermaidError(
                             code=CODE_INVALID_ARROW,
@@ -487,7 +547,7 @@ def validate_mermaid_block(
                 continue
 
             # Split line into statements separated by ';' outside brackets
-            statements = _split_tokens_outside_brackets(line_content, seps=";")
+            statements = _split_tokens_outside_brackets(structural_content, seps=";")
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt:
@@ -573,8 +633,9 @@ def validate_mermaid_block(
                             )
 
         elif diagram_type == "sequenceDiagram":
+            structural_content = _mask_sequence_message(line_content)
             for invalid_re in INVALID_SEQUENCE_ARROW_RES:
-                if invalid_re.search(line_content):
+                if invalid_re.search(structural_content):
                     errors.append(
                         MermaidError(
                             code=CODE_INVALID_ARROW,

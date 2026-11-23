@@ -241,6 +241,18 @@ def test_cli_check_citations_multiple_files(tmp_path):
     assert code == 0
 
 
+def test_cli_check_citations_missing_file_is_invalid_argument(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    # Spec 7.2: an explicitly named input that does not exist is an invalid
+    # CLI argument (exit 1), not a successful run.
+    code = main(["check-citations", str(repo), "--file", "docs/.drafts/typo.md"])
+
+    assert code == EXIT_ERROR
+    assert "docs/.drafts/typo.md" in capsys.readouterr().err
+
+
 def test_cli_check_mermaid_dispatch(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
