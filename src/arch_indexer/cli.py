@@ -17,6 +17,7 @@ from arch_indexer.toolchain import (
     ensure_toolchain,
     format_status_report,
     get_toolchain_status,
+    load_toolchain_manifest,
 )
 
 # Exit codes per spec section 7.2
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "toolchain", help="Toolchain management (status & ensure)"
     )
     toolchain_sub = toolchain_parser.add_subparsers(dest="toolchain_action", required=True)
+    java_min = load_toolchain_manifest()["runtimes"]["java_min_version"]
 
     # toolchain status
     tc_status = toolchain_sub.add_parser("status", help="Inspect host runtimes and toolchain")
@@ -56,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "Not supported yet: exits 1 with an error; install host java >= 17 and mvn instead"
+            f"Not supported yet: exits 1 with an error; install host java >= {java_min} "
+            "and mvn instead"
         ),
     )
 

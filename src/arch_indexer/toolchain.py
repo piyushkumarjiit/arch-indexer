@@ -365,6 +365,17 @@ def _lock_tool_entry(cfg: dict[str, Any], install_path: Path) -> dict[str, Any]:
     return entry
 
 
+def _refresh_skipped_tool_lock(
+    lock_data: dict[str, Any], tool_name: str, cfg: dict[str, Any], install_path: Path
+) -> bool:
+    entry = _lock_tool_entry(cfg, install_path)
+    current = lock_data["tools"].get(tool_name)
+    if current is not None and all(current.get(key) == value for key, value in entry.items()):
+        return False
+    lock_data["tools"][tool_name] = entry
+    return True
+
+
 def _scip_java_launcher_path(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
     return get_java_tools_dir(cache_dir) / f"{cfg['filename']}-{cfg['version']}"
 
@@ -634,8 +645,9 @@ def ensure_toolchain(
         status = check_tool_status(tool_name, cache_dir=c_dir)
         if status.installed:
             skipped_existing.append(tool_name)
-            if tool_name not in lock_data["tools"] and status.install_path is not None:
-                lock_data["tools"][tool_name] = _lock_tool_entry(cfg, status.install_path)
+            if status.install_path is not None and _refresh_skipped_tool_lock(
+                lock_data, tool_name, cfg, status.install_path
+            ):
                 lock_dirty = True
             continue
         node_installs.append((tool_name, cfg))
@@ -695,10 +707,9 @@ def ensure_toolchain(
             status = check_tool_status("scip-java", cache_dir=c_dir)
             if status.installed:
                 skipped_existing.append("scip-java")
-                if "scip-java" not in lock_data["tools"] and status.install_path is not None:
-                    lock_data["tools"]["scip-java"] = _lock_tool_entry(
-                        scip_java_cfg, status.install_path
-                    )
+                if status.install_path is not None and _refresh_skipped_tool_lock(
+                    lock_data, "scip-java", scip_java_cfg, status.install_path
+                ):
                     lock_dirty = True
             else:
                 launcher = _install_scip_java(tools_cfg, c_dir)

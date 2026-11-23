@@ -501,6 +501,83 @@ def test_ensure_records_skipped_tools_when_lock_missing(tmp_path):
     }
 
 
+def test_skipped_node_tool_refreshes_stale_lock_entry(tmp_path):
+    cache = tmp_path / "cache"
+    bin_path = cache / "tools" / "node" / "node_modules" / ".bin" / "scip-python"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("#!/bin/sh\n")
+    lock_path = cache / "tools" / "manifest.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "scip-python": {
+                        "package": "@sourcegraph/scip-python",
+                        "version": "0.6.7",
+                        "install_type": "npm",
+                        "path": str(bin_path),
+                    }
+                }
+            }
+        )
+    )
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=NODE_MANIFEST),
+        patch("subprocess.run", side_effect=_fake_node_subprocess_run),
+        patch("shutil.which", side_effect=_which),
+    ):
+        res = ensure_toolchain(FIXTURES_DIR / "python", cache_dir=cache)
+
+    assert res["installed"] == []
+    assert res["skipped"] == ["scip-python"]
+    entry = json.loads(lock_path.read_text())["tools"]["scip-python"]
+    assert entry["version"] == "0.6.8"
+    assert entry["path"] == str(bin_path)
+
+
+def test_skipped_scip_java_refreshes_stale_lock_entry(tmp_path):
+    cache = tmp_path / "cache"
+    java_dir = cache / "tools" / "java"
+    java_dir.mkdir(parents=True)
+    launcher = java_dir / "scip-java-0.10.2"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    lock_path = cache / "tools" / "manifest.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "scip-java": {
+                        "version": "0.10.3",
+                        "module": "com.sourcegraph:scip-java_2.13",
+                        "install_type": "coursier-bootstrap",
+                        "path": str(java_dir / "scip-java-0.10.3"),
+                    }
+                }
+            }
+        )
+    )
+
+    manifest_mock = {"tools": _java_tools(b"x"), "runtimes": RUNTIMES}
+
+    def run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch("arch_indexer.toolchain.check_host_runtimes", return_value=_runtimes()),
+        patch("subprocess.run", side_effect=run),
+    ):
+        res = ensure_toolchain(FIXTURES_DIR / "java_maven", cache_dir=cache)
+
+    assert res["installed"] == []
+    assert res["skipped"] == ["scip-java"]
+    entry = json.loads(lock_path.read_text())["tools"]["scip-java"]
+    assert entry["version"] == "0.10.2"
+    assert entry["path"] == str(launcher)
+
+
 def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
     cache = tmp_path / "cache"
 

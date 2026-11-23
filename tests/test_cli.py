@@ -14,6 +14,7 @@ from arch_indexer.cli import (
     main,
 )
 from arch_indexer.config import get_jvm_heap_mb, get_node_heap_mb
+from arch_indexer.toolchain import load_toolchain_manifest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -136,8 +137,20 @@ def test_cli_fetch_runtime_is_rejected(tmp_path, capsys):
     )
     assert code == EXIT_ERROR
     captured = capsys.readouterr()
+    java_min = load_toolchain_manifest()["runtimes"]["java_min_version"]
     assert "--fetch-runtime is not supported yet" in captured.err
-    assert "java >= 17" in captured.err
+    assert f"java >= {java_min}" in captured.err
+
+
+def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
+    with patch(
+        "arch_indexer.cli.load_toolchain_manifest",
+        return_value={"tools": {}, "runtimes": {"java_min_version": "21"}},
+    ):
+        assert main(["toolchain", "ensure", "--help"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "java >= 21" in captured.out
 
 
 @pytest.mark.parametrize(
