@@ -162,24 +162,19 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
     return matched
 
 
+def _languages_from_files(matched: dict[str, list[str]]) -> list[str]:
+    active = [lang for lang in ("python", "typescript", "java") if matched[lang]]
+    # Infra is always active (pure Python scanner per spec section 3.1)
+    active.append("infra")
+    return active
+
+
 def detect_languages(repo_path: Path | str) -> list[str]:
     """Detect active languages in repo per spec section 3.1.
 
     Infra is always active. Python, TypeScript, and Java are active if matched.
     """
-    matched = detect_repo_files(repo_path)
-    active: list[str] = []
-
-    if matched["python"]:
-        active.append("python")
-    if matched["typescript"]:
-        active.append("typescript")
-    if matched["java"]:
-        active.append("java")
-
-    # Infra is always active (pure Python scanner per spec section 3.1)
-    active.append("infra")
-    return active
+    return _languages_from_files(detect_repo_files(repo_path))
 
 
 @dataclass
@@ -815,24 +810,28 @@ def _describe_portable_runtime(
 
 
 def _prepare_java_runtime(
-    cache_dir: str | Path | None = None, fetch_runtime: bool = True
+    cache_dir: str | Path | None = None,
+    fetch_runtime: bool = True,
+    *,
+    maven_repo: bool,
 ) -> tuple[dict[str, RuntimeStatus], JavaRuntime, list[str]]:
     """Resolve java/mvn for scip-java and report the portable runtimes in use.
 
-    Pinned runtimes are downloaded only when fetch_runtime is set. An already
-    downloaded, checksum-verified runtime is reused without it, and the returned
-    messages say which portable runtime was used and whether it was just fetched.
+    Pinned runtimes are downloaded only when fetch_runtime is set, and Maven only
+    for a repo that contains a pom.xml. An already downloaded, checksum-verified
+    runtime is reused without it, and the returned messages say which portable
+    runtime was used and whether it was just fetched.
     """
     runtimes, runtime, portable = _effective_runtimes(cache_dir)
     downloaded: dict[str, RuntimeInstall] = {}
     if fetch_runtime:
-        kinds = tuple(
-            kind
-            for kind, status in (("jdk", runtimes["java"]), ("maven", runtimes["mvn"]))
-            if not status.available
-        )
+        kinds = []
+        if not runtimes["java"].available:
+            kinds.append("jdk")
+        if maven_repo and not runtimes["mvn"].available:
+            kinds.append("maven")
         if kinds:
-            downloaded = ensure_portable_runtimes(cache_dir, kinds=kinds)
+            downloaded = ensure_portable_runtimes(cache_dir, kinds=tuple(kinds))
             runtimes, runtime, portable = _effective_runtimes(cache_dir)
 
     messages = [
@@ -989,7 +988,7 @@ def get_toolchain_status(
     repo = Path(repo_path).resolve()
     c_dir = get_cache_dir(cache_dir)
     detected_files = detect_repo_files(repo)
-    active_langs = detect_languages(repo)
+    active_langs = _languages_from_files(detected_files)
     runtimes, java_runtime, _portable = _effective_runtimes(c_dir)
     java_env = java_runtime.env or None
 
@@ -1059,11 +1058,12 @@ def ensure_toolchain(
     - Installs only missing tools into <cache>/tools/
     - Node tools (scip-python, scip-typescript) installed via npm into <cache>/tools/node
     - Java tool (scip-java) bootstrapped with coursier into <cache>/tools/java
-    - With fetch_runtime, downloads a pinned portable JDK/Maven into <cache>/runtimes/
-      for Java repos whose host java/mvn is missing or unusable; a runtime that is
-      already downloaded and verified is reused without the flag, and the summary
-      names each portable runtime used. The scip-java subprocess then uses it via
-      JAVA_HOME/PATH for that subprocess only.
+    - With fetch_runtime, downloads a pinned portable JDK into <cache>/runtimes/ for
+      Java repos whose host java is missing or unusable, plus Maven when the repo
+      has a pom.xml and host mvn is missing; a runtime that is already downloaded
+      and verified is reused without the flag, and the summary names each portable
+      runtime used. The scip-java subprocess then uses it via JAVA_HOME/PATH for
+      that subprocess only.
     - Updates <cache>/tools/manifest.lock.json; a runtime download failure exits
       non-zero only after the independent Node tools are installed and recorded
     """
@@ -1074,7 +1074,9 @@ def ensure_toolchain(
     repo = Path(repo_path).resolve()
     c_dir = get_cache_dir(cache_dir)
 
-    active_langs = detect_languages(repo)
+    detected_files = detect_repo_files(repo)
+    active_langs = _languages_from_files(detected_files)
+    maven_repo = any(os.path.basename(path) == "pom.xml" for path in detected_files["java"])
     warnings: list[str] = []
     lock_data = get_installed_manifest_lock(c_dir)
     if "tools" not in lock_data:
@@ -1140,7 +1142,7 @@ def ensure_toolchain(
     runtime_messages: list[str] = []
     if "java" in active_langs:
         runtimes, java_runtime, runtime_messages = _prepare_java_runtime(
-            c_dir, fetch_runtime=fetch_runtime
+            c_dir, fetch_runtime=fetch_runtime, maven_repo=maven_repo
         )
         # ensure_portable_runtimes records its installs in the lock after we read it;
         # merge those entries so the final save does not drop them.

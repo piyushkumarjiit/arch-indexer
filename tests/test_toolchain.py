@@ -958,7 +958,7 @@ def test_prepare_java_runtime_keeps_host_commands_when_complete(tmp_path):
         patch("arch_indexer.toolchain.shutil.which", side_effect=_which),
         patch("arch_indexer.toolchain.ensure_portable_runtimes") as ensure_portable,
     ):
-        runtimes, runtime, messages = _prepare_java_runtime(tmp_path / "cache")
+        runtimes, runtime, messages = _prepare_java_runtime(tmp_path / "cache", maven_repo=True)
 
     ensure_portable.assert_not_called()
     assert runtimes["java"].available is True
@@ -1022,6 +1022,43 @@ def test_fetch_runtime_installs_scip_java_with_portable_runtime_env(tmp_path):
     assert lock["runtimes"]["jdk"]["version"] == "17.0.21.1+2"
     assert lock["runtimes"]["maven"]["version"] == "3.9.16"
     assert lock["tools"]["scip-java"]["version"] == "0.10.2"
+
+
+def test_fetch_runtime_skips_maven_for_non_maven_java_repo(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "App.java").write_text("class App {}\n")
+    cache = tmp_path / "cache"
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    coursier_bytes = b"coursier-launcher-jar"
+    runtime_cfg = _runtime_pin_manifest(jdk_bytes, maven_bytes)["runtimes"]
+    manifest_mock = {"tools": _java_tools(coursier_bytes), "runtimes": runtime_cfg}
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=_fake_java_subprocess_run),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_which),
+        patch(
+            "urllib.request.urlopen",
+            side_effect=_runtime_downloads(jdk_bytes, maven_bytes, coursier_bytes),
+        ),
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    jdk_path = cache / "runtimes" / "temurin-jdk-test"
+    assert res["installed"] == ["scip-java"]
+    assert res["runtimes"] == [
+        f"java: portable runtime 17.0.21.1+2 (downloaded) at {jdk_path}",
+    ]
+    assert not (cache / "runtimes" / "apache-maven-test").exists()
+    lock = json.loads((cache / "tools" / "manifest.lock.json").read_text())
+    assert lock["runtimes"]["jdk"]["version"] == "17.0.21.1+2"
+    assert "maven" not in lock["runtimes"]
 
 
 def _portable_launcher_run(jdk_path):

@@ -61,8 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Fetch the pinned Temurin JDK (min java "
-            f"{java_min}) and Apache Maven into <cache>/runtimes/ when host "
-            "java is too old or mvn is missing (Java/Maven repos only). Only "
+            f"{java_min}) into <cache>/runtimes/ when host java is too old, and "
+            "Apache Maven too when the repo has a pom.xml and host mvn is "
+            "missing (Java repos only). Only "
             "this flag downloads; an already fetched runtime is reused and "
             "reported without it"
         ),
