@@ -181,14 +181,6 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
             ["assemble", "some/repo", "--drafts-dir", "drafts", "--docs-dir", "docs"],
             "assemble",
         ),
-        (
-            ["check-citations", "some/repo", "--docs-dir", "docs", "--format", "json"],
-            "check-citations",
-        ),
-        (
-            ["check-mermaid", "some/repo", "--docs-dir", "docs", "--format", "text"],
-            "check-mermaid",
-        ),
     ],
 )
 def test_not_implemented_commands_exit_error(cmd_args, expected_cmd, capsys):
@@ -196,3 +188,33 @@ def test_not_implemented_commands_exit_error(cmd_args, expected_cmd, capsys):
     assert code == EXIT_ERROR
     captured = capsys.readouterr()
     assert f"Command '{expected_cmd}' is not implemented yet" in captured.err
+
+
+def test_cli_check_citations_dispatch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    # No docs present: skipped with note, exit 0
+    code = main(["check-citations", str(repo), "--docs-dir", "docs"])
+    assert code == 0
+
+    # With broken citation: exit 3
+    (docs / "DESIGN.md").write_text("[^1]: `missing.py:1` — `fn`\n", encoding="utf-8")
+    code_err = main(["check-citations", str(repo), "--docs-dir", "docs"])
+    assert code_err == 3
+
+
+def test_cli_check_mermaid_dispatch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    # No docs present: skipped with note, exit 0
+    code = main(["check-mermaid", str(repo), "--docs-dir", "docs"])
+    assert code == 0
+
+    # With broken mermaid diagram: exit 3
+    (docs / "DESIGN.md").write_text("```mermaid\nflowchart TD\n  A -> B\n```\n", encoding="utf-8")
+    code_err = main(["check-mermaid", str(repo), "--docs-dir", "docs"])
+    assert code_err == 3
