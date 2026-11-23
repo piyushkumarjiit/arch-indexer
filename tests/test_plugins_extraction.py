@@ -182,6 +182,62 @@ def main():
     assert cli_eps[0]["route_or_trigger"] == "argparse"
 
 
+def test_python_argparse_entrypoint_detected_through_parser_builder(tmp_path: Path):
+    """Argparse CLIs are detected even when the parser reaches ``parse_args`` indirectly.
+
+    Oracle: SPEC section 4.5 requires argparse CLI commands to be detected, and the
+    ``build_parser()`` factory (used by ``src/arch_indexer/cli.py`` itself) is the
+    standard layout, so detection must not depend on the parse call naming a local
+    variable that was assigned directly from ``ArgumentParser(...)``.
+    """
+    (tmp_path / "builder.py").write_text(
+        """import argparse
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="tool")
+    parser.add_argument("--flag")
+    return parser
+
+
+def main(argv=None):
+    return build_parser().parse_args(argv)
+"""
+    )
+    (tmp_path / "stored.py").write_text(
+        """import argparse
+
+
+class App:
+    def __init__(self):
+        self.parser = argparse.ArgumentParser()
+
+    def run(self):
+        return self.parser.parse_args()
+"""
+    )
+    (tmp_path / "direct.py").write_text(
+        """import argparse
+
+
+def main(argv=None):
+    return argparse.ArgumentParser().parse_known_args(argv)
+"""
+    )
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=tmp_path,
+        files=[tmp_path / "builder.py", tmp_path / "stored.py", tmp_path / "direct.py"],
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+
+    cli_files = sorted(e["file_path"] for e in res.entrypoints if e["kind"] == "cli")
+    assert cli_files == ["builder.py", "direct.py", "stored.py"]
+
+
 def test_typescript_plugin_extraction():
     plugin = TypeScriptPlugin()
     server_file = FIXTURES_DIR / "entrypoints" / "server.ts"

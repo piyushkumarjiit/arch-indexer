@@ -1133,7 +1133,7 @@ class PythonPlugin(LanguagePlugin):
         bound_names: set[str] = set()
         argparse_modules: set[str] = set()  # local names bound to the argparse module
         argument_parser_names: set[str] = set()  # local names bound to ArgumentParser
-        parser_names: set[str] = set()  # variables assigned from ArgumentParser(...)
+        parser_constructed = False
         parses_argv = False
         is_test = _is_test_path(rel_path)
 
@@ -1250,22 +1250,6 @@ class PythonPlugin(LanguagePlugin):
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                             record_import(full_sym, alias, line, col)
 
-            # 1b. ``name = argparse.ArgumentParser(...)`` marks an argv parser variable.
-            elif node.type == "assignment":
-                left = node.child_by_field_name("left")
-                right = node.child_by_field_name("right")
-                if (
-                    left is not None
-                    and left.type == "identifier"
-                    and right is not None
-                    and right.type == "call"
-                ):
-                    called = right.child_by_field_name("function")
-                    if called is not None:
-                        fn_text = _get_node_text(called, source_bytes).strip()
-                        if is_argument_parser(fn_text):
-                            parser_names.add(_get_node_text(left, source_bytes))
-
             # 2. Calls
             elif node.type == "call":
                 fn_node = node.child_by_field_name("function")
@@ -1275,11 +1259,10 @@ class PythonPlugin(LanguagePlugin):
                     col = node.start_point[1]
                     target_fqname = fn_text
 
-                    receiver, _, called_attr = fn_text.rpartition(".")
-                    if receiver in parser_names and called_attr in (
-                        "parse_args",
-                        "parse_known_args",
-                    ):
+                    _, _, called_attr = fn_text.rpartition(".")
+                    if is_argument_parser(fn_text):
+                        parser_constructed = True
+                    if called_attr in ("parse_args", "parse_known_args"):
                         parses_argv = True
 
                     for alias in sorted(file_imports, key=len, reverse=True):
@@ -1404,9 +1387,9 @@ class PythonPlugin(LanguagePlugin):
 
             stack.extend((child, child_scope) for child in reversed(node.children))
 
-        # 3c. Argparse CLI detection: an ``ArgumentParser`` created in this file is
-        # parsed for argv here, so the file is a CLI.
-        if parses_argv:
+        # 3c. Argparse CLI detection: the file builds an ``ArgumentParser`` and parses
+        # argv with it, so the file is a CLI.
+        if parser_constructed and parses_argv:
             add_entrypoint(
                 {
                     "kind": "cli",
