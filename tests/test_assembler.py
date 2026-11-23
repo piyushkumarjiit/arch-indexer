@@ -571,6 +571,108 @@ def test_assemble_missing_declared_section_exits_3_and_keeps_drafts(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            "Intro prose before any marker[^1].\n\n"
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\n"
+            "Component prose[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="prose-before-first-marker",
+        ),
+        pytest.param(
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\n"
+            "Component prose[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "Trailing prose owned by no marker[^1].\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="prose-after-last-marker",
+        ),
+        pytest.param(
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\nComponent prose[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "<!-- SECTION:design-sec3:START -->\n"
+            "## 3. Control & Data Flows\n\nUndeclared flow prose[^1].\n"
+            "<!-- SECTION:design-sec3:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="marker-id-not-in-section-ids",
+        ),
+        pytest.param(
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\nFirst copy[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "<!-- SECTION:design-sec2:START -->\n"
+            "Second copy[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="repeated-marker-id",
+        ),
+    ],
+)
+def test_assemble_rejects_drafted_prose_no_section_owns(tmp_path, body):
+    """Prose outside declared section markers exits 3 with drafts kept and no docs written."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(drafts, "unowned.md", "unowned", ["design-sec2"], body)
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert (drafts / "unowned.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_rejects_undeclared_marker_naming_the_section(tmp_path):
+    """The undeclared marker diagnostic names the offending section id."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "stray.md",
+        "stray",
+        ["design-sec2"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "Section two prose[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-sec5:START -->\n"
+        "Never patched prose[^1].\n"
+        "<!-- SECTION:design-sec5:END -->\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "design-sec5" in err.getvalue()
+    assert (drafts / "stray.md").is_file()
+
+
+def test_assemble_accepts_single_section_draft_wrapped_in_its_markers(tmp_path):
+    """A single-section draft may wrap its body in that section's markers."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "wrapped.md",
+        "wrapped",
+        ["design-sec2"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Wrapped prose[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Wrapped prose[^1]." in content
+    assert content.count("<!-- SECTION:design-sec2:START -->") == 1
+    assert "[^1]: `src/app.py:1` — `alpha`" in content
+
+
+@pytest.mark.parametrize(
     "draft_body",
     [
         "# Just prose\n\nNo front-matter here.\n",

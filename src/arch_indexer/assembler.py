@@ -163,6 +163,8 @@ def parse_draft_file(path: Path) -> DraftPacket:
     # Extract sections from draft
     sections: dict[str, str] = {}
     found_any_section_marker = False
+    marker_spans: list[tuple[int, int]] = []
+    duplicate_marker_ids: list[str] = []
     for m in SECTION_START_RE.finditer(rewritten_body):
         sec_id = m.group("id")
         end_marker = re.compile(
@@ -172,6 +174,9 @@ def parse_draft_file(path: Path) -> DraftPacket:
         end_match = end_marker.search(rewritten_body, m.end())
         if end_match:
             found_any_section_marker = True
+            marker_spans.append((m.start(), end_match.end()))
+            if sec_id in sections:
+                duplicate_marker_ids.append(sec_id)
             sec_content = rewritten_body[m.end() : end_match.start()].strip()
             sections[sec_id] = sec_content
 
@@ -186,6 +191,22 @@ def parse_draft_file(path: Path) -> DraftPacket:
         )
     if not section_ids:
         raise DraftFormatError("section_ids must declare at least one section")
+    if found_any_section_marker:
+        outside_markers: list[str] = []
+        cursor = 0
+        for span_start, span_end in marker_spans:
+            outside_markers.append(rewritten_body[cursor:span_start])
+            cursor = span_end
+        outside_markers.append(rewritten_body[cursor:])
+        if "".join(outside_markers).strip():
+            raise DraftFormatError("draft body has text outside its SECTION markers")
+    undeclared_sections = [sec_id for sec_id in sections if sec_id not in section_ids]
+    if undeclared_sections:
+        raise DraftFormatError(
+            "SECTION marker id(s) not declared in section_ids: " + ", ".join(undeclared_sections)
+        )
+    if duplicate_marker_ids:
+        raise DraftFormatError("duplicate SECTION marker(s): " + ", ".join(duplicate_marker_ids))
     missing_sections = [sec_id for sec_id in section_ids if sec_id not in sections]
     if missing_sections:
         raise DraftFormatError("missing draft section(s): " + ", ".join(missing_sections))
