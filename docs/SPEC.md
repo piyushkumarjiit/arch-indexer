@@ -316,12 +316,15 @@ arch-indexer plan <repo> \
   [--max-sections-per-worker 3]
 
 # 5. Deterministic assembly (merges worker drafts + injects diagrams + checks gates)
-arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs]
+arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs] [--diagrams <json>]
 
 # 6. Validation gates (standalone or run automatically by assemble)
 arch-indexer check-citations <repo> [--docs-dir docs] [--file <path>] [--format json|text]
 arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 ```
+
+> [!NOTE] Amendment: `assemble --diagrams` and path resolution
+> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text, produced by the graph step. Keys match slot ids exactly (no alias spellings); slots with no matching key, or every slot when the flag is absent, are left untouched. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, or overlapping the docs directory.
 
 ### 7.2 Exit Codes
 All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle exit code `2` as a **non-error signal**:
@@ -411,7 +414,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 >   - design-sec2
 > ---
 > ```
-> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly.
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly. Several drafts may target the same section (packets are sharded by module slice); `assemble` concatenates their bodies inside that section in ascending `packet_id` order, keeping one canonical heading, and renumbers footnotes across the combined text. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts.
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:

@@ -786,3 +786,173 @@ def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):
     assert "Control flows from the entrypoint to the worker[^2]." in content
     assert "Entry --> Worker" in content
     assert "Module Overview" in content
+
+
+def _write_design_draft(drafts, name, packet_id, sec_ids, body):
+    sec_list = ", ".join(sec_ids)
+    (drafts / name).write_text(
+        f"---\npacket_id: {packet_id}\ntarget_doc: DESIGN.md\nsection_ids: [{sec_list}]\n---\n"
+        + body,
+        encoding="utf-8",
+    )
+
+
+def _repo_with_app(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text(
+        "def alpha():\n    pass\n\ndef beta():\n    pass\n", encoding="utf-8"
+    )
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    return repo, drafts
+
+
+def test_inject_diagrams_matches_slot_ids_exactly():
+    """Only exact slot ids match; alias spellings such as 'diagram:<id>' are ignored."""
+    doc = (
+        "<!-- AUTO-DIAGRAM:module-overview:START -->\nold\n"
+        "<!-- AUTO-DIAGRAM:module-overview:END -->\n"
+    )
+    assert inject_diagrams(doc, {"diagram:module-overview": "flowchart LR\n  A --> B"}) == doc
+    injected = inject_diagrams(doc, {"module-overview": "flowchart LR\n  A --> B"})
+    assert "A --> B" in injected
+
+
+def test_assemble_relative_paths_resolve_against_repo_not_cwd(tmp_path, monkeypatch):
+    """Relative --drafts-dir and --diagrams resolve against <repo>, never the CWD."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts, "d.md", "d", ["design-sec2"], "Sec 2[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n"
+    )
+    (repo / "diagrams.json").write_text(
+        json.dumps({"module-overview": "flowchart LR\n  InRepo --> Diagram"}), encoding="utf-8"
+    )
+
+    # A decoy CWD with same-named paths must never be used
+    cwd = tmp_path / "elsewhere"
+    (cwd / "docs" / ".drafts").mkdir(parents=True)
+    (cwd / "diagrams.json").write_text(
+        json.dumps({"module-overview": "flowchart LR\n  Cwd --> Decoy"}), encoding="utf-8"
+    )
+    monkeypatch.chdir(cwd)
+
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        diagrams="diagrams.json",
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "InRepo --> Diagram" in content
+    assert "Cwd --> Decoy" not in content
+    assert not drafts.exists()
+    assert (cwd / "docs" / ".drafts").is_dir()
+
+
+def test_assemble_relative_drafts_dir_missing_in_repo_does_not_fall_back_to_cwd(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cwd = tmp_path / "elsewhere"
+    cwd_drafts = cwd / "drafts"
+    cwd_drafts.mkdir(parents=True)
+    _write_design_draft(cwd_drafts, "d.md", "d", ["design-sec2"], "Prose.\n")
+    monkeypatch.chdir(cwd)
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="drafts", out=io.StringIO(), err=err)
+    assert code == 1
+    assert (cwd_drafts / "d.md").is_file()
+    assert not (repo / "docs").exists()
+
+
+def test_assemble_relative_diagrams_missing_in_repo_does_not_fall_back_to_cwd(
+    tmp_path, monkeypatch
+):
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts, "d.md", "d", ["design-sec2"], "Sec 2[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n"
+    )
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    (cwd / "diagrams.json").write_text(json.dumps({"module-overview": "x"}), encoding="utf-8")
+    monkeypatch.chdir(cwd)
+
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        diagrams="diagrams.json",
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+    assert code == 1
+    assert (drafts / "d.md").is_file()
+
+
+@pytest.mark.parametrize("outside", ["absolute", "dotdot"])
+def test_assemble_refuses_drafts_dir_outside_repo(tmp_path, outside):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    external = tmp_path / "external-drafts"
+    external.mkdir()
+    _write_design_draft(external, "d.md", "d", ["design-sec2"], "Prose.\n")
+
+    drafts_arg = str(external) if outside == "absolute" else "../external-drafts"
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir=drafts_arg, out=io.StringIO(), err=err)
+    assert code == 1
+    assert "outside the target repository" in err.getvalue()
+    assert (external / "d.md").is_file()
+    assert not (repo / "docs").exists()
+
+
+def test_assemble_concatenates_drafts_targeting_same_section(tmp_path):
+    """Drafts sharing a section are combined in packet_id order with footnotes renumbered."""
+    repo, drafts = _repo_with_app(tmp_path)
+    # File names sort opposite to packet ids to prove ordering is by packet_id
+    _write_design_draft(
+        drafts,
+        "a-file.md",
+        "pkt-b",
+        ["design-sec2"],
+        "## 2. Components & Modules\n\nBeta module text[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "z-file.md",
+        "pkt-a",
+        ["design-sec2"],
+        "## 2. Components & Modules\n\nAlpha module text[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Alpha module text[^1]." in content
+    assert "Beta module text[^2]." in content
+    assert content.index("Alpha module text") < content.index("Beta module text")
+    assert content.count("## 2. Components & Modules") == 1
+    assert "[^1]: `src/app.py:1` — `alpha`" in content
+    assert "[^2]: `src/app.py:4` — `beta`" in content
+
+
+def test_assemble_unknown_section_exits_3_keeps_drafts_and_writes_nothing(tmp_path):
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts, "good.md", "good", ["design-sec2"], "Sec 2[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n"
+    )
+    _write_design_draft(
+        drafts, "bad.md", "bad", ["design-sec99"], "Nowhere[^1].\n\n[^1]: `src/app.py:4` — `beta`\n"
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "design-sec99" in err.getvalue()
+    assert (drafts / "good.md").is_file()
+    assert (drafts / "bad.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()

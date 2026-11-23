@@ -4,6 +4,7 @@ import contextlib
 import json
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -265,15 +266,33 @@ def _retain_auto_diagram_slots(existing: str, new_content: str) -> str:
     return "\n\n".join(part for part in (head, blocks, tail) if part)
 
 
-def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
-    """Patch a single section in document text between its START and END markers."""
-    clean_new = new_content.strip()
+def _strip_leading_heading(text: str, max_level: int) -> str:
+    """Drop the first non-empty line when it is a heading at or above ``max_level``."""
+    lines = _split_lines(text)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = HEADING_RE.match(stripped)
+        if m and len(m.group(1)) <= max_level:
+            return "\n".join(lines[idx + 1 :]).strip()
+        break
+    return text
 
-    # If clean_new itself contains SECTION markers for this id, strip them
+
+def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str | Sequence[str]) -> str:
+    """Patch a single section in document text between its START and END markers.
+
+    ``new_content`` may be a sequence of draft bodies targeting the same section; they are
+    concatenated in the given order, keeping one canonical section heading.
+    """
+    parts = [new_content] if isinstance(new_content, str) else list(new_content)
+
+    # If a part itself contains SECTION markers for this id, strip them
     start_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>]+|\s+[^>]+)?\s*-->")
     end_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->")
-    clean_new = start_pat.sub("", clean_new)
-    clean_new = end_pat.sub("", clean_new).strip()
+    clean_parts = [end_pat.sub("", start_pat.sub("", part.strip())).strip() for part in parts]
+    clean_new = "\n\n".join(part for part in clean_parts if part)
 
     # Find the section in doc_text
     start_match = None
@@ -290,6 +309,11 @@ def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
         end_match = end_marker.search(doc_text, start_match.end())
         if end_match:
             existing_section = doc_text[start_match.end() : end_match.start()]
+            canonical = _first_heading(existing_section)
+            if canonical is not None and len(clean_parts) > 1:
+                # Combined drafts: keep only the first part's heading slot
+                rest = [_strip_leading_heading(p, canonical[0]) for p in clean_parts[1:]]
+                clean_new = "\n\n".join(p for p in [clean_parts[0], *rest] if p)
             clean_new = _retain_canonical_heading(existing_section, clean_new)
             clean_new = _retain_auto_diagram_slots(existing_section, clean_new)
             # Preserve start marker and end marker
@@ -297,30 +321,7 @@ def patch_section_in_doc(doc_text: str, sec_id: str, new_content: str) -> str:
             after = doc_text[end_match.start() :]
             return f"{before}\n{clean_new}\n{after}"
 
-    # Section not found in doc: append before references section or at end
-    ref_marker = re.compile(r"<!--\s*SECTION:[^:]*references:START.*-->", re.IGNORECASE)
-    ref_match = ref_marker.search(doc_text)
-    if ref_match:
-        before = doc_text[: ref_match.start()]
-        after = doc_text[ref_match.start() :]
-        insertion = (
-            f"<!-- SECTION:{sec_id}:START -->\n{clean_new}\n<!-- SECTION:{sec_id}:END -->\n\n"
-        )
-        return f"{before}{insertion}{after}"
-
-    ref_heading = re.search(r"^##\s+References\b", doc_text, re.MULTILINE)
-    if ref_heading:
-        before = doc_text[: ref_heading.start()]
-        after = doc_text[ref_heading.start() :]
-        insertion = (
-            f"<!-- SECTION:{sec_id}:START -->\n{clean_new}\n<!-- SECTION:{sec_id}:END -->\n\n"
-        )
-        return f"{before}{insertion}{after}"
-
-    return (
-        f"{doc_text.rstrip()}\n\n"
-        f"<!-- SECTION:{sec_id}:START -->\n{clean_new}\n<!-- SECTION:{sec_id}:END -->\n"
-    )
+    raise DraftFormatError(f"section '{sec_id}' does not exist in the target document")
 
 
 def renumber_footnotes_in_doc(doc_text: str, definitions: dict[str, str]) -> str:
@@ -457,23 +458,11 @@ def inject_diagrams(doc_text: str, diagrams: dict[str, str] | None) -> str:
         start_tag = m.group("start")
         end_tag = m.group("end")
 
-        # Find matching diagram key
-        matched_key: str | None = None
-        candidates = [
-            slot_id,
-            f"diagram:{slot_id}",
-            slot_id.removeprefix("diagram:"),
-        ]
-        for cand in candidates:
-            if cand in diagrams:
-                matched_key = cand
-                break
-
-        if matched_key is None:
-            # Leave slot untouched
+        if slot_id not in diagrams:
+            # Slot ids must match mapping keys exactly; leave unmatched slots untouched
             return m.group(0)
 
-        mermaid_code = diagrams[matched_key].strip()
+        mermaid_code = diagrams[slot_id].strip()
         if not mermaid_code.startswith("```"):
             fenced_code = f"```mermaid\n{mermaid_code}\n```"
         else:
@@ -502,23 +491,24 @@ def assemble(
         stderr.write(f"Error: Target repository directory '{repo}' does not exist\n")
         return 1
 
-    # Resolve drafts_dir relative to repo if not absolute
-    drafts_path = Path(drafts_dir)
-    if not drafts_path.is_absolute():
-        if (repo_path / drafts_path).is_dir():
-            resolved_drafts_dir = (repo_path / drafts_path).resolve()
-        else:
-            resolved_drafts_dir = drafts_path.resolve()
-    else:
-        resolved_drafts_dir = drafts_path.resolve()
+    # Relative paths resolve against the target repository only (never the CWD)
+    def _in_repo(path: str | Path) -> Path:
+        candidate = Path(path)
+        return (candidate if candidate.is_absolute() else repo_path / candidate).resolve()
+
+    resolved_drafts_dir = _in_repo(drafts_dir)
+    if resolved_drafts_dir != repo_path and repo_path not in resolved_drafts_dir.parents:
+        stderr.write(
+            f"Error: Drafts directory '{resolved_drafts_dir}' is outside the target "
+            f"repository '{repo_path}'\n"
+        )
+        return 1
 
     if not resolved_drafts_dir.is_dir():
         stderr.write(f"Error: Drafts directory '{resolved_drafts_dir}' does not exist\n")
         return 1
 
-    target_docs_dir = (
-        (repo_path / docs_dir).resolve() if not Path(docs_dir).is_absolute() else Path(docs_dir)
-    )
+    target_docs_dir = _in_repo(docs_dir)
     if resolved_drafts_dir == repo_path or (
         resolved_drafts_dir == target_docs_dir or resolved_drafts_dir in target_docs_dir.parents
     ):
@@ -531,10 +521,7 @@ def assemble(
     # Load diagrams mapping if provided
     diagrams_map: dict[str, str] | None = None
     if diagrams is not None:
-        diag_path = Path(diagrams)
-        if not diag_path.is_absolute():
-            candidate = (repo_path / diag_path).resolve()
-            diag_path = candidate if candidate.is_file() else diag_path.resolve()
+        diag_path = _in_repo(diagrams)
         if not diag_path.is_file():
             stderr.write(f"Error: Diagrams file '{diag_path}' does not exist\n")
             return 1
@@ -542,6 +529,13 @@ def assemble(
             diagrams_map = json.loads(diag_path.read_text(encoding="utf-8"))
         except Exception as e:
             stderr.write(f"Error reading diagrams JSON file '{diag_path}': {e}\n")
+            return 1
+        if not isinstance(diagrams_map, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in diagrams_map.items()
+        ):
+            stderr.write(
+                f"Error: Diagrams file '{diag_path}' must be a JSON object of id -> mermaid text\n"
+            )
             return 1
 
     # Find draft files
@@ -566,42 +560,49 @@ def assemble(
             return 1
         drafts_by_doc.setdefault(packet.target_doc, []).append(packet)
 
-    target_docs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Process each target document
+    # Build every patched document in memory first so a bad draft writes nothing
+    rendered: dict[str, str] = {}
     for doc_name, packets in drafts_by_doc.items():
         doc_path = target_docs_dir / doc_name
-        is_first_run = not doc_path.is_file()
-
-        if is_first_run:
+        if doc_path.is_file():
+            doc_text = doc_path.read_text(encoding="utf-8", errors="replace")
+        else:
             try:
                 doc_text = load_skeleton(doc_name)
             except Exception:
                 stderr.write(f"Error: No skeleton available for target document '{doc_name}'\n")
                 return 1
-        else:
-            doc_text = doc_path.read_text(encoding="utf-8", errors="replace")
 
         # Collect definitions: start with existing ones in document
         doc_definitions = extract_existing_definitions(doc_text)
-
-        # Merge definitions from all drafts targeting this document
         for packet in packets:
             doc_definitions.update(packet.definitions)
 
-        # Patch sections from each draft
+        # Several drafts may target one section: combine them in packet_id order
+        bodies_by_section: dict[str, list[tuple[str, str]]] = {}
         for packet in packets:
             for sec_id in packet.section_ids:
-                doc_text = patch_section_in_doc(doc_text, sec_id, packet.sections[sec_id])
+                bodies_by_section.setdefault(sec_id, []).append(
+                    (packet.packet_id, packet.sections[sec_id])
+                )
+        for sec_id, entries in bodies_by_section.items():
+            ordered = [body for _, body in sorted(entries, key=lambda e: e[0])]
+            try:
+                doc_text = patch_section_in_doc(doc_text, sec_id, ordered)
+            except DraftFormatError as e:
+                stderr.write(
+                    f"Error: Invalid draft for {doc_name}: {e}. "
+                    f"Retaining drafts in '{resolved_drafts_dir}'.\n"
+                )
+                return 3
 
-        # Globally renumber and deduplicate footnotes
+        # Globally renumber and deduplicate footnotes, then inject diagrams
         doc_text = renumber_footnotes_in_doc(doc_text, doc_definitions)
+        rendered[doc_name] = inject_diagrams(doc_text, diagrams_map)
 
-        # Inject Mermaid diagrams
-        doc_text = inject_diagrams(doc_text, diagrams_map)
-
-        # Write patched document
-        doc_path.write_text(doc_text, encoding="utf-8")
+    target_docs_dir.mkdir(parents=True, exist_ok=True)
+    for doc_name, doc_text in rendered.items():
+        (target_docs_dir / doc_name).write_text(doc_text, encoding="utf-8")
         stdout.write(f"Updated {docs_dir}/{doc_name}\n")
 
     # Run mandatory validation gates
