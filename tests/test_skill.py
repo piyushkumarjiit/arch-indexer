@@ -137,3 +137,10 @@ def test_skill_commands_exist_in_cli_parser() -> None:
         "module-summary",
         "flow-trace",
     }.issubset(parsed_query_actions)
+
+    # Negative controls for the documented templates: the same extraction pipeline must
+    # reject a misspelled option and a missing required option.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["assemble", "placeholder", "--draft-dir", "docs/.drafts"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["toolchain", "ensure"])
