@@ -47,8 +47,9 @@ arch-indexer/
 │   ├── viewer_assets/
 │   │   └── template.html            # Self-contained offline HTML/CSS/JS viewer template
 │   ├── query.py                     # Fast local query commands over index.db
-│   ├── citations.py                 # Citation parser, verifier, drift repair, impact mapper
-│   ├── mermaid_check.py             # Lightweight static Mermaid syntax checker
+│   ├── checks/
+│   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
+│   │   └── mermaid.py               # Lightweight static Mermaid syntax checker
 │   ├── planner.py                   # Bounded worker packet generator
 │   └── assembler.py                 # Deterministic section merger & diagram injector
 ├── skills/
@@ -312,7 +313,7 @@ arch-indexer plan <repo> \
 arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs]
 
 # 6. Validation gates (standalone or run automatically by assemble)
-arch-indexer check-citations <repo> [--docs-dir docs] [--format json|text]
+arch-indexer check-citations <repo> [--docs-dir docs] [--file <path>] [--format json|text]
 arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 ```
 
@@ -364,7 +365,7 @@ Every footnote reference uses a strict machine-parseable format:
    - Verify `file_path` exists in `<repo>`.
    - Verify `1 <= line <= total_lines`.
    - Verify `symbol` matches either (a) a symbol in `index.db` spanning or starting at `line` (or `start_line == line`), or (b) the literal token `symbol` appears on `line` of `file_path` (for infra/config lines).
-3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`) and exit **`3`** on any failure.
+3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
