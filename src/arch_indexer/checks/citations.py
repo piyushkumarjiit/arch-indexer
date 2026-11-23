@@ -35,7 +35,7 @@ STRICT_CITATION_RE = re.compile(
 )
 FOOTNOTE_REF_RE = re.compile(r"\[\^(?P<id>[^\]]+)\]")
 
-# Stable section markers per spec 8.1 and assembly contract
+# Stable section markers used by the canonical documents and the assembly contract (spec 9.2)
 SECTION_START_RE = re.compile(
     r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):START(?::(?P<flag>[^>\s]+)|\s+(?P<attrs>[^>]+))?\s*-->",
     re.IGNORECASE,
