@@ -205,20 +205,14 @@ def run_index(
 
     write_json(cache_paths.index_delta_json, delta.to_payload(cache_paths.repo_id))
     write_json(cache_paths.impacted_sections_json, report.to_payload(delta, docs_dir=docs_dir))
-    write_json(
-        cache_paths.state_json,
-        current.to_state_payload(
-            repo_id=cache_paths.repo_id,
-            module_sections=report.module_sections,
-            diagram_hashes=report.diagram_hashes,
-        ),
-    )
 
     print(delta.format_summary())
     if report.sections:
         print(f"Impacted sections: {len(report.sections)}")
 
-    # Spec 5.4: a move-only delta is repaired with zero tokens when asked to.
+    # Spec 5.4: a move-only delta is repaired with zero tokens when asked to. state.json is
+    # only advanced after the relocation passes check-citations, so a failure (exit 3) keeps
+    # the previous snapshot and the next run still sees the moves.
     if auto_relocate_citations and not delta.is_first_run and delta.is_move_only():
         relocated = relocate_citations(target_repo, moved_symbol_moves(delta), docs_dir=docs_dir)
         errors, _notes = check_citations(repo=target_repo, docs_dir=docs_dir, cache_dir=cache_dir)
@@ -249,6 +243,15 @@ def run_index(
             f"{', '.join(relocated) if relocated else 'none'}"
         )
         return EXIT_OK
+
+    write_json(
+        cache_paths.state_json,
+        current.to_state_payload(
+            repo_id=cache_paths.repo_id,
+            module_sections=report.module_sections,
+            diagram_hashes=report.diagram_hashes,
+        ),
+    )
 
     # Spec 5.2/7.2: first run (or --force-full) and any real delta exit DELTA_DETECTED.
     # Impacted sections alone (e.g. a changed AUTO-DIAGRAM block) also need workers.

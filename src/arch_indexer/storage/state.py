@@ -281,15 +281,25 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
     return delta
 
 
-def moved_symbol_moves(delta: Delta) -> dict[tuple[str, str], int]:
-    """Map (file_path, symbol name/fqname) to the new line for every moved symbol."""
-    moves: dict[tuple[str, str], int] = {}
+def moved_symbol_moves(
+    delta: Delta,
+) -> dict[tuple[str, int], tuple[tuple[int, str, str], ...]]:
+    """Map (file_path, previous_line) to every (new_line, name, fqname) moved from there.
+
+    Keying by the previously recorded start line (rather than by symbol name) keeps a
+    line shift attributable to the exact symbol the footnote cited; the citation checker
+    later disambiguates by name when several symbols shared that line.
+    """
+    grouped: dict[tuple[str, int], list[tuple[int, str, str]]] = {}
     for symbol in delta.moved_symbols:
-        file_path = symbol["file_path"]
-        new_line = int(symbol["to_line"])
-        moves[(file_path, symbol["fqname"])] = new_line
-        moves.setdefault((file_path, symbol["name"]), new_line)
-    return moves
+        key = (symbol["file_path"], int(symbol["from_line"]))
+        grouped.setdefault(key, []).append(
+            (int(symbol["to_line"]), symbol["name"], symbol["fqname"])
+        )
+    return {
+        key: tuple(sorted(value, key=lambda entry: (entry[1], entry[2], entry[0])))
+        for key, value in grouped.items()
+    }
 
 
 def build_module_section_map(
@@ -465,8 +475,11 @@ def compute_impacted_sections(
             reasons.add(IMPACT_MODULE_ADDED)
             impacted_modules |= matched_modules
         previous_section_hashes = (previous_hashes.get(section.doc) or {}).get(section.section_id)
-        if previous_section_hashes != dict(section.diagram_hashes) and (
-            previous_section_hashes is not None or section.diagram_hashes
+        # Only compare against hashes state.json recorded at the previous index run. A
+        # section with no recorded hash (e.g. just written by the docs assembler) is not
+        # a change, otherwise every injected diagram would trigger a spurious worker run.
+        if previous_section_hashes is not None and previous_section_hashes != dict(
+            section.diagram_hashes
         ):
             reasons.add(IMPACT_DIAGRAM_CHANGED)
         if reasons:

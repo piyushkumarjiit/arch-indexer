@@ -103,7 +103,7 @@ def _strip_fenced_blocks_and_comments(text: str) -> str:
     return "\n".join(cleaned)
 
 
-def _symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
+def symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
     """Return True if symbol is exactly the name or a qualified-name suffix."""
     if name is not None and name == symbol:
         return True
@@ -141,7 +141,7 @@ def _find_symbol_in_index(
     """Check if symbol starts at or spans line in index.db symbols table."""
     rows = _fetch_symbol_rows(conn, file_path)
     for start_line, end_line, name, fqname in rows:
-        if not _symbol_matches(name, fqname, symbol):
+        if not symbol_matches(name, fqname, symbol):
             continue
         if start_line == line:
             return True
@@ -162,7 +162,7 @@ def _find_drift_in_index(
     candidates = [
         start_line
         for start_line, _end_line, name, fqname in rows
-        if start_line is not None and start_line != line and _symbol_matches(name, fqname, symbol)
+        if start_line is not None and start_line != line and symbol_matches(name, fqname, symbol)
     ]
     if not candidates:
         return None
@@ -732,26 +732,96 @@ def parse_doc_sections(doc_text: str, doc_rel: str) -> list[DocSection]:
     return sections
 
 
+def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
+    """Blank out fenced code blocks and HTML comments while preserving line structure.
+
+    The returned lines have the same length as the input and every character inside a
+    fence or comment is replaced by a space, so column offsets stay valid for rewriting
+    the original line.
+    """
+    masked: list[str] = []
+    in_fence = False
+    in_comment = False
+    for line in lines:
+        if in_fence:
+            if line.strip().startswith("```"):
+                in_fence = False
+            masked.append("")
+            continue
+        if not in_comment and line.strip().startswith("```"):
+            in_fence = True
+            masked.append("")
+            continue
+        chars = list(line)
+        index = 0
+        while index < len(line):
+            if in_comment:
+                end = line.find("-->", index)
+                if end == -1:
+                    for pos in range(index, len(line)):
+                        chars[pos] = " "
+                    index = len(line)
+                else:
+                    for pos in range(index, end + 3):
+                        chars[pos] = " "
+                    index = end + 3
+                    in_comment = False
+                continue
+            start = line.find("<!--", index)
+            if start == -1:
+                break
+            end = line.find("-->", start + 4)
+            if end == -1:
+                for pos in range(start, len(line)):
+                    chars[pos] = " "
+                in_comment = True
+                index = len(line)
+            else:
+                for pos in range(start, end + 3):
+                    chars[pos] = " "
+                index = end + 3
+        masked.append("".join(chars))
+    return masked
+
+
+def _resolve_move(
+    candidates: Sequence[tuple[int, str, str]],
+    symbol: str,
+) -> int | None:
+    """Return the unique new line for a moved symbol, or None when ambiguous/absent."""
+    matched = [
+        to_line for to_line, name, fqname in candidates if symbol_matches(name, fqname, symbol)
+    ]
+    if len(set(matched)) != 1:
+        return None
+    return matched[0]
+
+
 def relocate_citations_in_text(
-    doc_text: str, moves: Mapping[tuple[str, str], int]
+    doc_text: str, moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]]
 ) -> tuple[str, int]:
     """Rewrite shifted line numbers in footnote definitions of one document.
 
-    `moves` maps (file_path, symbol) to the symbol's new line. Returns the updated text and
-    the number of rewritten footnotes.
+    `moves` maps (file_path, previous_line) to a sequence of (new_line, name, fqname)
+    candidates for the symbols that used to start on that line. A footnote is rewritten
+    only when it cites that exact previous line and its symbol matches one candidate via
+    the same rule the citation checker uses. Returns the updated text and the number of
+    rewritten footnotes. Fenced code blocks and HTML comments are ignored.
     """
     lines = _split_lines(doc_text)
+    masked_lines = _masked_citation_lines(lines)
     rewritten = 0
     updated_lines: list[str] = []
-    for line in lines:
-        def_match = FOOTNOTE_DEF_RE.match(line)
+    for line, masked_line in zip(lines, masked_lines, strict=True):
+        def_match = FOOTNOTE_DEF_RE.match(masked_line)
         if def_match:
             strict_match = STRICT_CITATION_RE.match(def_match.group("body").strip())
             if strict_match:
                 file_path = strict_match.group("file").strip()
                 cited_line = int(strict_match.group("line"))
                 symbol = strict_match.group("symbol").strip()
-                new_line = moves.get((file_path, symbol))
+                candidates = moves.get((file_path, cited_line), ())
+                new_line = _resolve_move(candidates, symbol)
                 if new_line is not None and new_line != cited_line:
                     prefix = line[: def_match.start("body")]
                     line = f"{prefix}`{file_path}:{new_line}` \u2014 `{symbol}`"
@@ -765,7 +835,7 @@ def relocate_citations_in_text(
 
 def relocate_citations(
     repo: str | Path,
-    moves: Mapping[tuple[str, str], int],
+    moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]],
     docs_dir: str = DEFAULT_DOCS_DIR,
     doc_names: Sequence[str] = CANONICAL_DOCS,
 ) -> list[str]:

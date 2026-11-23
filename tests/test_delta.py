@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from arch_indexer.checks.citations import parse_doc_sections
+from arch_indexer.checks.citations import parse_doc_sections, relocate_citations_in_text
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_OK, EXIT_VALIDATION_FAILED, main
 
 APP_SOURCE = """def start():
@@ -318,9 +318,8 @@ def test_force_full_reports_first_run_again(tmp_path: Path, capsys):
 def test_changed_auto_diagram_block_impacts_its_section(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"
-    assert _index(repo, cache) == EXIT_DELTA_DETECTED
-    capsys.readouterr()
 
+    # A diagram that appears for the first time is recorded, not reported as a change.
     design_path = repo / "docs" / "DESIGN.md"
     design_path.write_text(
         DESIGN_DOC.replace(
@@ -332,9 +331,18 @@ def test_changed_auto_diagram_block_impacts_its_section(tmp_path: Path, capsys):
         ),
         encoding="utf-8",
     )
+    _commit(repo, "add diagram block")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert _load(cache, "state.json")["diagram_hashes"]["docs/DESIGN.md"]["1-architecture-overview"]
+
+    # Editing a recorded diagram body still needs workers to re-render that section.
+    design_path.write_text(
+        design_path.read_text(encoding="utf-8").replace("app --> util", "app --> util --> db"),
+        encoding="utf-8",
+    )
     _commit(repo, "edit diagram block")
 
-    # A doc-only change still needs workers to re-render the impacted section.
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
     report = _impacted(cache)
@@ -475,3 +483,171 @@ def test_unchanged_repository_always_exits_ok(tmp_path: Path, capsys, extra_args
         "moved_symbols": 0,
         "deleted_symbols": 0,
     }
+
+
+TWO_RUN_SOURCE = """class A:
+    def run(self):
+        return 1
+
+
+class B:
+    def run(self):
+        return 2
+"""
+
+TWO_RUN_DOC = """# Technical Design
+
+<!-- SECTION:1-architecture-overview:START -->
+## 1. Architecture Overview
+
+A runs first[^1] and B runs second[^2].
+<!-- SECTION:1-architecture-overview:END -->
+
+## References
+
+[^1]: `src/app.py:2` — `run`
+[^2]: `src/app.py:7` — `B.run`
+"""
+
+
+def _init_git_repo(repo: Path) -> None:
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "delta-tests@example.com")
+    _git(repo, "config", "user.name", "Delta Tests")
+    _commit(repo, "initial")
+
+
+def test_failed_relocation_keeps_previous_state_and_retries_moves(tmp_path: Path, capsys):
+    """Exit 3 must leave state.json untouched so the moves come back on the next run."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    # A citation that no relocation rule can repair keeps check-citations red.
+    design = DESIGN_DOC.replace(
+        "The service starts through `start`[^1].",
+        "The service starts through `start`[^1] and `ghost`[^3].",
+    ).replace(
+        "[^2]: `src/util.py:1` — `helper`",
+        "[^2]: `src/util.py:1` — `helper`\n[^3]: `src/app.py:5` — `ghost`",
+    )
+    (repo / "docs" / "DESIGN.md").write_text(design, encoding="utf-8")
+    _commit(repo, "cite a symbol that does not exist")
+    assert _index(repo, cache) == EXIT_OK
+    capsys.readouterr()
+    state_before = (_repo_cache(cache) / "state.json").read_text(encoding="utf-8")
+
+    (repo / "src" / "app.py").write_text("# leading comment\n\n" + APP_SOURCE, encoding="utf-8")
+    _commit(repo, "shift symbols")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_VALIDATION_FAILED
+    assert (_repo_cache(cache) / "state.json").read_text(encoding="utf-8") == state_before
+
+    # Because state did not advance, the shifted citations are still reported as a delta.
+    delta = _load(cache, "index-delta.json")
+    assert {symbol["name"] for symbol in delta["moved_symbols"]} == {"start", "stop"}
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    delta = _load(cache, "index-delta.json")
+    assert {symbol["name"] for symbol in delta["moved_symbols"]} == {"start", "stop"}
+
+
+def test_relocation_matches_cited_line_not_symbol_name(tmp_path: Path, capsys):
+    """A same-named symbol elsewhere must not capture another symbol's footnote."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "docs").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text(TWO_RUN_SOURCE, encoding="utf-8")
+    (repo / "docs" / "DESIGN.md").write_text(TWO_RUN_DOC, encoding="utf-8")
+    _init_git_repo(repo)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    # Insert a line between A.run and B: only B's symbols move.
+    (repo / "src" / "app.py").write_text(
+        TWO_RUN_SOURCE.replace("return 1\n", "return 1\n\n# gap\n"), encoding="utf-8"
+    )
+    _commit(repo, "shift only B")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+
+    delta = _load(cache, "index-delta.json")
+    moves = {
+        (symbol["fqname"], symbol["from_line"], symbol["to_line"])
+        for symbol in delta["moved_symbols"]
+    }
+    assert moves == {("app.B", 6, 8), ("app.B.run", 7, 9)}
+
+    design = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    # The footnote that cited A.run on line 2 must not be rewritten to B.run.
+    assert "[^1]: `src/app.py:2` — `run`" in design
+    # The qualified-suffix citation of the moved symbol is relocated.
+    assert "[^2]: `src/app.py:9` — `B.run`" in design
+
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
+def test_assembler_injected_diagram_does_not_trigger_diagram_changed(tmp_path: Path, capsys):
+    """A section with no recorded diagram hash is not a change (no needless worker cycle)."""
+    repo = _make_repo(tmp_path)
+    (repo / "docs" / "DESIGN.md").unlink()
+    (repo / "docs" / "USER_GUIDE.md").unlink()
+    _commit(repo, "drop docs")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert _load(cache, "state.json")["diagram_hashes"] == {}
+
+    (repo / "docs" / "DESIGN.md").write_text(
+        "# Technical Design\n\n"
+        "<!-- SECTION:1-architecture-overview:START -->\n"
+        "## 1. Architecture Overview\n\n"
+        "The service starts through `start`[^1].\n\n"
+        "<!-- AUTO-DIAGRAM:module-overview:START -->\n"
+        "```mermaid\nflowchart LR\n  app --> util\n```\n"
+        "<!-- AUTO-DIAGRAM:module-overview:END -->\n"
+        "<!-- SECTION:1-architecture-overview:END -->\n\n"
+        "## References\n\n[^1]: `src/app.py:1` — `start`\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "USER_GUIDE.md").write_text(USER_GUIDE_DOC, encoding="utf-8")
+    _commit(repo, "assemble docs")
+    capsys.readouterr()
+
+    assert _index(repo, cache) == EXIT_OK
+    assert _impacted(cache)["sections"] == []
+    state = _load(cache, "state.json")
+    assert set(state["diagram_hashes"]["docs/DESIGN.md"]["1-architecture-overview"]) == {
+        "module-overview"
+    }
+
+    # Editing the recorded diagram body is still detected on the following run.
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        design_path.read_text(encoding="utf-8").replace("app --> util", "app --> util --> db"),
+        encoding="utf-8",
+    )
+    _commit(repo, "edit diagram")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["1-architecture-overview"] == ["diagram_changed"]
+
+
+def test_relocation_ignores_fenced_and_commented_footnotes():
+    """Footnote-shaped examples in fences or HTML comments must not be rewritten."""
+    text = (
+        "# Design\n\n"
+        "```\n"
+        "[^9]: `src/app.py:1` — `start`\n"
+        "```\n\n"
+        "<!--\n[^8]: `src/app.py:1` — `start`\n-->\n\n"
+        "[^1]: `src/app.py:1` — `start`\n"
+    )
+    moves = {("src/app.py", 1): ((3, "start", "app.start"),)}
+    updated, rewritten = relocate_citations_in_text(text, moves)
+    assert rewritten == 1
+    assert "[^9]: `src/app.py:1` — `start`" in updated
+    assert "[^8]: `src/app.py:1` — `start`" in updated
+    assert "[^1]: `src/app.py:3` — `start`" in updated
