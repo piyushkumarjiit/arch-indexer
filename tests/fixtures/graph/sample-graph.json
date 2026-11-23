@@ -1,0 +1,278 @@
+{
+  "schema_version": "1.0",
+  "repo_name": "sample-store-service",
+  "generated_at_commit": "a1b2c3d4e5f6789012345678901234567890abcd",
+  "tier_summary": {
+    "scip_files": 5,
+    "treesitter_files": 1
+  },
+  "modules": [
+    {
+      "id": "mod:auth",
+      "name": "auth",
+      "language": "python",
+      "path": "src/auth",
+      "file_count": 2,
+      "tier": "scip"
+    },
+    {
+      "id": "mod:orders",
+      "name": "orders",
+      "language": "python",
+      "path": "src/orders",
+      "file_count": 3,
+      "tier": "scip"
+    },
+    {
+      "id": "mod:billing",
+      "name": "billing",
+      "language": "python",
+      "path": "src/billing",
+      "file_count": 1,
+      "tier": "scip"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "fe:checkout_page",
+      "kind": "frontend_caller",
+      "label": "Checkout Page (Web)",
+      "module_id": "mod:frontend",
+      "file": "frontend/src/Checkout.tsx",
+      "line": 55,
+      "symbol": "submitOrder",
+      "tier": "treesitter",
+      "metadata": {
+        "framework": "react",
+        "route": "/checkout"
+      }
+    },
+    {
+      "id": "ep:POST:/api/auth/login",
+      "kind": "entrypoint",
+      "label": "POST /api/auth/login",
+      "module_id": "mod:auth",
+      "file": "src/auth/routes.py",
+      "line": 20,
+      "symbol": "login_handler",
+      "tier": "scip",
+      "metadata": {
+        "method": "POST",
+        "route": "/api/auth/login",
+        "auth": []
+      }
+    },
+    {
+      "id": "sym:AuthService.login",
+      "kind": "service",
+      "label": "AuthService.login",
+      "module_id": "mod:auth",
+      "file": "src/auth/service.py",
+      "line": 15,
+      "symbol": "AuthService.login",
+      "tier": "scip",
+      "metadata": {}
+    },
+    {
+      "id": "sym:AuthService.verify_token",
+      "kind": "service",
+      "label": "AuthService.verify_token",
+      "module_id": "mod:auth",
+      "file": "src/auth/service.py",
+      "line": 40,
+      "symbol": "AuthService.verify_token",
+      "tier": "scip",
+      "metadata": {}
+    },
+    {
+      "id": "ep:POST:/api/orders",
+      "kind": "entrypoint",
+      "label": "POST /api/orders",
+      "module_id": "mod:orders",
+      "file": "src/orders/routes.py",
+      "line": 42,
+      "symbol": "create_order",
+      "tier": "scip",
+      "metadata": {
+        "method": "POST",
+        "route": "/api/orders",
+        "auth": [
+          "jwt_required",
+          "require_role(admin)"
+        ]
+      }
+    },
+    {
+      "id": "ep:GET:/api/orders/:id",
+      "kind": "entrypoint",
+      "label": "GET /api/orders/:id",
+      "module_id": "mod:orders",
+      "file": "src/orders/routes.py",
+      "line": 85,
+      "symbol": "get_order",
+      "tier": "scip",
+      "metadata": {
+        "method": "GET",
+        "route": "/api/orders/:id",
+        "auth": [
+          "jwt_required"
+        ]
+      }
+    },
+    {
+      "id": "sym:OrderService.create",
+      "kind": "service",
+      "label": "OrderService.create",
+      "module_id": "mod:orders",
+      "file": "src/orders/services/order_service.py",
+      "line": 25,
+      "symbol": "OrderService.create",
+      "tier": "scip",
+      "metadata": {}
+    },
+    {
+      "id": "sym:OrderService.get",
+      "kind": "service",
+      "label": "OrderService.get",
+      "module_id": "mod:orders",
+      "file": "src/orders/services/order_service.py",
+      "line": 60,
+      "symbol": "OrderService.get",
+      "tier": "scip",
+      "metadata": {}
+    },
+    {
+      "id": "sym:OrderRepository.save",
+      "kind": "service",
+      "label": "OrderRepository.save",
+      "module_id": "mod:orders",
+      "file": "src/orders/models.py",
+      "line": 20,
+      "symbol": "OrderRepository.save",
+      "tier": "scip",
+      "metadata": {}
+    },
+    {
+      "id": "sym:PaymentClient.charge",
+      "kind": "service",
+      "label": "PaymentClient.charge",
+      "module_id": "mod:billing",
+      "file": "src/billing/client.py",
+      "line": 28,
+      "symbol": "PaymentClient.charge",
+      "tier": "scip",
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "fe:checkout_page",
+      "target": "ep:POST:/api/orders",
+      "kind": "http_request",
+      "file": "frontend/src/Checkout.tsx",
+      "line": 55,
+      "tier": "treesitter"
+    },
+    {
+      "source": "ep:POST:/api/auth/login",
+      "target": "sym:AuthService.login",
+      "kind": "calls",
+      "file": "src/auth/routes.py",
+      "line": 25,
+      "tier": "scip"
+    },
+    {
+      "source": "ep:POST:/api/orders",
+      "target": "sym:AuthService.verify_token",
+      "kind": "calls",
+      "file": "src/orders/routes.py",
+      "line": 44,
+      "tier": "scip"
+    },
+    {
+      "source": "ep:POST:/api/orders",
+      "target": "sym:OrderService.create",
+      "kind": "calls",
+      "file": "src/orders/routes.py",
+      "line": 49,
+      "tier": "scip"
+    },
+    {
+      "source": "sym:OrderService.create",
+      "target": "sym:PaymentClient.charge",
+      "kind": "calls",
+      "file": "src/orders/services/order_service.py",
+      "line": 32,
+      "tier": "scip"
+    },
+    {
+      "source": "sym:PaymentClient.charge",
+      "target": "ext:stripe",
+      "kind": "http_api",
+      "file": "src/billing/client.py",
+      "line": 35,
+      "tier": "scip"
+    },
+    {
+      "source": "sym:OrderService.create",
+      "target": "sym:OrderRepository.save",
+      "kind": "calls",
+      "file": "src/orders/services/order_service.py",
+      "line": 38,
+      "tier": "scip"
+    },
+    {
+      "source": "sym:OrderRepository.save",
+      "target": "ds:postgres:orders",
+      "kind": "writes",
+      "file": "src/orders/models.py",
+      "line": 25,
+      "tier": "scip"
+    },
+    {
+      "source": "ep:GET:/api/orders/:id",
+      "target": "sym:AuthService.verify_token",
+      "kind": "calls",
+      "file": "src/orders/routes.py",
+      "line": 88,
+      "tier": "scip"
+    },
+    {
+      "source": "ep:GET:/api/orders/:id",
+      "target": "sym:OrderService.get",
+      "kind": "calls",
+      "file": "src/orders/routes.py",
+      "line": 92,
+      "tier": "scip"
+    },
+    {
+      "source": "sym:OrderService.get",
+      "target": "ds:postgres:orders",
+      "kind": "reads",
+      "file": "src/orders/services/order_service.py",
+      "line": 65,
+      "tier": "scip"
+    }
+  ],
+  "data_stores": [
+    {
+      "id": "ds:postgres:orders",
+      "kind": "sql",
+      "label": "orders (PostgreSQL)",
+      "evidence": [
+        "src/orders/models.py:15"
+      ]
+    }
+  ],
+  "external_sinks": [
+    {
+      "id": "ext:stripe",
+      "kind": "http_api",
+      "label": "Stripe API",
+      "evidence": [
+        "src/billing/client.py:28"
+      ]
+    }
+  ],
+  "unresolved_refs_count": 0
+}
