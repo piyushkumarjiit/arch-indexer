@@ -29,6 +29,14 @@ arch-indexer toolchain ensure --repo /path/to/repo   # the only command that use
 # Index a repository (Tier 2 tree-sitter)
 arch-indexer index /path/to/repo
 
+# Read-only queries over the local index (offline, deterministic)
+arch-indexer query /path/to/repo def <symbol> [--json]
+arch-indexer query /path/to/repo refs <symbol> [--limit 100] [--json]
+arch-indexer query /path/to/repo file-symbols <rel-path> [--json]
+arch-indexer query /path/to/repo entrypoints [--module <mod>] [--json]
+arch-indexer query /path/to/repo module-summary <mod> [--json]
+arch-indexer query /path/to/repo flow-trace <entrypoint-id> [--depth 6] [--json]
+
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
 arch-indexer check-citations /path/to/repo [--docs-dir docs] [--file <path>] [--format text|json]
 arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
@@ -73,7 +81,18 @@ Path("docs/flow-viewer.html").write_text(render_viewer(graph), encoding="utf-8")
 
 The renderer embeds `graph` into the page and also exposes a "Load `graph.json`" file picker, so the same HTML can open any standalone graph without a web server. See [section 6.3 of the spec](docs/SPEC.md) for the full viewer contract.
 
-The `query` and `plan` commands are not implemented yet: they print an error and exit `1`.
+### Querying
+
+`query` opens `<cache>/repos/<id>/index.db` read-only and prints deterministic, line-oriented rows with `path:line`; add `--json` for structured output. The cache location follows the same rules as `index`, so pass the same `--cache-dir` when one was used. Every command exits `1` with a clear message when the index is missing or the symbol, file, module or entrypoint is unknown.
+
+- `def <symbol>` resolves an exact fqname, then an exact name, then a dotted suffix.
+- `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`).
+- `file-symbols <rel-path>` lists the symbols defined in one indexed file.
+- `entrypoints [--module <mod>]` lists HTTP routes, CLI commands, workers and frontend API callers with their numeric `id`.
+- `module-summary <mod>` prints a module's file, symbol and entrypoint counts followed by its symbols and entrypoints.
+- `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing each step as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`.
+
+The `plan` command is not implemented yet: it prints an error and exits `1`.
 
 ## Firstmate Integration
 
@@ -81,4 +100,4 @@ For multi-worker automated execution, see the Firstmate skill definition at [`sk
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), the assembly slice (`assemble`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), the assembly slice (`assemble`), the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) and the read-only index queries (`query`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.
