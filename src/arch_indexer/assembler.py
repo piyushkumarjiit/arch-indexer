@@ -34,6 +34,7 @@ SLICE_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
+AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
 
 
 class DraftFormatError(ValueError):
@@ -209,6 +210,8 @@ def parse_draft_file(path: Path) -> DraftPacket:
             raise DraftFormatError("draft body has text outside its SECTION markers")
     if SLICE_MARKER_RE.search(rewritten_body):
         raise DraftFormatError("draft body must not contain SLICE markers")
+    if AUTO_DIAGRAM_MARKER_RE.search(rewritten_body):
+        raise DraftFormatError("draft body must not contain AUTO-DIAGRAM markers")
     undeclared_sections = [sec_id for sec_id in sections if sec_id not in section_ids]
     if undeclared_sections:
         raise DraftFormatError(

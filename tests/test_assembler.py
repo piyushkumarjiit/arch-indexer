@@ -979,6 +979,43 @@ def test_assemble_deletes_only_consumed_draft_files(tmp_path):
     assert drafts.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("section_id", "slot_id", "citation"),
+    [
+        ("design-sec1", "module-overview", "`src/app.py:1` — `alpha`"),
+        ("design-sec3", "flow-overview", "`src/app.py:4` — `beta`"),
+    ],
+)
+def test_assemble_rejects_drafts_that_author_diagram_slots(tmp_path, section_id, slot_id, citation):
+    """A draft may not ship its own AUTO-DIAGRAM slot, which would duplicate the document's."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "slot.md",
+        "slot",
+        [section_id],
+        f"Prose beside a slot[^1].\n\n"
+        f"<!-- AUTO-DIAGRAM:{slot_id}:START -->\n"
+        f"<!-- AUTO-DIAGRAM:{slot_id}:END -->\n\n"
+        f"[^1]: {citation}\n",
+    )
+    diagrams_file = tmp_path / "diagrams.json"
+    diagrams_file.write_text(json.dumps({slot_id: "flowchart TD\n  A --> B"}), encoding="utf-8")
+
+    err = io.StringIO()
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        diagrams=diagrams_file,
+        out=io.StringIO(),
+        err=err,
+    )
+    assert code == 3
+    assert "AUTO-DIAGRAM" in err.getvalue()
+    assert (drafts / "slot.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
 def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):
     """Prose drafts must not delete the AUTO-DIAGRAM slots owned by the document."""
     repo = tmp_path / "repo"
