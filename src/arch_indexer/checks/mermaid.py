@@ -34,74 +34,6 @@ DIAGRAM_HEADER_PATTERNS: dict[str, re.Pattern[str]] = {
     "stateDiagram-v2": re.compile(r"^stateDiagram-v2\s*;?\s*$"),
 }
 
-# Node ID character validation (alphanumeric, underscore, hyphen)
-VALID_NODE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
-
-# Regex to detect malformed arrows in flowchart / graph diagrams
-MALFORMED_FLOWCHART_ARROW_RES: tuple[re.Pattern[str], ...] = (
-    # Single-dash arrow like "A -> B" or "A ->|text| B"
-    re.compile(r"(?<![-.\w])->(?!>)"),
-    # Single-equal arrow like "A => B"
-    re.compile(r"(?<![=\w])=>(?!=)"),
-    # Malformed dotted arrow like "A -.> B"
-    re.compile(r"(?<![-.\w])-\.>(?!>)"),
-    # Sequence diagram arrows mistakenly used in flowchart
-    re.compile(r"(?<![-.\w])->>(?!>)"),
-    re.compile(r"(?<![-.\w])-->>(?!>)"),
-)
-
-# Regex to detect invalid arrows in sequenceDiagram
-INVALID_SEQUENCE_ARROW_RES: tuple[re.Pattern[str], ...] = (
-    # Flowchart thick arrows
-    re.compile(r"(?<![=\w])==>(?!=)"),
-    re.compile(r"(?<![=\w])===(?!=)"),
-    # Flowchart dotted arrow
-    re.compile(r"(?<![-.\w])-\.->(?!>)"),
-)
-
-# Regex to detect invalid arrows in classDiagram
-INVALID_CLASS_ARROW_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?<![-.\w])-\.->(?!>)"),
-    re.compile(r"(?<![=\w])==>(?!=)"),
-)
-
-# Regex to detect invalid arrows in erDiagram
-INVALID_ER_ARROW_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?<![-.\w])-->(?!>)"),
-    re.compile(r"(?<![-.\w])->(?!>)"),
-    re.compile(r"(?<![=\w])==>(?!=)"),
-)
-
-# Regex to detect invalid arrows in stateDiagram-v2
-INVALID_STATE_ARROW_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?<![-.\w])->(?!>)"),
-    re.compile(r"(?<![=\w])==>(?!=)"),
-    re.compile(r"(?<![-.\w])-\.->(?!>)"),
-)
-
-# Regex to split flowchart lines by valid edge arrows (including text labels)
-# Allows hyphens and other label characters in '-- text -->' and other labeled arrows
-FLOWCHART_ARROW_SPLIT_RE = re.compile(
-    r"\s*(?:"
-    r"--\s+[^\n]+?\s+-->|"
-    r"--\s+[^\n]+?\s+---|"
-    r"-\.\s+[^\n]+?\s+\.->|"
-    r"-\.\s+[^\n]+?\s+\.-|"
-    r"==\s+[^\n]+?\s+==>|"
-    r"==\s+[^\n]+?\s+===|"
-    r"(?:-->|---|-.->|-.-|==>|===|<-->|<-.->|<==>|--o|--x|o--o|x--x)(?:\|[^|\n]+\|)?"
-    r")\s*"
-)
-
-
-# Closing token of a labeled flowchart edge: label text sits between an opening
-# token ('--', '==', '-.') and one of these closing tokens.
-FLOWCHART_EDGE_LABEL_CLOSE_RE = re.compile(r"\s+(-->|---|==>|===|\.->|\.-)")
-
-# A sequenceDiagram message statement carries an arrow before its ':' payload
-SEQUENCE_MESSAGE_ARROW_RE = re.compile(r"-{1,2}(?:>>?|x|\))")
-SEQUENCE_NOTE_RE = re.compile(r"^\s*note\b", re.IGNORECASE)
-
 
 @dataclass(frozen=True)
 class MermaidError:
@@ -149,301 +81,788 @@ def verify_auto_diagram(
     return True, None
 
 
-def _strip_comments_and_quotes(line: str) -> tuple[str, bool]:
-    """Strip %% comments outside quotes and replace quoted strings with placeholder.
+# ---------------------------------------------------------------------------
+# Tokenizer-based validation
+#
+# Each diagram family is checked by a small tokenizer that first recognises
+# label-bearing constructs (quoted strings, node shapes, pipe and inline edge
+# labels, sequence message text, member and note text) and consumes their text
+# as opaque payload. Structural rules (delimiter balance, node id characters,
+# arrow validity) are then applied to the remaining tokens only, so label text
+# is never inspected for delimiters or arrows.
+# ---------------------------------------------------------------------------
 
-    Returns (processed_line, has_unterminated_quote).
+# Node ID characters (letters, digits, underscore, hyphen)
+VALID_NODE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+# A line-level finding: (code, message)
+_Issue = tuple[str, str]
+
+_OPEN_BRACKETS = "[({"
+_CLOSE_BRACKETS = "])}"
+_ALL_BRACKETS = _OPEN_BRACKETS + _CLOSE_BRACKETS
+_ARROW_CHARS = "-=.<>"
+
+
+def _scan_string(line: str, start: int) -> int | None:
+    """Return the index just past the string starting at line[start] == '"'.
+
+    Mermaid has no backslash escapes inside strings (it uses '#quot;'), so the
+    string ends at the next double quote. Returns None when unterminated.
     """
-    res: list[str] = []
+    end = line.find('"', start + 1)
+    return None if end < 0 else end + 1
+
+
+def _strip_comment(line: str) -> str:
+    """Remove a '%%' comment that starts outside a quoted string."""
     in_quote = False
-    escape = False
-    i = 0
+    for i, ch in enumerate(line):
+        if ch == '"':
+            in_quote = not in_quote
+        elif not in_quote and line.startswith("%%", i):
+            return line[:i]
+    return line
+
+
+def _has_unterminated_quote(text: str) -> bool:
+    return text.count('"') % 2 == 1
+
+
+def _first_word(text: str) -> str:
+    m = re.match(r"[A-Za-z][A-Za-z0-9_\-]*", text)
+    return m.group(0) if m else ""
+
+
+def _invalid_id_issue(kind: str, ident: str) -> _Issue:
+    return (
+        CODE_INVALID_NODE_ID,
+        f"Invalid {kind} '{ident}': must contain only letters, numbers, underscores, and hyphens",
+    )
+
+
+def _unrecognised_issue(family: str, statement: str) -> _Issue:
+    """Classify a statement that matches no grammar rule of its diagram family."""
+    if any(ch in statement for ch in _ARROW_CHARS):
+        return (CODE_INVALID_ARROW, f"Invalid arrow in {family}: '{statement}'")
+    return (CODE_INVALID_NODE_ID, f"Unrecognised {family} statement: '{statement}'")
+
+
+# --- Flowchart / graph ----------------------------------------------------
+
+# Node shapes, longest opener first. Each opener maps to its accepted closers.
+_FLOW_SHAPES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("(((", (")))",)),
+    ("((", ("))",)),
+    ("([", ("])",)),
+    ("[[", ("]]",)),
+    ("[(", (")]",)),
+    ("[/", ("/]", "\\]")),
+    ("[\\", ("\\]", "/]")),
+    ("{{", ("}}",)),
+    ("@{", ("}",)),
+    ("(", (")",)),
+    ("[", ("]",)),
+    ("{", ("}",)),
+)
+
+# Complete flowchart links (no inline text): normal, thick, dotted, invisible,
+# with optional '<' for bidirectional links and any length variant.
+_FLOW_LINK_RE = re.compile(r"<?(?:-{2,}[->xo]|={2,}[=>xo]|-\.+-[>xo]?|~{3,})")
+# Optional 'o'/'x' head at the start of a bidirectional link: 'o--o', 'x--x'.
+_FLOW_LINK_HEAD_RE = re.compile(r"[ox](?=--|==|-\.)")
+# Openers of inline-text links: '-- text -->', '== text ==>', '-. text .->'.
+_FLOW_INLINE_OPEN_RE = re.compile(r"<?(--|==|-\.)(?=\s)")
+# Closer accepted for each inline-text opener.
+_FLOW_INLINE_CLOSE_RES: dict[str, re.Pattern[str]] = {
+    "--": re.compile(r"-{2,}[->xo]"),
+    "==": re.compile(r"={2,}[=>xo]"),
+    "-.": re.compile(r"\.+-[>xo]?"),
+}
+_FLOW_CLASS_RE = re.compile(r":::[A-Za-z0-9_\-]+")
+_FLOW_SKIP_KEYWORDS = frozenset(
+    {"style", "classDef", "class", "linkStyle", "click", "direction", "accTitle", "accDescr"}
+)
+
+
+def _flow_word_end(line: str, start: int) -> int:
+    """Return the end of a node-id word starting at `start`."""
+    j = start
     n = len(line)
+    while j < n:
+        ch = line[j]
+        if ch.isspace() or ch in _ALL_BRACKETS or ch in '|"&;<>':
+            break
+        nxt = line[j + 1] if j + 1 < n else ""
+        if ch in "-=" and nxt in "-=.>":
+            break
+        if line.startswith(":::", j) or line.startswith("@{", j) or line.startswith("%%", j):
+            break
+        j += 1
+    return j
+
+
+def _flow_scan_shape(line: str, start: int) -> tuple[int, _Issue | None]:
+    """Consume a node shape beginning at `start`; its label text is opaque.
+
+    Unquoted label text ends at the first bracket character: if that is the
+    shape's closer the shape is complete, otherwise the label needs quoting
+    (Mermaid rejects bare brackets inside unquoted labels).
+    """
+    if line[start] == ">":
+        opener, closers = ">", ("]",)
+    else:
+        opener, closers = next((o, c) for o, c in _FLOW_SHAPES if line.startswith(o, start))
+    i = start + len(opener)
+    n = len(line)
+    while i < n and line[i].isspace():
+        i += 1
+    if i < n and line[i] == '"':
+        end = _scan_string(line, i)
+        if end is None:
+            return n, (CODE_UNBALANCED_QUOTES, f"Unterminated string in node label: '{line[i:]}'")
+        i = end
+        while i < n and line[i].isspace():
+            i += 1
+        for closer in closers:
+            if line.startswith(closer, i):
+                return i + len(closer), None
+        return n, (
+            CODE_UNBALANCED_DELIMITERS,
+            f"Unclosed delimiter '{opener}': expected '{closers[0]}' after quoted label",
+        )
+    while i < n:
+        for closer in closers:
+            if line.startswith(closer, i):
+                return i + len(closer), None
+        ch = line[i]
+        if opener == "@{" and ch == '"':
+            end = _scan_string(line, i)
+            if end is None:
+                return n, (CODE_UNBALANCED_QUOTES, f"Unterminated string in shape: '{line[i:]}'")
+            i = end
+            continue
+        if ch in _CLOSE_BRACKETS:
+            return n, (
+                CODE_UNBALANCED_DELIMITERS,
+                f"Mismatched delimiter: '{opener}' closed by '{ch}' (expected '{closers[0]}')",
+            )
+        if ch in _OPEN_BRACKETS:
+            return n, (
+                CODE_UNBALANCED_DELIMITERS,
+                f"Unquoted '{ch}' inside '{opener}' node label; quote the label text",
+            )
+        i += 1
+    return n, (CODE_UNBALANCED_DELIMITERS, f"Unclosed delimiter '{opener}'")
+
+
+def _flow_scan_pipe_label(line: str, start: int) -> tuple[int, _Issue | None]:
+    """Consume an edge label '|...|' starting at line[start] == '|'."""
+    n = len(line)
+    i = start + 1
+    while i < n and line[i].isspace():
+        i += 1
+    if i < n and line[i] == '"':
+        end = _scan_string(line, i)
+        if end is None:
+            return n, (CODE_UNBALANCED_QUOTES, f"Unterminated string in edge label: '{line[i:]}'")
+        i = end
+    close = line.find("|", i)
+    if close < 0:
+        return n, (CODE_UNBALANCED_DELIMITERS, "Unclosed edge label delimiter '|'")
+    return close + 1, None
+
+
+def _flow_subgraph_issues(rest: str) -> list[_Issue]:
+    """Validate the text after 'subgraph': an id, optional [title], or free title."""
+    rest = rest.strip().rstrip(";").strip()
+    if not rest:
+        return []
+    if rest.startswith('"'):
+        if _scan_string(rest, 0) is None:
+            return [(CODE_UNBALANCED_QUOTES, f"Unterminated subgraph title: '{rest}'")]
+        return []
+    bracket = rest.find("[")
+    if bracket >= 0:
+        sg_id = rest[:bracket].strip()
+        issues: list[_Issue] = []
+        if sg_id and not VALID_NODE_ID_RE.match(sg_id):
+            issues.append(_invalid_id_issue("subgraph ID", sg_id))
+        end, issue = _flow_scan_shape(rest, bracket)
+        if issue:
+            issues.append(issue)
+        elif rest[end:].strip():
+            issues.append(
+                (CODE_UNBALANCED_DELIMITERS, f"Unexpected text after subgraph title: '{rest}'")
+            )
+        return issues
+    if " " not in rest and not VALID_NODE_ID_RE.match(rest):
+        return [_invalid_id_issue("subgraph ID", rest)]
+    return []
+
+
+def _tokenize_flowchart_line(line: str) -> tuple[list[str], list[_Issue]]:
+    """Tokenize one flowchart line.
+
+    Returns (block_tokens, issues) where block_tokens lists 'subgraph' and 'end'
+    keywords in order, for subgraph balancing by the caller.
+    """
+    blocks: list[str] = []
+    n = len(line)
+    i = 0
+    prev: str | None = None  # 'node', 'link', 'amp' or None at statement start
+    prev_text = ""
+    gap = False
+    at_statement_start = True
+
+    def end_statement() -> _Issue | None:
+        if prev == "link":
+            return (CODE_INVALID_ARROW, f"Link without a target node: '{line.strip()}'")
+        if prev == "amp":
+            return (CODE_INVALID_NODE_ID, f"Dangling '&' without a node: '{line.strip()}'")
+        return None
 
     while i < n:
         ch = line[i]
-        if ch == "\\" and in_quote:
-            escape = not escape
-            res.append(ch)
+        if ch.isspace():
+            gap = True
             i += 1
             continue
-
-        if ch == '"' and not escape:
-            in_quote = not in_quote
-            res.append('"')
-            i += 1
-            continue
-
-        escape = False
-
-        if not in_quote and ch == "%" and i + 1 < n and line[i + 1] == "%":
+        if line.startswith("%%", i):
             break
+        if ch == ";":
+            issue = end_statement()
+            if issue:
+                return blocks, [issue]
+            prev, gap, at_statement_start = None, False, True
+            i += 1
+            continue
 
-        res.append(" " if in_quote else ch)
-        i += 1
+        if at_statement_start:
+            at_statement_start = False
+            word = _first_word(line[i:])
+            after = line[i + len(word) :]
+            if word == "subgraph" and (not after or after[0].isspace()):
+                blocks.append("subgraph")
+                return blocks, _flow_subgraph_issues(after)
+            if word == "end" and (not after.strip() or after.strip().startswith((";", "%%"))):
+                blocks.append("end")
+                i += len(word)
+                continue
+            if word in _FLOW_SKIP_KEYWORDS and (not after or after[0].isspace()):
+                # Directive: payload runs to the next ';' outside quotes
+                j = i + len(word)
+                while j < n and line[j] != ";":
+                    if line[j] == '"':
+                        end = _scan_string(line, j)
+                        if end is None:
+                            return blocks, [
+                                (CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line.strip()}'")
+                            ]
+                        j = end
+                        continue
+                    j += 1
+                i = j
+                continue
 
-    return "".join(res), in_quote
-
-
-def _split_tokens_outside_brackets(text: str, seps: str = "&;") -> list[str]:
-    """Split text on delimiter characters (e.g. '&' or ';') only when outside brackets."""
-    tokens: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for ch in text:
-        if ch in ("(", "[", "{"):
-            depth += 1
-        elif ch in (")", "]", "}") and depth > 0:
-            depth -= 1
-        if depth == 0 and ch in seps:
-            token = "".join(current).strip()
-            if token:
-                tokens.append(token)
-            current = []
-        else:
-            current.append(ch)
-    token = "".join(current).strip()
-    if token:
-        tokens.append(token)
-    return tokens
-
-
-def _mask_edge_label_text(line: str) -> str:
-    """Blank flowchart edge-label text outside brackets, preserving structure."""
-    out = list(line)
-    depth = 0
-    in_quote = False
-    escape = False
-    idx = 0
-    n = len(line)
-
-    while idx < n:
-        ch = line[idx]
-        if in_quote:
-            if ch == "\\" and not escape:
-                escape = True
-            elif ch == '"' and not escape:
-                in_quote = False
+        # Links
+        head = 0
+        if prev == "node" and gap and _FLOW_LINK_HEAD_RE.match(line, i):
+            head = 1
+        link = _FLOW_LINK_RE.match(line, i + head)
+        inline = None if link else _FLOW_INLINE_OPEN_RE.match(line, i + head)
+        if link or inline:
+            if prev != "node":
+                return blocks, [
+                    (CODE_INVALID_ARROW, f"Link without a source node: '{line.strip()}'")
+                ]
+            link_start = i
+            if link:
+                i = link.end()
             else:
-                escape = False
-            idx += 1
+                assert inline is not None
+                closer = _FLOW_INLINE_CLOSE_RES[inline.group(1)].search(line, inline.end())
+                if closer is None:
+                    return blocks, [
+                        (CODE_INVALID_ARROW, f"Unterminated inline edge label: '{line.strip()}'")
+                    ]
+                i = closer.end()
+            if i < n and line[i] in _ARROW_CHARS:
+                j = i
+                while j < n and line[j] in _ARROW_CHARS:
+                    j += 1
+                return blocks, [
+                    (CODE_INVALID_ARROW, f"Malformed edge arrow '{line[link_start:j]}'")
+                ]
+            j = i
+            while j < n and line[j].isspace():
+                j += 1
+            if j < n and line[j] == "|":
+                i, issue = _flow_scan_pipe_label(line, j)
+                if issue:
+                    return blocks, [issue]
+            prev, gap = "link", False
             continue
 
-        if ch == '"':
-            in_quote = True
-            idx += 1
+        if ch == "&":
+            if prev != "node":
+                return blocks, [(CODE_INVALID_NODE_ID, f"'&' without a node: '{line.strip()}'")]
+            prev, gap = "amp", False
+            i += 1
             continue
-
-        if ch in "([{":
-            depth += 1
-            idx += 1
+        if line.startswith(":::", i):
+            m = _FLOW_CLASS_RE.match(line, i)
+            if prev != "node" or m is None:
+                return blocks, [
+                    (CODE_INVALID_NODE_ID, f"Invalid ':::' class shorthand: '{line.strip()}'")
+                ]
+            i = m.end()
             continue
-
-        if ch in ")]}":
-            if depth > 0:
-                depth -= 1
-            idx += 1
-            continue
-
-        if depth > 0:
-            idx += 1
-            continue
-
         if ch == "|":
-            end = line.find("|", idx + 1)
-            if end != -1:
-                for pos in range(idx + 1, end):
-                    out[pos] = " "
-                idx = end + 1
-                continue
-            idx += 1
-            continue
-
-        if (
-            line.startswith(("--", "==", "-."), idx)
-            and idx + 2 < n
-            and line[idx + 2].isspace()
-        ):
-            close = FLOWCHART_EDGE_LABEL_CLOSE_RE.search(line, idx + 2)
-            if close is not None:
-                for pos in range(idx + 2, close.start()):
-                    out[pos] = " "
-                idx = close.end()
-                continue
-
-        idx += 1
-
-    return "".join(out)
-
-
-def _mask_bracket_contents(line: str) -> str:
-    """Blank out label text inside bracket delimiters, preserving the delimiters."""
-    out = list(line)
-    stack: list[str] = []
-    pairs = {"(": ")", "[": "]", "{": "}"}
-    closers = {")": "(", "]": "[", "}": "{"}
-    in_quote = False
-    escape = False
-
-    for idx, ch in enumerate(line):
-        if in_quote:
-            if ch == "\\" and not escape:
-                escape = True
-            elif ch == '"' and not escape:
-                in_quote = False
-            else:
-                escape = False
-            out[idx] = " "
-            continue
-
+            return blocks, [
+                (CODE_UNBALANCED_DELIMITERS, f"Edge label '|' without a link: '{line.strip()}'")
+            ]
         if ch == '"':
-            in_quote = True
-            out[idx] = " "
-            continue
+            if _scan_string(line, i) is None:
+                return blocks, [(CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line[i:]}'")]
+            return blocks, [
+                (CODE_INVALID_NODE_ID, f"Quoted text outside a node shape: '{line.strip()}'")
+            ]
+        if ch in _CLOSE_BRACKETS:
+            return blocks, [(CODE_UNBALANCED_DELIMITERS, f"Unexpected closing delimiter '{ch}'")]
+        if ch in _OPEN_BRACKETS:
+            _, issue = _flow_scan_shape(line, i)
+            return blocks, [
+                issue or (CODE_INVALID_NODE_ID, f"Node shape without a node id: '{line.strip()}'")
+            ]
+        if ch in _ARROW_CHARS:
+            j = i
+            while j < n and line[j] in _ARROW_CHARS:
+                j += 1
+            return blocks, [(CODE_INVALID_ARROW, f"Malformed edge arrow '{line[i:j]}'")]
 
-        if ch in pairs:
-            stack.append(ch)
-            continue
+        # Node id, optionally followed by a shape
+        j = _flow_word_end(line, i)
+        if j == i:  # pragma: no cover - every character class is handled above
+            j = i + 1
+        word = line[i:j]
+        if prev == "node":
+            return blocks, [_invalid_id_issue("node ID", f"{prev_text} {word}")]
+        if not VALID_NODE_ID_RE.match(word):
+            return blocks, [_invalid_id_issue("node ID", word)]
+        i = j
+        k = i
+        while k < n and line[k].isspace():
+            k += 1
+        asymmetric = i < n and line[i] == ">"
+        if asymmetric or (k < n and (line[k] in _OPEN_BRACKETS or line.startswith("@{", k))):
+            start = i if asymmetric else k
+            i, issue = _flow_scan_shape(line, start)
+            if issue:
+                return blocks, [issue]
+        prev, prev_text, gap = "node", word, False
 
-        if ch in closers:
-            if stack and stack[-1] == closers[ch]:
-                stack.pop()
-            continue
-
-        if stack:
-            out[idx] = " "
-
-    return "".join(out)
-
-
-def _mask_sequence_message(line: str) -> str:
-    """Blank free-text payload on sequenceDiagram message and note lines."""
-    if SEQUENCE_NOTE_RE.match(line):
-        idx = line.find(":")
-    else:
-        arrow = SEQUENCE_MESSAGE_ARROW_RE.search(line)
-        if arrow is None:
-            return line
-        idx = line.find(":", arrow.end())
-
-    if idx < 0:
-        return line
-    return line[: idx + 1] + " " * (len(line) - idx - 1)
+    issue = end_statement()
+    return blocks, [issue] if issue else []
 
 
-def _validate_brackets_in_line(
-    line_without_comments: str,
-    doc_rel: str,
-    doc_line: int,
-    ignore_curly: bool = False,
-    allow_asymmetric: bool = False,
-) -> MermaidError | None:
-    """Validate balanced bracket delimiters ([...], (...), {...}) in a single line."""
-    stack: list[tuple[str, int]] = []
-    in_quote = False
-    escape = False
-
-    pairs = {"(": ")", "[": "]", "{": "}"}
-    closers = {")": "(", "]": "[", "}": "{"}
-
-    arrow_chars = ("-", "=", ".", "<", ">")
-
-    for col, ch in enumerate(line_without_comments):
-        if ch == "\\" and in_quote:
-            escape = not escape
-            continue
-
-        if ch == '"' and not escape:
-            in_quote = not in_quote
-            continue
-
-        escape = False
-        if in_quote:
-            continue
-
-        if (
-            ch == "%"
-            and col + 1 < len(line_without_comments)
-            and line_without_comments[col + 1] == "%"
-        ):
-            break
-
-        if ignore_curly and ch in ("{", "}"):
-            continue
-
-        if allow_asymmetric and ch == ">":
-            # Asymmetric shape opener 'A>flag]' - only when outside any bracket and
-            # directly following a node-id character, never inside label text.
-            prev_char = line_without_comments[col - 1] if col > 0 else ""
-            prev_arrow = bool(prev_char) and prev_char in arrow_chars
-            next_arrow = (
-                col + 1 < len(line_without_comments)
-                and line_without_comments[col + 1] in arrow_chars
+def _validate_flowchart(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    found: list[tuple[int, str, str]] = []
+    subgraph_starts: list[int] = []
+    for line_no, raw in body:
+        blocks, issues = _tokenize_flowchart_line(raw.strip())
+        for code, message in issues:
+            found.append((line_no, code, message))
+        for block in blocks:
+            if block == "subgraph":
+                subgraph_starts.append(line_no)
+            elif subgraph_starts:
+                subgraph_starts.pop()
+            else:
+                found.append(
+                    (
+                        line_no,
+                        CODE_UNBALANCED_SUBGRAPH,
+                        "Found 'end' statement without matching 'subgraph'",
+                    )
+                )
+    if subgraph_starts:
+        found.append(
+            (
+                subgraph_starts[-1],
+                CODE_UNBALANCED_SUBGRAPH,
+                "Unclosed 'subgraph' block (missing matching 'end')",
             )
-            if (
-                not stack
-                and not prev_arrow
-                and not next_arrow
-                and (prev_char.isalnum() or prev_char in "_-")
-            ):
-                stack.append((">", col))
+        )
+    return found
+
+
+# --- sequenceDiagram ------------------------------------------------------
+
+_SEQ_KEYWORDS = frozenset(
+    {
+        "participant",
+        "actor",
+        "loop",
+        "alt",
+        "else",
+        "opt",
+        "par",
+        "and",
+        "rect",
+        "critical",
+        "option",
+        "break",
+        "end",
+        "note",
+        "activate",
+        "deactivate",
+        "autonumber",
+        "box",
+        "create",
+        "destroy",
+        "title",
+        "acctitle",
+        "accdescr",
+        "link",
+        "links",
+        "properties",
+        "details",
+    }
+)
+_SEQ_DECLARATION_KEYWORDS = frozenset({"participant", "actor", "create"})
+# Message: <actor><arrow>[+|-]<actor>[: free text]. Actor names exclude the
+# characters Mermaid reserves for arrows and separators.
+_SEQ_ACTOR = r"[^<>\-=:,;\s][^<>\-=:,;]*?"
+_SEQ_MESSAGE_RE = re.compile(
+    rf"^(?P<src>{_SEQ_ACTOR})\s*"
+    r"(?P<arrow><<-->>|<<->>|-->>|->>|--x|-x|--\)|-\)|-->|->)"
+    rf"\s*[+-]?\s*(?P<dst>{_SEQ_ACTOR})\s*(?::(?P<text>.*))?$"
+)
+
+
+def _validate_sequence(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    found: list[tuple[int, str, str]] = []
+    for line_no, raw in body:
+        line = raw.strip()
+        word = _first_word(line).lower()
+        if word in _SEQ_KEYWORDS and line[len(word) : len(word) + 1] in ("", " ", "\t", ":"):
+            # Keyword statements carry free text (titles, conditions, aliases,
+            # note text); only declaration quotes are structural.
+            if word in _SEQ_DECLARATION_KEYWORDS and _has_unterminated_quote(line):
+                found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
             continue
+        structural = line
+        if _SEQ_MESSAGE_RE.match(structural):
+            continue  # message text after ':' is opaque payload
+        head = structural.split(":", 1)[0].strip()
+        code, message = _unrecognised_issue("sequenceDiagram", head or structural)
+        if code == CODE_INVALID_NODE_ID:
+            message = f"Message without a valid arrow in sequenceDiagram: '{structural}'"
+            code = CODE_INVALID_ARROW
+        found.append((line_no, code, message))
+    return found
 
-        if ch in pairs:
-            stack.append((ch, col))
-        elif ch in closers:
-            if not stack:
-                return MermaidError(
-                    code=CODE_UNBALANCED_DELIMITERS,
-                    document=doc_rel,
-                    line=doc_line,
-                    message=f"Unexpected closing delimiter '{ch}' at column {col + 1}",
+
+# --- Block balance shared by class, ER and state diagrams -----------------
+
+
+class _BraceTracker:
+    """Track '{'/'}' blocks that span lines."""
+
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+        self.found: list[tuple[int, str, str]] = []
+
+    def open(self, line_no: int) -> None:
+        self.starts.append(line_no)
+
+    def close(self, line_no: int) -> None:
+        if self.starts:
+            self.starts.pop()
+        else:
+            self.found.append(
+                (
+                    line_no,
+                    CODE_UNBALANCED_DELIMITERS,
+                    "Unexpected closing '}' without matching '{'",
                 )
-            expected_opener = closers[ch]
-            last_opener, opener_col = stack.pop()
-            if ch == "]" and last_opener in ("[", ">"):
-                # ']' closes both '[' and '>' asymmetric shape
-                pass
-            elif last_opener != expected_opener:
-                return MermaidError(
-                    code=CODE_UNBALANCED_DELIMITERS,
-                    document=doc_rel,
-                    line=doc_line,
-                    message=(
-                        f"Mismatched delimiter: expected '{pairs.get(last_opener, ']')}', "
-                        f"got '{ch}' at column {col + 1} (opened at column {opener_col + 1})"
-                    ),
+            )
+
+    def finish(self) -> list[tuple[int, str, str]]:
+        if self.starts:
+            self.found.append(
+                (
+                    self.starts[-1],
+                    CODE_UNBALANCED_DELIMITERS,
+                    "Unclosed '{' block delimiter in diagram body",
                 )
+            )
+        return self.found
 
-    if in_quote:
-        return MermaidError(
-            code=CODE_UNBALANCED_QUOTES,
-            document=doc_rel,
-            line=doc_line,
-            message="Unclosed double quote in diagram line",
-        )
 
-    if stack:
-        last_opener, opener_col = stack[-1]
-        return MermaidError(
-            code=CODE_UNBALANCED_DELIMITERS,
-            document=doc_rel,
-            line=doc_line,
-            message=(f"Unclosed delimiter '{last_opener}' opened at column {opener_col + 1}"),
-        )
+def _split_open_brace(text: str) -> tuple[str, bool]:
+    """Split a trailing block opener '{' (outside quotes) from a statement."""
+    stripped = text.rstrip()
+    if stripped.endswith("{") and not _has_unterminated_quote(stripped[:-1]):
+        return stripped[:-1].rstrip(), True
+    return stripped, False
 
+
+# --- classDiagram ---------------------------------------------------------
+
+_CLASS_NAME = r"(?:`[^`]+`|[^\s\"~:`]+)(?:~[^~]*~)?"
+_CLASS_REL_RE = re.compile(
+    rf"^(?P<a>{_CLASS_NAME}?)\s*(?:\"[^\"]*\"\s*)?"
+    r"(?P<rel>(?:<\||\*|o|<|\(\))?(?:--|\.\.)(?:\|>|\*|o|>|\(\))?)"
+    rf"\s*(?:\"[^\"]*\"\s*)?(?P<b>{_CLASS_NAME})\s*(?::.*)?$"
+)
+_CLASS_MEMBER_RE = re.compile(rf"^(?P<a>{_CLASS_NAME})\s*:(?!::)(?P<text>.*)$")
+_CLASS_DECL_RE = re.compile(
+    rf"^class\s+(?P<a>{_CLASS_NAME})\s*(?:\[\s*\"[^\"]*\"\s*\])?\s*(?::::[A-Za-z0-9_\-]+)?\s*$"
+)
+_CLASS_ANNOTATION_RE = re.compile(r"^<<[^<>]+>>(?:\s+\S+)?$")
+_CLASS_SKIP_KEYWORDS = frozenset(
+    {"classDef", "cssClass", "style", "click", "callback", "link", "note", "direction"}
+)
+
+
+def _class_name_issue(name: str) -> _Issue | None:
+    if name.startswith("`") and name.endswith("`"):
+        return None
+    bare = re.sub(r"~[^~]*~$", "", name)
+    if not VALID_NODE_ID_RE.match(bare):
+        return _invalid_id_issue("class name", bare)
     return None
 
 
-def _extract_flowchart_node_id(token: str) -> str:
-    """Extract node ID from a flowchart node expression (before label delimiter)."""
-    token = token.strip()
-    idx = len(token)
-    for delim in ("[", "(", "{", ">"):
-        pos = token.find(delim)
-        if 0 <= pos < idx:
-            idx = pos
-    return token[:idx].strip()
+def _validate_class(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    found: list[tuple[int, str, str]] = []
+    braces = _BraceTracker()
+    member_body = False  # inside 'class X { ... }': member text is opaque
+    for line_no, raw in body:
+        line = _strip_comment(raw).strip()
+        if not line:
+            continue
+        if member_body:
+            if line == "}":
+                braces.close(line_no)
+                member_body = False
+            continue
+        if line == "}":
+            braces.close(line_no)
+            continue
+        word = _first_word(line)
+        if word in _CLASS_SKIP_KEYWORDS:
+            if _has_unterminated_quote(line):
+                found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+            continue
+        statement, opens = _split_open_brace(line)
+        if word == "namespace":
+            if opens:
+                braces.open(line_no)
+            continue
+        if word == "class":
+            inline_body = re.match(r"^(?P<head>.*?)\{(?P<members>.*)\}$", line)
+            if inline_body and not opens:
+                statement = inline_body.group("head").rstrip()
+            decl = _CLASS_DECL_RE.match(statement)
+            if decl is None:
+                if _has_unterminated_quote(statement):
+                    issue: _Issue | None = (
+                        CODE_UNBALANCED_QUOTES,
+                        f"Unterminated string: '{line}'",
+                    )
+                elif statement.count("[") != statement.count("]"):
+                    issue = (CODE_UNBALANCED_DELIMITERS, f"Unclosed class label: '{line}'")
+                else:
+                    issue = _invalid_id_issue("class name", statement[5:].strip())
+            else:
+                issue = _class_name_issue(decl.group("a"))
+            if issue:
+                found.append((line_no, *issue))
+            if opens:
+                braces.open(line_no)
+                member_body = True
+            continue
+        if _CLASS_ANNOTATION_RE.match(line):
+            continue
+        if _has_unterminated_quote(line):
+            found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+            continue
+        rel = _CLASS_REL_RE.match(line)
+        if rel:
+            for name in (rel.group("a"), rel.group("b")):
+                issue = _class_name_issue(name)
+                if issue:
+                    found.append((line_no, *issue))
+                    break
+            continue
+        member = _CLASS_MEMBER_RE.match(line)
+        if member:
+            issue = _class_name_issue(member.group("a"))
+            if issue:
+                found.append((line_no, *issue))
+            continue
+        if re.fullmatch(_CLASS_NAME, line):
+            issue = _class_name_issue(line)
+            if issue:
+                found.append((line_no, *issue))
+            continue
+        found.append((line_no, *_unrecognised_issue("classDiagram", line)))
+    return found + braces.finish()
+
+
+# --- erDiagram ------------------------------------------------------------
+
+_ER_NAME = r"[^\s{}\[\]\"|:]+"
+_ER_REL_RE = re.compile(
+    rf"^(?P<a>{_ER_NAME}?)\s*(?:\|o|\|\||\}}o|\}}\|)(?:--|\.\.)(?:o\||\|\||o\{{|\|\{{)"
+    rf"\s*(?P<b>{_ER_NAME})\s*:\s*(?P<label>\S.*)$"
+)
+_ER_ENTITY_RE = re.compile(rf"^(?P<a>{_ER_NAME})(?:\s*\[(?P<alias>[^\]]*)\])?$")
+_ER_SKIP_KEYWORDS = frozenset({"direction", "classDef", "class", "style", "title"})
+
+
+def _validate_er(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    found: list[tuple[int, str, str]] = []
+    braces = _BraceTracker()
+    attribute_body = False
+    for line_no, raw in body:
+        line = _strip_comment(raw).strip()
+        if not line:
+            continue
+        if attribute_body:
+            if line == "}":
+                braces.close(line_no)
+                attribute_body = False
+            elif _has_unterminated_quote(line):
+                found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+            continue
+        if line == "}":
+            braces.close(line_no)
+            continue
+        if _first_word(line) in _ER_SKIP_KEYWORDS or line.startswith(("accTitle", "accDescr")):
+            continue
+        if _has_unterminated_quote(line):
+            found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+            continue
+        rel = _ER_REL_RE.match(line)
+        if rel:
+            for name in (rel.group("a"), rel.group("b")):
+                if not VALID_NODE_ID_RE.match(name):
+                    found.append((line_no, *_invalid_id_issue("entity name", name)))
+                    break
+            continue
+        statement, opens = _split_open_brace(line)
+        entity = _ER_ENTITY_RE.match(statement)
+        if entity:
+            if not VALID_NODE_ID_RE.match(entity.group("a")):
+                found.append((line_no, *_invalid_id_issue("entity name", entity.group("a"))))
+            if opens:
+                braces.open(line_no)
+                attribute_body = True
+            continue
+        if statement.count("[") != statement.count("]"):
+            found.append((line_no, CODE_UNBALANCED_DELIMITERS, f"Unclosed entity alias: '{line}'"))
+            continue
+        found.append((line_no, *_unrecognised_issue("erDiagram", line)))
+    return found + braces.finish()
+
+
+# --- stateDiagram-v2 ------------------------------------------------------
+
+_STATE_NAME = r"(?:\[\*\]|[A-Za-z0-9_\-]+?|[^\s:\[\]{}\"]+?)(?::::[A-Za-z0-9_\-]+)?"
+_STATE_TRANSITION_RE = re.compile(
+    rf"^(?P<a>{_STATE_NAME})\s*-->\s*(?P<b>{_STATE_NAME})\s*(?::.*)?$"
+)
+_STATE_DESC_RE = re.compile(rf"^(?P<a>{_STATE_NAME})\s*:(?!::).*$")
+_STATE_BARE_RE = re.compile(rf"^(?P<a>{_STATE_NAME})$")
+_STATE_DECL_RE = re.compile(
+    r"^state\s+(?:\"[^\"]*\"\s+as\s+(?P<alias>\S+)|(?P<name>[^\s:\"{]+)"
+    r"(?:\s*<<(?:fork|join|choice)>>|\s*:.*)?)\s*$"
+)
+_STATE_NOTE_RE = re.compile(r"^note\s+(?:left|right)\s+of\s+\S+(?P<inline>\s*:.*)?$", re.I)
+_STATE_SKIP_KEYWORDS = frozenset(
+    {"direction", "classDef", "class", "style", "accTitle", "accDescr", "hide", "title"}
+)
+
+
+def _state_name_issue(name: str) -> _Issue | None:
+    bare = re.sub(r":::[A-Za-z0-9_\-]+$", "", name)
+    if bare == "[*]" or VALID_NODE_ID_RE.match(bare):
+        return None
+    return _invalid_id_issue("state ID", bare)
+
+
+def _validate_state(body: list[tuple[int, str]]) -> list[tuple[int, str, str]]:
+    found: list[tuple[int, str, str]] = []
+    braces = _BraceTracker()
+    in_note = False
+    for line_no, raw in body:
+        line = _strip_comment(raw).strip()
+        if not line:
+            continue
+        if in_note:
+            in_note = line.lower() != "end note"
+            continue
+        if line == "}":
+            braces.close(line_no)
+            continue
+        if line == "--":  # concurrency separator inside a composite state
+            continue
+        word = _first_word(line)
+        if word in _STATE_SKIP_KEYWORDS:
+            continue
+        note = _STATE_NOTE_RE.match(line)
+        if note:
+            in_note = note.group("inline") is None
+            continue
+        statement, opens = _split_open_brace(line)
+        if _has_unterminated_quote(statement):
+            found.append((line_no, CODE_UNBALANCED_QUOTES, f"Unterminated string: '{line}'"))
+            continue
+        if word == "state":
+            decl = _STATE_DECL_RE.match(statement)
+            if decl is None:
+                found.append((line_no, *_invalid_id_issue("state ID", statement[5:].strip())))
+            else:
+                issue = _state_name_issue(decl.group("alias") or decl.group("name"))
+                if issue:
+                    found.append((line_no, *issue))
+            if opens:
+                braces.open(line_no)
+            continue
+        if opens:
+            found.append((line_no, CODE_UNBALANCED_DELIMITERS, f"Unexpected '{{' in: '{line}'"))
+            continue
+        match = (
+            _STATE_TRANSITION_RE.match(statement)
+            or _STATE_DESC_RE.match(statement)
+            or _STATE_BARE_RE.match(statement)
+        )
+        if match is None:
+            found.append((line_no, *_unrecognised_issue("stateDiagram-v2", line)))
+            continue
+        names = [match.group("a")]
+        if "b" in match.groupdict() and match.group("b"):
+            names.append(match.group("b"))
+        for name in names:
+            issue = _state_name_issue(name)
+            if issue:
+                found.append((line_no, *issue))
+                break
+    return found + braces.finish()
+
+
+_FAMILY_VALIDATORS = {
+    "flowchart": _validate_flowchart,
+    "graph": _validate_flowchart,
+    "sequenceDiagram": _validate_sequence,
+    "classDiagram": _validate_class,
+    "erDiagram": _validate_er,
+    "stateDiagram-v2": _validate_state,
+}
 
 
 def validate_mermaid_block(
@@ -494,15 +913,15 @@ def validate_mermaid_block(
         )
         return errors
 
-    # 2. Check non-empty body after header
-    body_lines_with_idx: list[tuple[int, str]] = []
+    # 2. Non-empty body after header
+    body: list[tuple[int, str]] = []
     for idx in range(header_idx + 1, len(block_lines)):
         raw = block_lines[idx]
         stripped = raw.strip()
         if stripped and not stripped.startswith("%%"):
-            body_lines_with_idx.append((block_start_line + 1 + idx, raw))
+            body.append((block_start_line + 1 + idx, raw))
 
-    if not body_lines_with_idx:
+    if not body:
         errors.append(
             MermaidError(
                 code=CODE_EMPTY_BODY,
@@ -513,265 +932,9 @@ def validate_mermaid_block(
         )
         return errors
 
-    # 3. Subgraph balancing (flowchart / graph)
-    if diagram_type in ("flowchart", "graph"):
-        subgraph_depth = 0
-        subgraph_starts: list[int] = []
-
-        for line_no, raw in body_lines_with_idx:
-            stripped = raw.strip()
-            if re.match(r"^subgraph\b", stripped):
-                subgraph_depth += 1
-                subgraph_starts.append(line_no)
-            elif re.match(r"^end\s*;?\s*$", stripped):
-                if subgraph_depth <= 0:
-                    errors.append(
-                        MermaidError(
-                            code=CODE_UNBALANCED_SUBGRAPH,
-                            document=doc_rel,
-                            line=line_no,
-                            message="Found 'end' statement without matching 'subgraph'",
-                        )
-                    )
-                else:
-                    subgraph_depth -= 1
-                    subgraph_starts.pop()
-
-        if subgraph_depth > 0:
-            unclosed_line = subgraph_starts[-1] if subgraph_starts else header_line_no
-            errors.append(
-                MermaidError(
-                    code=CODE_UNBALANCED_SUBGRAPH,
-                    document=doc_rel,
-                    line=unclosed_line,
-                    message="Unclosed 'subgraph' block (missing matching 'end')",
-                )
-            )
-
-    # 4. Multi-line block delimiters ({...} in classDiagram, erDiagram, stateDiagram-v2)
-    multi_line_curly = diagram_type in ("classDiagram", "erDiagram", "stateDiagram-v2")
-    curly_stack: list[int] = []
-
-    for line_no, raw in body_lines_with_idx:
-        # Check quotes and line delimiters, ignoring free-text label payloads
-        if diagram_type == "sequenceDiagram":
-            bracket_line = _mask_sequence_message(raw)
-        elif diagram_type in ("flowchart", "graph"):
-            bracket_line = _mask_edge_label_text(raw)
-        else:
-            bracket_line = raw
-        err = _validate_brackets_in_line(
-            bracket_line,
-            doc_rel=doc_rel,
-            doc_line=line_no,
-            ignore_curly=multi_line_curly,
-            allow_asymmetric=diagram_type in ("flowchart", "graph"),
-        )
-        if err is not None:
-            errors.append(err)
-
-        if multi_line_curly:
-            # In erDiagram, skip relationship lines which contain cardinality braces e.g. ||--|{
-            if diagram_type == "erDiagram" and ("--" in raw or ".." in raw or ":" in raw):
-                continue
-            cleaned, _ = _strip_comments_and_quotes(raw)
-            for ch in cleaned:
-                if ch == "{":
-                    curly_stack.append(line_no)
-                elif ch == "}":
-                    if not curly_stack:
-                        errors.append(
-                            MermaidError(
-                                code=CODE_UNBALANCED_DELIMITERS,
-                                document=doc_rel,
-                                line=line_no,
-                                message="Unexpected closing '}' without matching '{'",
-                            )
-                        )
-                    else:
-                        curly_stack.pop()
-
-    if multi_line_curly and curly_stack:
-        errors.append(
-            MermaidError(
-                code=CODE_UNBALANCED_DELIMITERS,
-                document=doc_rel,
-                line=curly_stack[-1],
-                message="Unclosed '{' block delimiter in diagram body",
-            )
-        )
-
-    # 5. Node ID character validation & Edge arrow validation
-    for line_no, raw in body_lines_with_idx:
-        cleaned_no_quotes, unterminated_quote = _strip_comments_and_quotes(raw)
-        if unterminated_quote:
-            continue  # Already reported under quotes rule
-
-        line_content = cleaned_no_quotes.strip()
-        if not line_content:
-            continue
-
-        if diagram_type in ("flowchart", "graph"):
-            # Validate structure only: label text is not diagram syntax
-            structural_content = _mask_bracket_contents(_mask_edge_label_text(line_content))
-
-            # Check edge arrows
-            has_arrow_err = False
-            for malformed_re in MALFORMED_FLOWCHART_ARROW_RES:
-                if malformed_re.search(structural_content):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_ARROW,
-                            document=doc_rel,
-                            line=line_no,
-                            message=f"Malformed edge arrow in line: '{raw.strip()}'",
-                        )
-                    )
-                    has_arrow_err = True
-                    break
-
-            if has_arrow_err:
-                continue
-
-            # Split line into statements separated by ';' outside brackets
-            statements = _split_tokens_outside_brackets(structural_content, seps=";")
-            for stmt in statements:
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
-
-                # Skip keywords and directives
-                if (
-                    stmt.startswith("subgraph")
-                    or stmt == "end"
-                    or stmt.startswith("style ")
-                    or stmt.startswith("class ")
-                    or stmt.startswith("classDef ")
-                    or stmt.startswith("click ")
-                    or stmt.startswith("direction ")
-                    or stmt.startswith("linkStyle ")
-                ):
-                    if stmt.startswith("subgraph"):
-                        after_sub = stmt[8:].strip()
-                        if after_sub:
-                            # Accept free-text or quoted subgraph titles (e.g.
-                            # 'subgraph Service Layer' or 'subgraph "Service Layer"').
-                            # If bracketed like 'sg1 [Service Layer]', check the node id.
-                            if after_sub.startswith('"') or after_sub.startswith("'"):
-                                pass
-                            elif "[" in after_sub:
-                                sg_id = after_sub[: after_sub.find("[")].strip()
-                                if sg_id and not VALID_NODE_ID_RE.match(sg_id):
-                                    errors.append(
-                                        MermaidError(
-                                            code=CODE_INVALID_NODE_ID,
-                                            document=doc_rel,
-                                            line=line_no,
-                                            message=(
-                                                f"Invalid subgraph ID '{sg_id}': must contain only "
-                                                "letters, numbers, underscores, and hyphens"
-                                            ),
-                                        )
-                                    )
-                            elif " " not in after_sub:
-                                sg_id = _extract_flowchart_node_id(after_sub)
-                                if sg_id and not VALID_NODE_ID_RE.match(sg_id):
-                                    errors.append(
-                                        MermaidError(
-                                            code=CODE_INVALID_NODE_ID,
-                                            document=doc_rel,
-                                            line=line_no,
-                                            message=(
-                                                f"Invalid subgraph ID '{sg_id}': must contain only "
-                                                "letters, numbers, underscores, and hyphens"
-                                            ),
-                                        )
-                                    )
-                    continue
-
-                # Split statement by known valid arrows to extract node expressions
-                parts = FLOWCHART_ARROW_SPLIT_RE.split(stmt)
-                for part in parts:
-                    part = part.strip()
-                    if not part:
-                        continue
-                    # Split on '&' outside brackets (e.g. 'A --> B & C')
-                    tokens = _split_tokens_outside_brackets(part, seps="&")
-                    for token in tokens:
-                        token = token.strip()
-                        if not token:
-                            continue
-                        # Strip class shorthand ':::className'
-                        token = re.sub(r":::[a-zA-Z0-9_\-]+", "", token).strip()
-                        node_id = _extract_flowchart_node_id(token)
-                        if not node_id:
-                            continue
-                        if not VALID_NODE_ID_RE.match(node_id):
-                            errors.append(
-                                MermaidError(
-                                    code=CODE_INVALID_NODE_ID,
-                                    document=doc_rel,
-                                    line=line_no,
-                                    message=(
-                                        f"Invalid node ID '{node_id}': must contain only "
-                                        "letters, numbers, underscores, and hyphens"
-                                    ),
-                                )
-                            )
-
-        elif diagram_type == "sequenceDiagram":
-            structural_content = _mask_sequence_message(line_content)
-            for invalid_re in INVALID_SEQUENCE_ARROW_RES:
-                if invalid_re.search(structural_content):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_ARROW,
-                            document=doc_rel,
-                            line=line_no,
-                            message=(f"Invalid arrow in sequenceDiagram: '{raw.strip()}'"),
-                        )
-                    )
-                    break
-
-        elif diagram_type == "classDiagram":
-            for invalid_re in INVALID_CLASS_ARROW_RES:
-                if invalid_re.search(line_content):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_ARROW,
-                            document=doc_rel,
-                            line=line_no,
-                            message=f"Invalid relation arrow in classDiagram: '{raw.strip()}'",
-                        )
-                    )
-                    break
-
-        elif diagram_type == "erDiagram":
-            for invalid_re in INVALID_ER_ARROW_RES:
-                if invalid_re.search(line_content):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_ARROW,
-                            document=doc_rel,
-                            line=line_no,
-                            message=f"Invalid relationship arrow in erDiagram: '{raw.strip()}'",
-                        )
-                    )
-                    break
-
-        elif diagram_type == "stateDiagram-v2":
-            for invalid_re in INVALID_STATE_ARROW_RES:
-                if invalid_re.search(line_content):
-                    errors.append(
-                        MermaidError(
-                            code=CODE_INVALID_ARROW,
-                            document=doc_rel,
-                            line=line_no,
-                            message=f"Invalid transition arrow in stateDiagram: '{raw.strip()}'",
-                        )
-                    )
-                    break
-
+    # 3. Family tokenizer: structure, delimiters, node ids and arrows
+    for line_no, code, message in _FAMILY_VALIDATORS[diagram_type](body):
+        errors.append(MermaidError(code=code, document=doc_rel, line=line_no, message=message))
     return errors
 
 

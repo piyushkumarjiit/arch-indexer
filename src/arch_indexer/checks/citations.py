@@ -150,9 +150,7 @@ def _find_drift_in_index(
     candidates = [
         start_line
         for start_line, _end_line, name, fqname in rows
-        if start_line is not None
-        and start_line != line
-        and _symbol_matches(name, fqname, symbol)
+        if start_line is not None and start_line != line and _symbol_matches(name, fqname, symbol)
     ]
     if not candidates:
         return None

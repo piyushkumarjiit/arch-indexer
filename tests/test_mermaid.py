@@ -515,9 +515,7 @@ def test_label_text_is_not_parsed_as_diagram_structure():
     assert _validate_snippet("sequenceDiagram\n  Note over A: retry (max: 3)\n") == []
 
     # Structural errors outside label text are still detected.
-    assert any(
-        e.code == CODE_INVALID_ARROW for e in _validate_snippet("flowchart TD\n  A -> B\n")
-    )
+    assert any(e.code == CODE_INVALID_ARROW for e in _validate_snippet("flowchart TD\n  A -> B\n"))
     assert any(
         e.code == CODE_UNBALANCED_DELIMITERS
         for e in _validate_snippet("flowchart TD\n  A[unclosed --> B\n")
@@ -526,3 +524,246 @@ def test_label_text_is_not_parsed_as_diagram_structure():
         e.code == CODE_INVALID_ARROW
         for e in _validate_snippet("sequenceDiagram\n  Alice ==> Bob: text\n")
     )
+
+
+# --- Tokenizer corpus: label text is opaque, structure is checked ---
+# Oracle: Mermaid flowchart, sequence, class, ER and state grammars. Each
+# VALID entry is a diagram Mermaid renders; each INVALID entry is a diagram
+# Mermaid rejects, paired with the error code the gate must report.
+
+_VALID_CORPUS: dict[str, list[str]] = {
+    "flowchart TD": [
+        # Shape labels: comparisons, generics, arrow-like and bracketed text
+        "A[count > 0] --> B",
+        "A[Map<K, V>] --> B",
+        "A[a -> b] --> B",
+        "A[x --> y] --> B",
+        "A(step -> next) --> B",
+        'A["quoted (parens) [x]"] --> B',
+        # Every node shape
+        "A((circle)) --> B(((double)))",
+        "A([stadium]) --> B[[subroutine]]",
+        "A[(database)] --> B{{hexagon}}",
+        "A>flag] --> B[/parallelogram/]",
+        "A[\\alt\\] --> B[/trapezoid\\]",
+        "A[\\inv/] --> B{decision}",
+        'A@{ shape: rect, label: "x" } --> B',
+        # Pipe edge labels
+        "A -->|Map<K,V>| B",
+        "A -->|count>0| B",
+        "A -->|a -> b| B",
+        'A -->|"pipe | in string"| B',
+        "A-->|x|B",
+        "A ---|text| B",
+        # Inline edge labels
+        "A -- x>0 --> B",
+        "A -- a -> b --> B",
+        "A -- re-try --> B",
+        "A -- text --- B",
+        "A == text ==> B",
+        "A == text === B",
+        "A -. text .-> B",
+        "A -. text .- B",
+        "A-- text -->B",
+        # Unlabeled links do not open a label
+        "A --- B --> C",
+        "A --- B[x --> y] --> C",
+        # Link types and length variants
+        "A --> B",
+        "A --- B",
+        "A ---- B",
+        "A ----> B",
+        "A === B",
+        "A ==> B",
+        "A ===> B",
+        "A -.- B",
+        "A -.-> B",
+        "A -..-> B",
+        "A --x B",
+        "A --o B",
+        "A <--> B",
+        "A <-.-> B",
+        "A <==> B",
+        "A o--o B",
+        "A x--x B",
+        "A ~~~ B",
+        "A-->B",
+        # ':::class', '&', ';'
+        "A:::hot --> B:::cold & C",
+        "A & B --> C & D",
+        "A --> B; C --> D;",
+        "re-try --> B",
+        # Keywords
+        "style A fill:#f9f,stroke:#333",
+        "classDef hot fill:#f00;",
+        "class A,B hot",
+        'click A callback "tooltip"',
+        "linkStyle 0 stroke:#f00",
+        'subgraph sg1 ["Title (v2)"]\n  direction LR\n  A --> B\nend',
+        'subgraph "Service: Layer"\n  A --> B\nend',
+    ],
+    "graph LR": [
+        "A[Start] --> B[Process]",
+        "A -->|yes| B{ok?}",
+    ],
+    "sequenceDiagram": [
+        "A->>B: smile :)",
+        "A->>B: x ==> y",
+        "A->>B: Map<K,V> [x] {y}",
+        "A-)B: event",
+        "A--)B: done",
+        "A-xB: lost",
+        "A--xB: lost",
+        "A->B: x",
+        "A-->B: y",
+        "A-->>B: z",
+        "A->>+B: activate",
+        "B-->>-A: deactivate",
+        "participant DB as Postgres (db:5432)",
+        'participant A as "svc: api"',
+        "actor User",
+        "loop Every 5s (retry: 3)\n  A->>B: poll\nend",
+        "alt ok (200)\n  A->>B: x\nelse error [5xx]\n  A->>B: y\nend",
+        "opt maybe\n  A->>B: x\nend",
+        "par A to B\n  A->>B: x\nand A to C\n  A->>C: y\nend",
+        "rect rgb(0, 0, 255)\n  A->>B: x\nend",
+        "critical connect\n  A->>B: x\noption timeout\n  A->>B: y\nend",
+        "break when (x > 0\n  A->>B: x\nend",
+        "Note over A: retry (max: 3)",
+        "Note right of A: unbalanced ( text",
+        "Note over A,B: shared",
+        "autonumber",
+        "activate A",
+    ],
+    "classDiagram": [
+        "class Animal {\n  +String name\n  +makeSound() Map~K,V~\n}",
+        "class Shape~T~",
+        'class A["Label (x)"]',
+        "class A { +x }",
+        "class Animal:::someclass",
+        "<<interface>> Shape",
+        "Animal <|-- Duck",
+        "A *-- B",
+        "A o-- B",
+        "A --> B",
+        "A -- B",
+        "A ..> B",
+        "A ..|> B",
+        "A .. B",
+        "A --() B",
+        'A "1" --> "*" B : has',
+        "A --> B : uses (Map<K,V>)",
+        "Animal : +int age",
+        "Animal : +isMammal() bool",
+        'note for A "text (x)"',
+        "namespace Shapes {\n  class Square\n}",
+    ],
+    "erDiagram": [
+        "CUSTOMER ||--o{ ORDER : places",
+        "ORDER ||--|{ LINE-ITEM : contains",
+        "CUSTOMER }|..|{ DELIVERY-ADDRESS : uses",
+        'A |o..o| B : "may (have)"',
+        'CUSTOMER {\n  string name PK "the (name)"\n}',
+        "CUSTOMER",
+        "p[Person] {\n  string x\n}",
+    ],
+    "stateDiagram-v2": [
+        "[*] --> Still",
+        "Still --> [*]",
+        "S1 --> S2 : go (fast) -> now",
+        'state "Long desc" as S1',
+        "state S1 {\n  [*] --> A\n  --\n  [*] --> B\n}",
+        "state f <<fork>>",
+        "state c <<choice>>",
+        "S1 : a description (x)",
+        "note right of S1 : hi (x",
+        "note left of S1\n  multi (line\nend note",
+        "S1:::cls --> S2",
+        "S1",
+        "direction LR",
+    ],
+}
+
+_INVALID_CORPUS: list[tuple[str, str]] = [
+    # Unclosed shape
+    ("flowchart TD\n  A[unclosed --> B", CODE_UNBALANCED_DELIMITERS),
+    ("flowchart TD\n  A --- B[unclosed --> C", CODE_UNBALANCED_DELIMITERS),
+    ("flowchart TD\n  A --- B[label (oops] --> C", CODE_UNBALANCED_DELIMITERS),
+    ("flowchart TD\n  A === B{bad] --> C", CODE_UNBALANCED_DELIMITERS),
+    ("flowchart TD\n  A(x] --> B", CODE_UNBALANCED_DELIMITERS),
+    ("flowchart TD\n  A -->|oops B", CODE_UNBALANCED_DELIMITERS),
+    ("classDiagram\n  class A {\n    +x", CODE_UNBALANCED_DELIMITERS),
+    ("classDiagram\n  }", CODE_UNBALANCED_DELIMITERS),
+    ("erDiagram\n  A {\n    string x", CODE_UNBALANCED_DELIMITERS),
+    ("stateDiagram-v2\n  state S {\n    A", CODE_UNBALANCED_DELIMITERS),
+    # Unclosed string
+    ('flowchart TD\n  A["oops] --> B', CODE_UNBALANCED_QUOTES),
+    ('flowchart TD\n  A -->|"oops| B', CODE_UNBALANCED_QUOTES),
+    ('sequenceDiagram\n  participant A as "oops', CODE_UNBALANCED_QUOTES),
+    ('erDiagram\n  A {\n    string x "oops\n  }', CODE_UNBALANCED_QUOTES),
+    ('stateDiagram-v2\n  state "oops as S1', CODE_UNBALANCED_QUOTES),
+    # Unbalanced subgraph
+    ("flowchart TD\n  subgraph X\n    A --> B", CODE_UNBALANCED_SUBGRAPH),
+    ("flowchart TD\n  A --> B\n  end", CODE_UNBALANCED_SUBGRAPH),
+    # Bad header and empty body
+    ("Flowchart TD\n  A --> B", CODE_INVALID_HEADER),
+    ("stateDiagram\n  [*] --> S", CODE_INVALID_HEADER),
+    ("sequenceDiagram\n  %% nothing", CODE_EMPTY_BODY),
+    # Bad arrow
+    ("flowchart TD\n  A -> B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A => B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A -.> B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A ->> B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A -->> B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A --- B -> C --> D", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A -- unterminated label B", CODE_INVALID_ARROW),
+    ("flowchart TD\n  A -->", CODE_INVALID_ARROW),
+    ("flowchart TD\n  --> B", CODE_INVALID_ARROW),
+    ("sequenceDiagram\n  Alice ==> Bob: text", CODE_INVALID_ARROW),
+    ("sequenceDiagram\n  A -.-> B: text", CODE_INVALID_ARROW),
+    ("classDiagram\n  A -.-> B", CODE_INVALID_ARROW),
+    ("classDiagram\n  A ==> B", CODE_INVALID_ARROW),
+    ("erDiagram\n  A --> B : x", CODE_INVALID_ARROW),
+    ("stateDiagram-v2\n  [*] -> S", CODE_INVALID_ARROW),
+    ("stateDiagram-v2\n  S ==> T", CODE_INVALID_ARROW),
+    # Bad node id
+    ("flowchart TD\n  node@1 --> B", CODE_INVALID_NODE_ID),
+    ("flowchart TD\n  A --- B c --> C", CODE_INVALID_NODE_ID),
+    ("flowchart TD\n  subgraph sg@1 [Title]\n  end", CODE_INVALID_NODE_ID),
+    ("classDiagram\n  An@imal <|-- Duck", CODE_INVALID_NODE_ID),
+    ("erDiagram\n  A@ ||--o{ B : x", CODE_INVALID_NODE_ID),
+    ("stateDiagram-v2\n  S@1 --> T", CODE_INVALID_NODE_ID),
+]
+
+
+def test_valid_corpus_passes_for_every_diagram_type():
+    failures = []
+    for header, statements in _VALID_CORPUS.items():
+        for statement in statements:
+            errs = _validate_snippet(f"{header}\n{statement}\n")
+            if errs:
+                failures.append((header, statement, [e.format_line() for e in errs]))
+    assert failures == []
+
+
+def test_invalid_corpus_fails_with_expected_code():
+    misses = []
+    for snippet, code in _INVALID_CORPUS:
+        errs = _validate_snippet(snippet)
+        if not any(e.code == code for e in errs):
+            misses.append((snippet, code, [e.format_line() for e in errs]))
+    assert misses == []
+
+
+def test_unlabeled_link_does_not_swallow_following_node():
+    # A '---'/'===' link must not be read as an inline-label opener that hides
+    # errors in the next node expression.
+    errs = _validate_snippet("flowchart TD\n  A --- B[unclosed --> C\n")
+    assert [e.code for e in errs] == [CODE_UNBALANCED_DELIMITERS]
+    assert _validate_snippet("flowchart TD\n  A --- B[x --> y] --> C\n") == []
+
+
+def test_invalid_corpus_reports_correct_line_number():
+    block = ["flowchart TD", "  A --> B", "  C -> D"]
+    errs = validate_mermaid_block(block, "docs/DESIGN.md", 10)
+    assert [(e.code, e.line) for e in errs] == [(CODE_INVALID_ARROW, 13)]
