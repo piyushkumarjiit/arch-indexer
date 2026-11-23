@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     java_min = load_toolchain_manifest()["runtimes"]["java_min_version"]
 
     # toolchain status
-    tc_status = toolchain_sub.add_parser("status", help="Inspect host runtimes and toolchain")
+    tc_status = toolchain_sub.add_parser("status", help="Inspect resolved runtimes and toolchain")
     tc_status.add_argument("--repo", required=True, help="Target repository path")
     tc_status.add_argument("--cache-dir", default=None, help="Cache directory override")
 
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Fetch the pinned Temurin JDK (min java "
-            f"{java_min}) into <cache>/runtimes/ when host java is too old, and "
+            f"{java_min}) into <cache>/runtimes/ when host java is missing or too old, and "
             "Apache Maven too when the repo has a pom.xml and host mvn is "
             "missing (Java repos only). Only "
             "this flag downloads; an already fetched runtime is reused and "

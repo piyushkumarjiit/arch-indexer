@@ -749,7 +749,11 @@ def _ready_portable_runtimes(
 def _effective_runtimes(
     cache_dir: str | Path | None = None,
 ) -> tuple[dict[str, RuntimeStatus], JavaRuntime, dict[str, RuntimeInstall]]:
-    """Host runtimes, the subprocess runtime, and the portable installs in use."""
+    """Resolved runtimes, the subprocess runtime, and the portable installs in use.
+
+    Host runtimes win when usable; an extracted, checksum-verified portable
+    runtime fills in for a missing or too-old host runtime.
+    """
     manifest = load_toolchain_manifest()
     java_min = manifest["runtimes"]["java_min_version"]
     runtimes = dict(check_host_runtimes())
