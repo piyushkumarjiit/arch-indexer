@@ -729,9 +729,13 @@ class TypeScriptPlugin(LanguagePlugin):
                         has_handler = len(arg_nodes) >= 2
                         if route_path is not None and (http_method == "USE" or has_handler):
                             handler_name = ""
-                            for c in arg_nodes[1:]:
+                            handler_fqname = None
+                            for c in reversed(arg_nodes[1:]):
                                 if c.type == "identifier":
                                     handler_name = _get_node_text(c, source_bytes)
+                                    handler_fqname = file_imports.get(
+                                        handler_name, f"{module_name}.{handler_name}"
+                                    )
                                     break
 
                             entrypoints.append(
@@ -742,9 +746,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                     "route_or_trigger": route_path,
                                     "file_path": rel_path,
                                     "line": line,
-                                    "symbol_fqname": f"{module_name}.{handler_name}"
-                                    if handler_name
-                                    else None,
+                                    "symbol_fqname": handler_fqname,
                                     "auth_symbols_json": "[]",
                                 }
                             )

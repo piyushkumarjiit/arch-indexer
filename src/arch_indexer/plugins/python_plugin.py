@@ -29,6 +29,21 @@ def _get_node_text(node: Node, source_bytes: bytes) -> str:
 
 PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
 
+# Calls that build a web/CLI app object; their bound names may carry routes/commands.
+APP_FACTORY_CALLEES = frozenset(
+    {
+        "FastAPI",
+        "APIRouter",
+        "Flask",
+        "Blueprint",
+        "Typer",
+        "typer.Typer",
+        "click.Group",
+        "click.Command",
+    }
+)
+APP_RECEIVER_SUFFIXES = ("app", "router", "bp", "api", "blueprint")
+
 # Python auth dependency names recognised in FastAPI ``Depends(...)`` parameters.
 AUTH_DEPENDENCY_HINTS = (
     "auth",
@@ -161,6 +176,13 @@ def _resolve_relative_module(
     if prefix and relative_module:
         return f"{prefix}.{relative_module}"
     return prefix or relative_module
+
+
+def _is_app_receiver(receiver: str, tracked: set[str]) -> bool:
+    """Whether a decorator receiver is a known app/router/blueprint object."""
+    if receiver in tracked:
+        return True
+    return receiver.rsplit(".", 1)[-1].lower().endswith(APP_RECEIVER_SUFFIXES)
 
 
 def _get_decorators(node: Node, source_bytes: bytes) -> list[str]:
@@ -487,6 +509,7 @@ class PythonPlugin(LanguagePlugin):
         """Extract imports, call references, and entrypoints for a Python file."""
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
         bound_names: set[str] = set()
+        tracked_receivers: set[str] = set()
         has_argparse = False
 
         def record_import(raw_symbol: str, local_name: str, line: int, col: int) -> None:
@@ -513,9 +536,10 @@ class PythonPlugin(LanguagePlugin):
                     }
                 )
 
-        stack: list[Node] = [root]
+        stack: list[tuple[Node, str]] = [(root, module_name)]
         while stack:
-            node = stack.pop()
+            node, scope = stack.pop()
+            child_scope = scope
 
             # 1. Imports
             if node.type == "import_statement":
@@ -634,19 +658,19 @@ class PythonPlugin(LanguagePlugin):
                     name_node = func_node.child_by_field_name("name")
                     func_name = _get_node_text(name_node, source_bytes) if name_node else ""
                     func_line = func_node.start_point[0] + 1
-                    func_fqname = f"{module_name}.{func_name}"
+                    func_fqname = f"{scope}.{func_name}" if scope else func_name
 
                     for dec in decorators:
                         # FastAPI / Flask HTTP routes:
                         # e.g. @app.get('/...'), @users_router.post(...), @auth_bp.route(...)
-                        http_match = re.search(
-                            r"@[\w.]+\.(get|post|put|delete|patch|options|head|route|api_route)"
-                            r"\s*\(([^)]*)\)",
+                        http_match = re.match(
+                            r"@\s*([\w.]+)\s*\.\s*(get|post|put|delete|patch|options|head"
+                            r"|route|api_route)\s*\(([^)]*)\)",
                             dec,
                         )
-                        if http_match:
-                            method_name = http_match.group(1).upper()
-                            args_str = http_match.group(2)
+                        if http_match and _is_app_receiver(http_match.group(1), tracked_receivers):
+                            method_name = http_match.group(2).upper()
+                            args_str = http_match.group(3)
                             # Extract path
                             path_match = re.search(r"['\"]([^'\"]+)['\"]", args_str)
                             route_path = path_match.group(1) if path_match else "/"
@@ -687,21 +711,26 @@ class PythonPlugin(LanguagePlugin):
                             )
 
                         # Click / Typer CLI: @click.command(), @click.group(), @cli.command()
-                        elif re.search(
-                            r"@(?:click\.(?:command|group)|[\w.]+\.(?:command|group))\b", dec
-                        ):
-                            entrypoints.append(
-                                {
-                                    "kind": "cli",
-                                    "name": func_name,
-                                    "method": None,
-                                    "route_or_trigger": func_name,
-                                    "file_path": rel_path,
-                                    "line": func_line,
-                                    "symbol_fqname": func_fqname,
-                                    "auth_symbols_json": "[]",
-                                }
-                            )
+                        else:
+                            cli_match = re.match(r"@\s*([\w.]+)\s*\.\s*(command|group)\b", dec)
+                            if cli_match and (
+                                cli_match.group(1) == "click"
+                                or _is_app_receiver(cli_match.group(1), tracked_receivers)
+                            ):
+                                entrypoints.append(
+                                    {
+                                        "kind": "cli",
+                                        "name": func_name,
+                                        "method": None,
+                                        "route_or_trigger": func_name,
+                                        "file_path": rel_path,
+                                        "line": func_line,
+                                        "symbol_fqname": func_fqname,
+                                        "auth_symbols_json": "[]",
+                                    }
+                                )
+                                if cli_match.group(2) == "group":
+                                    tracked_receivers.add(func_name)
 
             # 3b. if __name__ == "__main__":
             elif node.type == "if_statement":
@@ -724,7 +753,27 @@ class PythonPlugin(LanguagePlugin):
                             }
                         )
 
-            stack.extend(reversed(node.children))
+            # 4. Framework object bindings (``app = FastAPI()``) and nested scopes
+            elif node.type == "assignment":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if (
+                    left is not None
+                    and left.type == "identifier"
+                    and right is not None
+                    and right.type == "call"
+                ):
+                    factory = right.child_by_field_name("function")
+                    factory_text = _get_node_text(factory, source_bytes).strip() if factory else ""
+                    if factory_text in APP_FACTORY_CALLEES:
+                        tracked_receivers.add(_get_node_text(left, source_bytes))
+
+            elif node.type in ("function_definition", "class_definition"):
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    child_scope = f"{scope}.{_get_node_text(name_node, source_bytes)}"
+
+            stack.extend((child, child_scope) for child in reversed(node.children))
 
         # 3c. Argparse CLI detection
         if has_argparse:

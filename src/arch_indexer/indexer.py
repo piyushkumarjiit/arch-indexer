@@ -70,11 +70,11 @@ def run_index(
     modules_by_language: dict[str, set[str]] = {}
     symbols_by_language: dict[str, list[dict[str, Any]]] = {}
     files_by_language: dict[str, list[dict[str, Any]]] = {}
-    definitions_by_unit: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    definitions_by_unit: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
 
     for plugin, unit in all_units:
         file_recs, sym_recs = plugin.extract_definitions(unit)
-        definitions_by_unit[unit.unit_id] = (file_recs, sym_recs)
+        definitions_by_unit.append((file_recs, sym_recs))
         language_fqnames = fqnames_by_language.setdefault(plugin.name, set())
         language_modules = modules_by_language.setdefault(plugin.name, set())
         for f in file_recs:
@@ -129,13 +129,15 @@ def run_index(
     with IndexStore(cache_paths.index_db) as store:
         store.clear_all()
 
-        for (plugin, unit), tier1_res in zip(all_units, tier1_results, strict=True):
+        for idx, ((plugin, unit), tier1_res) in enumerate(
+            zip(all_units, tier1_results, strict=True)
+        ):
             if isinstance(tier1_res, FallbackSignal):
                 # Run Tier 2
                 res = plugin.index_unit_tier2(
                     unit,
                     symbol_context=symbol_context,
-                    definitions=definitions_by_unit.get(unit.unit_id),
+                    definitions=definitions_by_unit[idx],
                 )
             else:
                 res = tier1_res

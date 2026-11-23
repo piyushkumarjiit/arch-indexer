@@ -448,6 +448,28 @@ def test_unit_detection_ignores_excluded_names_above_repo(tmp_path: Path, capsys
     ]
 
 
+def test_colliding_unit_ids_keep_each_units_definitions(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    nested = repo / "root"
+    nested.mkdir(parents=True)
+    (nested / "tsconfig.json").write_text("{}")
+    (nested / "component.ts").write_text("export function component() { return 1; }\n")
+    (repo / "index.ts").write_text("export function main() { return 2; }\n")
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_DELTA_DETECTED
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT path FROM files ORDER BY path")
+    assert [row[0] for row in c.fetchall()] == ["index.ts", "root/component.ts"]
+    c.execute("SELECT name, COUNT(*) FROM symbols GROUP BY name ORDER BY name")
+    assert c.fetchall() == [("component", 1), ("main", 1)]
+    conn.close()
+
+
 def test_offline_strict_tier1_infra_only_repo_succeeds(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
     code = main(

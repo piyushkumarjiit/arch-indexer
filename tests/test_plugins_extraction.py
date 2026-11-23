@@ -801,12 +801,17 @@ def test_reused_definition_records_rebuild_import_map(tmp_path: Path):
     assert [u["raw_symbol"] for u in res_b.unresolved_refs] == ["utils"]
 
 
-def test_python_route_receivers_are_not_allowlisted(tmp_path: Path):
+def test_python_route_decorators_require_app_receivers(tmp_path: Path):
     res = _run_single_file(
         PythonPlugin(),
         tmp_path,
         "routes.py",
         b"""
+from unittest import mock
+from flask import Flask
+
+main = Flask(__name__)
+
 @users_router.get("/users")
 def list_users(): pass
 
@@ -815,6 +820,12 @@ def login(): pass
 
 @main.route("/")
 def index(): pass
+
+@mock.patch("os.path.exists")
+def test_a(m): pass
+
+@bot.command()
+def ping(): pass
 """,
     )
     http = {(e["name"], e["method"], e["route_or_trigger"]) for e in res.entrypoints}
@@ -823,6 +834,31 @@ def index(): pass
         ("login", "POST", "/login"),
         ("index", "GET", "/"),
     }
+    assert [e for e in res.entrypoints if e["kind"] == "cli"] == []
+
+
+def test_python_route_in_nested_scope_uses_enclosing_fqname(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "app.py",
+        b"""
+from flask import Flask
+
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.route("/hello")
+    def hello():
+        pass
+
+    return app
+""",
+    )
+    http = [e for e in res.entrypoints if e["kind"] == "http"]
+    assert [e["symbol_fqname"] for e in http] == ["app.create_app.hello"]
+    assert http[0]["symbol_fqname"] in {s["fqname"] for s in res.symbols}
 
 
 def test_python_click_subcommands_are_recorded(tmp_path: Path):
@@ -865,6 +901,27 @@ cache.get('/key', fallback);
     )
     http = {(e["method"], e["route_or_trigger"]) for e in res.entrypoints if e["kind"] == "http"}
     assert http == {("GET", "/users"), ("POST", "/items"), ("ALL", "/static")}
+
+
+def test_typescript_route_handler_is_last_argument_and_import_resolved(tmp_path: Path):
+    (tmp_path / "handlers.ts").write_text("export function listUsers() { return []; }\n")
+    (tmp_path / "server.ts").write_text(
+        "import express from 'express';\n"
+        "import { listUsers } from './handlers';\n"
+        "const app = express();\n"
+        "function requireAuth(req: any, res: any, next: any) { next(); }\n"
+        "app.get('/users', requireAuth, listUsers);\n"
+    )
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[tmp_path / "handlers.ts", tmp_path / "server.ts"],
+    )
+    res = TypeScriptPlugin().index_unit_tier2(unit)
+    http = [e for e in res.entrypoints if e["kind"] == "http"]
+    assert [(e["name"], e["symbol_fqname"]) for e in http] == [("listUsers", "handlers.listUsers")]
 
 
 def test_typescript_mixed_default_and_namespace_import(tmp_path: Path):
