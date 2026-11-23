@@ -2,10 +2,11 @@
 
 This is the single source of truth for the call targets that ``query flow-trace``
 marks as data stores or external sinks. A symbol matches a pattern when its
-lower-case fully-qualified name equals the pattern or ends with ``.<pattern>``,
-so ``db.session.execute`` matches ``session.execute``. Patterns are dotted
-``module.attribute`` paths (plus a few bare built-ins) and are intentionally
-specific: a wrong class is more harmful than an unlabelled edge.
+lower-case fully-qualified name equals the pattern or, for dotted patterns, ends
+with ``.<pattern>``, so ``db.session.execute`` matches ``session.execute``. A bare
+built-in pattern matches only the exact name, so builtin ``open`` matches but
+``PIL.Image.open`` does not. Patterns are intentionally specific: a wrong class
+is more harmful than an unlabelled edge.
 """
 
 from __future__ import annotations
@@ -26,8 +27,6 @@ DATA_STORE_CLIENT_SYMBOLS: tuple[str, ...] = (
     "session.flush",
     "session.add",
     "session.merge",
-    "session.get",
-    "session.delete",
     "cursor.execute",
     "cursor.executemany",
     "connection.execute",
@@ -127,9 +126,11 @@ EXTERNAL_SINK = "external-sink"
 
 
 def _matches(fqname: str, pattern: str) -> bool:
-    """True when fqname is exactly pattern or ends with ``.pattern`` (case-insensitive)."""
+    """True when fqname is exactly pattern or, for dotted patterns, ends with ``.pattern``."""
     lowered = fqname.lower()
     pattern = pattern.lower()
+    if "." not in pattern:
+        return lowered == pattern
     return lowered == pattern or lowered.endswith(f".{pattern}")
 
 

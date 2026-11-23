@@ -328,3 +328,260 @@ def test_query_output_is_deterministic(tmp_path: Path, capsys):
         first_code, first_out, _ = _query(capsys, str(repo), *command, "--cache-dir", str(cache))
         second_code, second_out, _ = _query(capsys, str(repo), *command, "--cache-dir", str(cache))
         assert (first_code, first_out) == (second_code, second_out)
+
+
+def _entrypoint_id(capsys, repo: Path, cache: Path, kind: str) -> int:
+    code, out, err = _query(capsys, str(repo), "entrypoints", "--json", "--cache-dir", str(cache))
+    assert code == EXIT_OK, err
+    matches = [e for e in _json(out)["entrypoints"] if e["kind"] == kind]
+    assert len(matches) == 1, matches
+    return matches[0]["id"]
+
+
+def test_flow_trace_expands_project_symbols_named_like_sinks(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from app.client import fetch
+
+app = FastAPI()
+
+
+@app.get("/data")
+def handler():
+    return fetch("/data")
+"""
+    )
+    (repo / "app" / "client.py").write_text(
+        """\
+import requests
+
+
+def fetch(url):
+    return _load(url)
+
+
+def _load(url):
+    return requests.get(url)
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:9 app.main.handler",
+        "1 app/main.py:10 app.main.handler -> app.client.fetch",
+        "2 app/client.py:5 app.client.fetch -> app.client._load",
+        "3 app/client.py:9 [external-sink] app.client._load -> requests.get",
+    ]
+
+
+def test_flow_trace_does_not_label_root_symbol_as_sink(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+import requests
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/ping")
+def fetch():
+    return requests.get("https://example.test")
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:8 app.main.fetch",
+        "1 app/main.py:9 [external-sink] app.main.fetch -> requests.get",
+    ]
+
+
+def test_flow_trace_bare_sink_patterns_match_only_exact_names(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+import tarfile
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/archive")
+def unpack():
+    tarfile.open("a.tar")
+    return open("b.txt")
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:9 app.main.unpack",
+        "1 app/main.py:10 app.main.unpack -> tarfile.open",
+        "1 app/main.py:11 [datastore] app.main.unpack -> open",
+    ]
+
+
+def test_flow_trace_does_not_label_ambiguous_session_calls_as_datastore(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "main.py").write_text(
+        """\
+import requests
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/session")
+def call():
+    session = requests.Session()
+    session.get("https://example.test")
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    entrypoint_id = _entrypoint_id(capsys, repo, cache, "http")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(entrypoint_id), "--cache-dir", str(cache)
+    )
+
+    assert code == EXIT_OK, err
+    assert out.strip().splitlines() == [
+        "0 app/main.py:8 app.main.call",
+        "1 app/main.py:9 app.main.call -> requests.Session",
+        "1 app/main.py:10 app.main.call -> session.get",
+    ]
+
+
+def test_flow_trace_errors_when_module_scope_entrypoint_has_no_symbol(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "cli.py").write_text(
+        """\
+def build_parser():
+    from argparse import ArgumentParser
+
+    return ArgumentParser()
+
+
+def run():
+    import requests
+
+    requests.get("https://example.test")
+
+
+if __name__ == "__main__":
+    build_parser().parse_args()
+    run()
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    cli_id = _entrypoint_id(capsys, repo, cache, "cli")
+    code, out, err = _query(capsys, str(repo), "flow-trace", str(cli_id), "--cache-dir", str(cache))
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "no traceable symbol" in err
+
+    main_id = _entrypoint_id(capsys, repo, cache, "main")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(main_id), "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "no traceable symbol" in err
+
+
+def test_flow_trace_errors_instead_of_rooting_at_a_later_symbol(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "script.py").write_text(
+        """\
+import requests
+
+
+def run():
+    requests.get("https://example.test")
+
+
+if __name__ == "__main__":
+    run()
+
+
+def later():
+    return None
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    main_id = _entrypoint_id(capsys, repo, cache, "main")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(main_id), "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "no traceable symbol" in err
+
+
+def test_flow_trace_errors_for_module_level_typescript_api_call(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "main.ts").write_text(
+        """\
+const payload = {};
+
+fetch("https://api.example.test/data", payload);
+
+export function unrelated(): number {
+  return 1;
+}
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    api_call_id = _entrypoint_id(capsys, repo, cache, "api_call")
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(api_call_id), "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "no traceable symbol" in err

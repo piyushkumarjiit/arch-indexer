@@ -23,6 +23,10 @@ DEFAULT_FLOW_DEPTH: int = 6
 
 _REQUIRED_TABLES = {"entrypoints", "files", "references", "symbols"}
 
+# Entrypoint kinds whose line marks file/module scope rather than a call site, so no
+# indexed symbol encloses them.
+_MODULE_SCOPE_ENTRYPOINT_KINDS = frozenset({"cli", "main"})
+
 _SYMBOL_COLUMNS = "fqname, name, kind, file_path, start_line, end_line, visibility"
 _SYMBOL_SELECT = f"SELECT {_SYMBOL_COLUMNS} FROM symbols"
 _SYMBOL_ORDER = " ORDER BY file_path, start_line, end_line, fqname"
@@ -291,6 +295,9 @@ def _resolve_root_symbol(
         if row is not None:
             return _symbol_dict(row)
 
+    if entrypoint["kind"] in _MODULE_SCOPE_ENTRYPOINT_KINDS:
+        return None
+
     row = conn.execute(
         f"""
         {_SYMBOL_SELECT}
@@ -300,18 +307,11 @@ def _resolve_root_symbol(
         """,
         (entrypoint["file_path"], entrypoint["line"], entrypoint["line"]),
     ).fetchone()
-    if row is not None:
-        return _symbol_dict(row)
-
-    row = conn.execute(
-        f"{_SYMBOL_SELECT} WHERE file_path = ? AND start_line >= ? "
-        "ORDER BY start_line, fqname LIMIT 1",
-        (entrypoint["file_path"], entrypoint["line"]),
-    ).fetchone()
     return _symbol_dict(row) if row is not None else None
 
 
 def _call_adjacency(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    defined = {row[0] for row in conn.execute("SELECT fqname FROM symbols")}
     adjacency: dict[str, list[dict[str, Any]]] = {}
     for row in conn.execute(_CALL_EDGE_SQL):
         caller = row["caller"]
@@ -323,7 +323,7 @@ def _call_adjacency(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]
                 "callee": callee,
                 "file": row["ref_file"],
                 "line": row["ref_line"],
-                "sink": classify_sink(callee),
+                "sink": None if callee in defined else classify_sink(callee),
             }
         )
     return adjacency
@@ -340,7 +340,7 @@ def flow_trace(
     if root is None:
         raise QueryError(
             f"entrypoint has no traceable symbol: {entrypoint_id} "
-            "(the index has no symbol covering that entrypoint)"
+            "(no indexed symbol defines or encloses that entrypoint)"
         )
 
     adjacency = _call_adjacency(conn)
@@ -351,7 +351,7 @@ def flow_trace(
             "callee": root["fqname"],
             "file": root["file_path"],
             "line": root["start_line"],
-            "sink": classify_sink(root["fqname"]),
+            "sink": None,
         }
     ]
     visited = {root["fqname"]}
