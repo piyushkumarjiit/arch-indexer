@@ -53,6 +53,10 @@ arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 
 The `query`, `plan`, and `assemble` commands are not implemented yet: they print an error and exit `1`.
 
+## Firstmate Integration
+
+For multi-worker automated execution, see the Firstmate skill definition at [`skills/arch-indexer/SKILL.md`](skills/arch-indexer/SKILL.md). It specifies the 4-step conflict-free parallel workflow: toolchain preparation, indexing and exit-code branching, bounded worker drafting in isolated branches, and deterministic single-worker assembly with citation and diagram validation.
+
 ## Status
 
 In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`) and Tier 2 `tree-sitter` indexing (`index`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands it specifies beyond these slices are not implemented yet.
