@@ -446,3 +446,40 @@ def test_unit_detection_ignores_excluded_names_above_repo(tmp_path: Path, capsys
         "typescript:svc",
         "typescript:web",
     ]
+
+
+def test_offline_strict_tier1_infra_only_repo_succeeds(tmp_path: Path, capsys):
+    cache = tmp_path / "cache"
+    code = main(
+        [
+            "index",
+            str(FIXTURES_DIR / "infra"),
+            "--offline",
+            "--strict-tier1",
+            "--cache-dir",
+            str(cache),
+        ]
+    )
+    assert code == EXIT_DELTA_DETECTED
+    assert "infra: 5 [tree-sitter]" in capsys.readouterr().out
+
+
+def test_offline_strict_tier1_failure_keeps_existing_index(tmp_path: Path, capsys):
+    cache = tmp_path / "cache"
+    repo = FIXTURES_DIR / "python"
+
+    assert main(["index", str(repo), "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    before = conn.execute("SELECT path, sha256 FROM files ORDER BY path").fetchall()
+    conn.close()
+    assert before
+
+    code = main(["index", str(repo), "--offline", "--strict-tier1", "--cache-dir", str(cache)])
+    assert code == EXIT_TOOLCHAIN_MISSING
+    capsys.readouterr()
+
+    conn = sqlite3.connect(db_path)
+    after = conn.execute("SELECT path, sha256 FROM files ORDER BY path").fetchall()
+    conn.close()
+    assert after == before

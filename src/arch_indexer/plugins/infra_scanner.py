@@ -28,6 +28,10 @@ class InfraScanner(LanguagePlugin):
     def name(self) -> str:
         return "infra"
 
+    @property
+    def has_tier1_indexer(self) -> bool:
+        return False
+
     def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover infrastructure files in target repository."""
         repo_path = repo.resolve()

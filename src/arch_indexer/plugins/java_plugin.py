@@ -36,6 +36,26 @@ def _annotation_path(annotation_args: str) -> str:
     return bare_match.group(1) if bare_match else ""
 
 
+def _annotation_methods(annotation_args: str) -> list[str]:
+    """Read every RequestMethod in a Spring ``method`` attribute, bare or qualified."""
+    without_literals = re.sub(r"\"[^\"]*\"|'[^']*'", '""', annotation_args)
+    attr_match = re.search(
+        r"\bmethod\s*=\s*\{([^}]*)\}|\bmethod\s*=\s*([A-Za-z_.]+)", without_literals
+    )
+    if not attr_match:
+        return []
+    value = attr_match.group(1) or attr_match.group(2)
+    return re.findall(r"(?:RequestMethod\.)?\b([A-Z]+)\b", value)
+
+
+DECLARATION_KINDS = {
+    "class_declaration": "class",
+    "interface_declaration": "interface",
+    "record_declaration": "record",
+    "enum_declaration": "enum",
+}
+
+
 def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str, list[str]]:
     """Extract visibility and annotations from Java modifiers node."""
     visibility = "package"
@@ -210,27 +230,20 @@ class JavaPlugin(LanguagePlugin):
         symbols: list[dict[str, Any]],
     ) -> None:
         """Collect classes, interfaces, records, enums, and methods in Java AST."""
-        for child in node.children:
-            if child.type in (
-                "class_declaration",
-                "interface_declaration",
-                "record_declaration",
-                "enum_declaration",
-            ):
-                name_node = child.child_by_field_name("name")
-                if name_node:
+        stack: list[tuple[Node, str]] = [(node, scope)]
+        while stack:
+            current, scope = stack.pop()
+            for child in current.children:
+                if child.type in DECLARATION_KINDS:
+                    name_node = child.child_by_field_name("name")
+                    if not name_node:
+                        continue
                     name = _get_node_text(name_node, source_bytes)
                     fqname = f"{scope}.{name}" if scope else name
-                    kind_map = {
-                        "class_declaration": "class",
-                        "interface_declaration": "interface",
-                        "record_declaration": "record",
-                        "enum_declaration": "enum",
-                    }
-                    kind = kind_map[child.type]
-                    body_node = child.child_by_field_name("body") or child
+                    body_node = child.child_by_field_name("body")
+                    hashed_node = body_node or child
                     body_hash = hashlib.sha256(
-                        source_bytes[body_node.start_byte : body_node.end_byte]
+                        source_bytes[hashed_node.start_byte : hashed_node.end_byte]
                     ).hexdigest()
                     visibility, annotations = _get_modifiers_and_annotations(child, source_bytes)
 
@@ -238,7 +251,7 @@ class JavaPlugin(LanguagePlugin):
                         {
                             "fqname": fqname,
                             "name": name,
-                            "kind": kind,
+                            "kind": DECLARATION_KINDS[child.type],
                             "file_path": rel_path,
                             "start_line": child.start_point[0] + 1,
                             "end_line": child.end_point[0] + 1,
@@ -247,14 +260,13 @@ class JavaPlugin(LanguagePlugin):
                             "decorators_json": json.dumps(annotations),
                         }
                     )
-                    if body_node:
-                        self._collect_definitions(
-                            body_node, source_bytes, rel_path, fqname, symbols
-                        )
+                    if body_node is not None:
+                        stack.append((body_node, fqname))
 
-            elif child.type in ("method_declaration", "constructor_declaration"):
-                name_node = child.child_by_field_name("name")
-                if name_node:
+                elif child.type in ("method_declaration", "constructor_declaration"):
+                    name_node = child.child_by_field_name("name")
+                    if not name_node:
+                        continue
                     name = _get_node_text(name_node, source_bytes)
                     fqname = f"{scope}.{name}" if scope else name
                     body_node = child.child_by_field_name("body") or child
@@ -277,8 +289,14 @@ class JavaPlugin(LanguagePlugin):
                         }
                     )
 
-            elif child.type in ("program", "class_body", "interface_body"):
-                self._collect_definitions(child, source_bytes, rel_path, scope, symbols)
+                elif child.type in (
+                    "program",
+                    "class_body",
+                    "interface_body",
+                    "enum_body",
+                    "enum_body_declarations",
+                ):
+                    stack.append((child, scope))
 
     def index_unit_tier2(
         self,
@@ -370,25 +388,25 @@ class JavaPlugin(LanguagePlugin):
         class_base_path = ""
 
         # Find class-level @RequestMapping path if present
-        def find_class_base_path(n: Node) -> None:
-            nonlocal class_base_path
-            for c in n.children:
-                if c.type == "class_declaration":
-                    _, annotations = _get_modifiers_and_annotations(c, source_bytes)
-                    for ann in annotations:
-                        ann_match = re.search(
-                            r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
-                        )
-                        if ann_match:
-                            path = _annotation_path(ann_match.group(1) or "")
-                            if path:
-                                class_base_path = path.rstrip("/")
-                find_class_base_path(c)
+        base_path_stack: list[Node] = [root]
+        while base_path_stack:
+            n = base_path_stack.pop()
+            if n.type in DECLARATION_KINDS:
+                _, annotations = _get_modifiers_and_annotations(n, source_bytes)
+                for ann in annotations:
+                    ann_match = re.search(
+                        r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
+                    )
+                    if ann_match:
+                        path = _annotation_path(ann_match.group(1) or "")
+                        if path:
+                            class_base_path = path.rstrip("/")
+            base_path_stack.extend(reversed(n.children))
 
-        find_class_base_path(root)
-
-        def walk(node: Node, current_class: str = "") -> None:
-            nonlocal class_base_path
+        walk_stack: list[tuple[Node, str]] = [(root, "")]
+        while walk_stack:
+            node, current_class = walk_stack.pop()
+            child_class = current_class
 
             # 1. Imports
             if node.type == "import_declaration":
@@ -420,13 +438,11 @@ class JavaPlugin(LanguagePlugin):
                             )
 
             # 2. Class tracking
-            elif node.type == "class_declaration":
+            elif node.type in DECLARATION_KINDS:
                 name_node = node.child_by_field_name("name")
                 c_name = _get_node_text(name_node, source_bytes) if name_node else ""
-                c_fq = f"{pkg_name}.{c_name}" if pkg_name else c_name
-                for child in node.children:
-                    walk(child, current_class=c_fq)
-                return
+                prefix = current_class or pkg_name
+                child_class = f"{prefix}.{c_name}" if prefix else c_name
 
             # 3. Method Calls
             elif node.type == "method_invocation":
@@ -485,11 +501,11 @@ class JavaPlugin(LanguagePlugin):
                             "DeleteMapping": "DELETE",
                             "PatchMapping": "PATCH",
                         }
-                        http_method = method_map.get(ann_type, "GET")
+                        http_method = method_map.get(ann_type, "ALL")
                         if ann_type == "RequestMapping":
-                            req_m = re.search(r"method\s*=\s*RequestMethod\.([A-Z]+)", ann_args)
-                            if req_m:
-                                http_method = req_m.group(1)
+                            declared_methods = _annotation_methods(ann_args)
+                            if declared_methods:
+                                http_method = ",".join(declared_methods)
 
                         # Extract route path
                         route_path = _annotation_path(ann_args)
@@ -521,7 +537,4 @@ class JavaPlugin(LanguagePlugin):
                             }
                         )
 
-            for child in node.children:
-                walk(child, current_class=current_class)
-
-        walk(root)
+            walk_stack.extend((child, child_class) for child in reversed(node.children))

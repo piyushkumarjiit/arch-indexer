@@ -589,3 +589,213 @@ def test_infra_scanner_extraction():
     # Verify shell script
     sh = json.loads(artifacts_by_kind["shell"][0]["summary_json"])
     assert sh["shebang"] == "#!/bin/sh"
+
+
+def _run_single_file(plugin, tmp_path: Path, filename: str, code: bytes):
+    (tmp_path / filename).write_bytes(code)
+    unit = IndexUnit(
+        unit_id=f"{plugin.name}:root",
+        name="root",
+        language=plugin.name,
+        root_dir=tmp_path,
+        files=[tmp_path / filename],
+    )
+    return plugin.index_unit_tier2(unit)
+
+
+def test_java_request_mapping_methods(tmp_path: Path):
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "Controller.java",
+        b"""
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+import static org.springframework.web.bind.annotation.RequestMethod.POST;
+
+@RestController
+@RequestMapping("/api")
+public class Controller {
+    @RequestMapping("/all")
+    public void allMethods() {}
+
+    @RequestMapping(value = "/multi", method = {RequestMethod.POST, RequestMethod.PUT})
+    public void multiMethods() {}
+
+    @RequestMapping(value = "/single", method = RequestMethod.PATCH)
+    public void singleMethod() {}
+
+    @RequestMapping(value = "/static", method = POST)
+    public void staticImportMethod() {}
+}
+""",
+    )
+    methods = {e["name"]: e["method"] for e in res.entrypoints if e["kind"] == "http"}
+    assert methods == {
+        "allMethods": "ALL",
+        "multiMethods": "POST,PUT",
+        "singleMethod": "PATCH",
+        "staticImportMethod": "POST",
+    }
+
+
+def test_python_route_methods_accept_lowercase_and_tuple_forms(tmp_path: Path):
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "app.py",
+        b"""
+@app.route("/lower", methods=['post'])
+def lower(): pass
+
+@app.route("/tuple", methods=("GET", "POST"))
+def as_tuple(): pass
+
+@app.route("/plain")
+def plain(): pass
+""",
+    )
+    methods = {e["name"]: e["method"] for e in res.entrypoints if e["kind"] == "http"}
+    assert methods == {"lower": "POST", "as_tuple": "GET,POST", "plain": "GET"}
+
+
+def test_typescript_only_global_fetch_records_api_calls(tmp_path: Path):
+    res = _run_single_file(
+        TypeScriptPlugin(),
+        tmp_path,
+        "client.ts",
+        b"""
+cache.fetch('user:1');
+this.repo.fetch(id);
+remote.fetch('/api/fake');
+fetch('/api/a');
+window.fetch('/api/b');
+globalThis.fetch('/api/c');
+self.fetch('/api/d');
+""",
+    )
+    api_routes = [e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "api_call"]
+    assert sorted(api_routes) == ["/api/a", "/api/b", "/api/c", "/api/d"]
+
+
+def test_typescript_namespace_import_alias_and_side_effect_import(tmp_path: Path):
+    (tmp_path / "utils.ts").write_text("export function helper() { return 1; }\n")
+    (tmp_path / "setup.ts").write_text("export function setup() { return true; }\n")
+    (tmp_path / "main.ts").write_text(
+        "import * as u from './utils';\n"
+        "import './setup';\n"
+        "export function run() { u.helper(); setup(); }\n"
+    )
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[tmp_path / "utils.ts", tmp_path / "setup.ts", tmp_path / "main.ts"],
+    )
+    res = TypeScriptPlugin().index_unit_tier2(unit)
+    calls = {r["symbol_fqname"] for r in res.references if r["ref_kind"] == "call"}
+    assert calls == {"utils.helper", "setup.setup"}
+
+
+def test_java_nested_type_references_match_symbol_fqnames(tmp_path: Path):
+    res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "Outer.java",
+        b"""
+package com.example;
+
+class Outer {
+    static class Builder {
+        Outer build() { validate(); return null; }
+        void validate() {}
+    }
+}
+
+enum Color { RED; void paint() {} }
+
+interface Api { void handle(); }
+
+record Point(int x) { int norm() { return 0; } }
+""",
+    )
+    symbol_fqnames = {s["fqname"] for s in res.symbols}
+    assert {
+        "com.example.Outer.Builder.validate",
+        "com.example.Color.paint",
+        "com.example.Api.handle",
+        "com.example.Point.norm",
+    } <= symbol_fqnames
+    calls = {r["symbol_fqname"] for r in res.references if r["ref_kind"] == "call"}
+    assert calls == {"com.example.Outer.Builder.validate"}
+    assert calls <= symbol_fqnames
+
+
+def test_deeply_nested_sources_do_not_abort_indexing(tmp_path: Path):
+    terms = " + ".join(['"a"'] * 1500)
+    ts_res = _run_single_file(
+        TypeScriptPlugin(),
+        tmp_path,
+        "deep.ts",
+        f"export const value = {terms};\nexport function after() {{ return 1; }}\n".encode(),
+    )
+    assert [s["name"] for s in ts_res.symbols] == ["after"]
+
+    py_res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "deep.py",
+        f"value = {' + '.join(['1'] * 1500)}\n\ndef after():\n    return 1\n".encode(),
+    )
+    assert [s["name"] for s in py_res.symbols] == ["after"]
+
+    java_terms = " + ".join(["1"] * 1500)
+    java_res = _run_single_file(
+        JavaPlugin(),
+        tmp_path,
+        "Deep.java",
+        f"class Deep {{\n    int value = {java_terms};\n    void after() {{}}\n}}\n".encode(),
+    )
+    assert [s["name"] for s in java_res.symbols] == ["Deep", "after"]
+
+
+def test_reused_definition_records_rebuild_import_map(tmp_path: Path):
+    project = tmp_path / "a"
+    nested = tmp_path / "b"
+    for root, with_marker in ((project, True), (nested, False)):
+        svc = root / "svc"
+        svc.mkdir(parents=True)
+        (svc / "utils.py").write_text("def helper():\n    return 1\n")
+        (svc / "app.py").write_text("import utils\n\ndef run():\n    return utils\n")
+        if with_marker:
+            (svc / "pyproject.toml").write_text("[project]\nname = 'svc'\n")
+
+    plugin = PythonPlugin()
+    unit_a = IndexUnit(
+        unit_id="python:a",
+        name="a",
+        language="python",
+        root_dir=project,
+        files=[project / "svc" / "utils.py", project / "svc" / "app.py"],
+    )
+    unit_b = IndexUnit(
+        unit_id="python:b",
+        name="b",
+        language="python",
+        root_dir=nested,
+        files=[nested / "svc" / "utils.py", nested / "svc" / "app.py"],
+    )
+    defs_a = plugin.extract_definitions(unit_a)
+    defs_b = plugin.extract_definitions(unit_b)
+
+    res_a = plugin.index_unit_tier2(unit_a, definitions=defs_a)
+    a_imports = {r["symbol_fqname"] for r in res_a.references if r["ref_kind"] == "import"}
+    assert a_imports == {"svc.utils"}
+
+    defs_a[0][:] = defs_b[0]
+    res_b = plugin.index_unit_tier2(unit_b, definitions=(defs_a[0], defs_b[1]))
+    b_imports = {r["symbol_fqname"] for r in res_b.references if r["ref_kind"] == "import"}
+    assert b_imports == set()
+    assert [u["raw_symbol"] for u in res_b.unresolved_refs] == ["utils"]

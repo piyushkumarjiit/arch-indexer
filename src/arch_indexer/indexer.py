@@ -104,29 +104,33 @@ def run_index(
         "file_records": files_by_language,
     }
 
-    # Phase 2: Index each unit and stream to SQLite
+    limits = {
+        "node_max_heap_mb": node_max_heap_mb,
+        "jvm_max_heap_mb": jvm_max_heap_mb,
+        "unit_timeout_sec": unit_timeout_sec,
+    }
+
+    # Phase 2a: Resolve Tier 1 for every unit before the store is touched, so a
+    # strict-tier1 failure leaves any existing index.db intact.
+    tier1_results = [plugin.index_unit_tier1(unit, limits) for plugin, unit in all_units]
+
+    # Spec 7.2: exit 4 only for --offline with --strict-tier1, and only when a
+    # required Tier 1 indexer is missing (plugins without one, e.g. infra, never fail).
+    if offline and strict_tier1:
+        for (plugin, unit), tier1_res in zip(all_units, tier1_results, strict=True):
+            if isinstance(tier1_res, FallbackSignal) and plugin.has_tier1_indexer:
+                sys.stderr.write(
+                    f"Error: Tier 1 indexer unavailable for unit {unit.unit_id} "
+                    f"({tier1_res.reason}) and --offline --strict-tier1 was requested\n"
+                )
+                return EXIT_TOOLCHAIN_MISSING
+
+    # Phase 2b: Index each unit and stream to SQLite
     with IndexStore(cache_paths.index_db) as store:
         store.clear_all()
 
-        limits = {
-            "node_max_heap_mb": node_max_heap_mb,
-            "jvm_max_heap_mb": jvm_max_heap_mb,
-            "unit_timeout_sec": unit_timeout_sec,
-        }
-
-        for plugin, unit in all_units:
-            # 1. Attempt Tier 1
-            tier1_res = plugin.index_unit_tier1(unit, limits)
-
-            # 2. Check for fallback
+        for (plugin, unit), tier1_res in zip(all_units, tier1_results, strict=True):
             if isinstance(tier1_res, FallbackSignal):
-                # Spec 7.2: exit 4 only for --offline with --strict-tier1.
-                if offline and strict_tier1:
-                    sys.stderr.write(
-                        f"Error: Tier 1 indexer unavailable for unit {unit.unit_id} "
-                        f"({tier1_res.reason}) and --offline --strict-tier1 was requested\n"
-                    )
-                    return EXIT_TOOLCHAIN_MISSING
                 # Run Tier 2
                 res = plugin.index_unit_tier2(
                     unit,

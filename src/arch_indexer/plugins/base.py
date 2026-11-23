@@ -107,6 +107,11 @@ class LanguagePlugin(abc.ABC):
         """Name of the language plugin (e.g. 'python', 'typescript', 'java', 'infra')."""
         raise NotImplementedError
 
+    @property
+    def has_tier1_indexer(self) -> bool:
+        """Whether a Tier 1 (SCIP) indexer exists for this language per spec section 4.2."""
+        return True
+
     @abc.abstractmethod
     def detect(self, repo: Path, chunk_files: int = DEFAULT_CHUNK_FILES) -> list[IndexUnit]:
         """Discover logical units in the target repository."""

@@ -51,12 +51,13 @@ def _source_root_parts(
     parts = [part for part in Path(rel_path).parts if part]
     for i in range(len(parts) - 1, -1, -1):
         dir_parts = tuple(parts[:i])
-        is_root = cache.get(dir_parts) if cache is not None else None
+        cache_key = (str(repo_root), *dir_parts)
+        is_root = cache.get(cache_key) if cache is not None else None
         if is_root is None:
             dir_path = repo_root.joinpath(*dir_parts) if dir_parts else repo_root
             is_root = any((dir_path / marker).is_file() for marker in PROJECT_MARKERS)
             if cache is not None:
-                cache[dir_parts] = is_root
+                cache[cache_key] = is_root
         if is_root:
             return list(dir_parts)
     return []
@@ -180,15 +181,6 @@ class PythonPlugin(LanguagePlugin):
         self.language = Language(tspython.language())
         self.parser = Parser(self.language)
         self._root_cache: dict[tuple[str, ...], bool] = {}
-        self._import_map_key: tuple[int, int] | None = None
-        self._import_map: _ImportMap | None = None
-
-    def _get_import_map(self, repo_root: Path, file_records: list[dict[str, Any]]) -> _ImportMap:
-        key = (id(file_records), len(file_records))
-        if self._import_map is None or self._import_map_key != key:
-            self._import_map = _ImportMap.build(repo_root, file_records, self._root_cache)
-            self._import_map_key = key
-        return self._import_map
 
     @property
     def name(self) -> str:
@@ -313,14 +305,19 @@ class PythonPlugin(LanguagePlugin):
         symbols: list[dict[str, Any]],
         in_class: bool = False,
     ) -> None:
-        """Recursively collect classes, functions, and methods."""
-        for child in node.children:
-            if child.type == "class_definition":
-                name_node = child.child_by_field_name("name")
-                if name_node:
+        """Iteratively collect classes, functions, and methods."""
+        stack: list[tuple[Node, str, bool]] = [(node, scope, in_class)]
+        while stack:
+            current, scope, in_class = stack.pop()
+            for child in current.children:
+                if child.type == "class_definition":
+                    name_node = child.child_by_field_name("name")
+                    if not name_node:
+                        continue
                     name = _get_node_text(name_node, source_bytes)
                     fqname = f"{scope}.{name}" if scope else name
-                    body_node = child.child_by_field_name("body") or child
+                    body = child.child_by_field_name("body")
+                    body_node = body or child
                     body_hash = hashlib.sha256(
                         source_bytes[body_node.start_byte : body_node.end_byte]
                     ).hexdigest()
@@ -346,18 +343,18 @@ class PythonPlugin(LanguagePlugin):
                         }
                     )
                     # Traverse class body for methods
-                    if body_node:
-                        self._collect_definitions(
-                            body_node, source_bytes, rel_path, fqname, symbols, in_class=True
-                        )
+                    if body is not None:
+                        stack.append((body, fqname, True))
 
-            elif child.type == "function_definition":
-                name_node = child.child_by_field_name("name")
-                if name_node:
+                elif child.type == "function_definition":
+                    name_node = child.child_by_field_name("name")
+                    if not name_node:
+                        continue
                     name = _get_node_text(name_node, source_bytes)
                     fqname = f"{scope}.{name}" if scope else name
                     kind = "method" if in_class else "function"
-                    body_node = child.child_by_field_name("body") or child
+                    body = child.child_by_field_name("body")
+                    body_node = body or child
                     body_hash = hashlib.sha256(
                         source_bytes[body_node.start_byte : body_node.end_byte]
                     ).hexdigest()
@@ -382,15 +379,11 @@ class PythonPlugin(LanguagePlugin):
                             "decorators_json": json.dumps(decorators),
                         }
                     )
-                    if body_node:
-                        self._collect_definitions(
-                            body_node, source_bytes, rel_path, fqname, symbols, in_class=False
-                        )
+                    if body is not None:
+                        stack.append((body, fqname, False))
 
-            elif child.type in ("decorated_definition", "block", "module"):
-                self._collect_definitions(
-                    child, source_bytes, rel_path, scope, symbols, in_class=in_class
-                )
+                elif child.type in ("decorated_definition", "block", "module"):
+                    stack.append((child, scope, in_class))
 
     def index_unit_tier2(
         self,
@@ -422,7 +415,7 @@ class PythonPlugin(LanguagePlugin):
             for f in file_records:
                 known_modules.update(module_with_parents(f["module"]))
 
-        import_map = self._get_import_map(repo_root, all_file_records)
+        import_map = _ImportMap.build(repo_root, all_file_records, self._root_cache)
 
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
@@ -520,8 +513,9 @@ class PythonPlugin(LanguagePlugin):
                     }
                 )
 
-        def walk(node: Node) -> None:
-            nonlocal has_argparse
+        stack: list[Node] = [root]
+        while stack:
+            node = stack.pop()
 
             # 1. Imports
             if node.type == "import_statement":
@@ -655,16 +649,19 @@ class PythonPlugin(LanguagePlugin):
                             # Extract path
                             path_match = re.search(r"['\"]([^'\"]+)['\"]", args_str)
                             route_path = path_match.group(1) if path_match else "/"
-                            # Check methods=['GET', 'POST'] if .route
+                            # Check methods=['GET', 'POST'] (or the tuple form) if .route
                             if method_name in ("ROUTE", "API_ROUTE"):
-                                methods_match = re.search(r"methods\s*=\s*\[([^\]]+)\]", args_str)
-                                if methods_match:
-                                    method_name = re.findall(
-                                        r"['\"]([A-Z]+)['\"]", methods_match.group(1)
+                                methods_match = re.search(
+                                    r"methods\s*=\s*[\[(]([^\])}]*)[\])]?", args_str
+                                )
+                                declared_methods = [
+                                    m.upper()
+                                    for m in re.findall(
+                                        r"['\"]([A-Za-z]+)['\"]",
+                                        methods_match.group(1) if methods_match else "",
                                     )
-                                    method_name = ",".join(method_name) if method_name else "GET"
-                                else:
-                                    method_name = "GET"
+                                ]
+                                method_name = ",".join(declared_methods) or "GET"
 
                             # Extract auth symbols
                             # Auth comes from the signature only, never the body.
@@ -724,10 +721,7 @@ class PythonPlugin(LanguagePlugin):
                             }
                         )
 
-            for child in node.children:
-                walk(child)
-
-        walk(root)
+            stack.extend(reversed(node.children))
 
         # 3c. Argparse CLI detection
         if has_argparse:

@@ -23,6 +23,9 @@ from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, get_repo_files
 
 TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
+# Only the global fetch callees are HTTP calls; other ``*.fetch`` methods are unrelated.
+GLOBAL_FETCH_CALLEES = ("fetch", "window.fetch", "globalThis.fetch", "self.fetch")
+
 
 def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
@@ -281,149 +284,147 @@ class TypeScriptPlugin(LanguagePlugin):
         symbols: list[dict[str, Any]],
         is_exported: bool = False,
     ) -> None:
-        """Collect classes, interfaces, methods, and functions in TS AST."""
-        for child in node.children:
-            if child.type == "export_statement":
-                self._collect_definitions(
-                    child, source_bytes, rel_path, scope, symbols, is_exported=True
-                )
+        """Iteratively collect classes, interfaces, methods, and functions in TS AST."""
+        stack: list[tuple[Node, str, bool]] = [(node, scope, is_exported)]
+        while stack:
+            current, scope, is_exported = stack.pop()
+            for child in current.children:
+                if child.type == "export_statement":
+                    stack.append((child, scope, True))
 
-            elif child.type == "class_declaration":
-                name_node = child.child_by_field_name("name")
-                if name_node:
-                    name = _get_node_text(name_node, source_bytes)
-                    fqname = f"{scope}.{name}" if scope else name
-                    body_node = child.child_by_field_name("body") or child
-                    body_hash = hashlib.sha256(
-                        source_bytes[body_node.start_byte : body_node.end_byte]
-                    ).hexdigest()
-                    visibility = "public" if is_exported else "package"
-                    symbols.append(
-                        {
-                            "fqname": fqname,
-                            "name": name,
-                            "kind": "class",
-                            "file_path": rel_path,
-                            "start_line": child.start_point[0] + 1,
-                            "end_line": child.end_point[0] + 1,
-                            "body_sha256": body_hash,
-                            "visibility": visibility,
-                            "decorators_json": "[]",
-                        }
-                    )
-                    if body_node:
-                        self._collect_definitions(
-                            body_node, source_bytes, rel_path, fqname, symbols
+                elif child.type == "class_declaration":
+                    name_node = child.child_by_field_name("name")
+                    if name_node:
+                        name = _get_node_text(name_node, source_bytes)
+                        fqname = f"{scope}.{name}" if scope else name
+                        body = child.child_by_field_name("body")
+                        body_node = body or child
+                        body_hash = hashlib.sha256(
+                            source_bytes[body_node.start_byte : body_node.end_byte]
+                        ).hexdigest()
+                        visibility = "public" if is_exported else "package"
+                        symbols.append(
+                            {
+                                "fqname": fqname,
+                                "name": name,
+                                "kind": "class",
+                                "file_path": rel_path,
+                                "start_line": child.start_point[0] + 1,
+                                "end_line": child.end_point[0] + 1,
+                                "body_sha256": body_hash,
+                                "visibility": visibility,
+                                "decorators_json": "[]",
+                            }
+                        )
+                        if body is not None:
+                            stack.append((body, fqname, False))
+
+                elif child.type == "interface_declaration":
+                    name_node = child.child_by_field_name("name")
+                    if name_node:
+                        name = _get_node_text(name_node, source_bytes)
+                        fqname = f"{scope}.{name}" if scope else name
+                        body_node = child.child_by_field_name("body") or child
+                        body_hash = hashlib.sha256(
+                            source_bytes[body_node.start_byte : body_node.end_byte]
+                        ).hexdigest()
+                        symbols.append(
+                            {
+                                "fqname": fqname,
+                                "name": name,
+                                "kind": "interface",
+                                "file_path": rel_path,
+                                "start_line": child.start_point[0] + 1,
+                                "end_line": child.end_point[0] + 1,
+                                "body_sha256": body_hash,
+                                "visibility": "public" if is_exported else "package",
+                                "decorators_json": "[]",
+                            }
                         )
 
-            elif child.type == "interface_declaration":
-                name_node = child.child_by_field_name("name")
-                if name_node:
-                    name = _get_node_text(name_node, source_bytes)
-                    fqname = f"{scope}.{name}" if scope else name
-                    body_node = child.child_by_field_name("body") or child
-                    body_hash = hashlib.sha256(
-                        source_bytes[body_node.start_byte : body_node.end_byte]
-                    ).hexdigest()
-                    symbols.append(
-                        {
-                            "fqname": fqname,
-                            "name": name,
-                            "kind": "interface",
-                            "file_path": rel_path,
-                            "start_line": child.start_point[0] + 1,
-                            "end_line": child.end_point[0] + 1,
-                            "body_sha256": body_hash,
-                            "visibility": "public" if is_exported else "package",
-                            "decorators_json": "[]",
-                        }
-                    )
+                elif child.type in ("function_declaration", "generator_function_declaration"):
+                    name_node = child.child_by_field_name("name")
+                    if name_node:
+                        name = _get_node_text(name_node, source_bytes)
+                        fqname = f"{scope}.{name}" if scope else name
+                        body_node = child.child_by_field_name("body") or child
+                        body_hash = hashlib.sha256(
+                            source_bytes[body_node.start_byte : body_node.end_byte]
+                        ).hexdigest()
+                        symbols.append(
+                            {
+                                "fqname": fqname,
+                                "name": name,
+                                "kind": "function",
+                                "file_path": rel_path,
+                                "start_line": child.start_point[0] + 1,
+                                "end_line": child.end_point[0] + 1,
+                                "body_sha256": body_hash,
+                                "visibility": "public" if is_exported else "package",
+                                "decorators_json": "[]",
+                            }
+                        )
 
-            elif child.type in ("function_declaration", "generator_function_declaration"):
-                name_node = child.child_by_field_name("name")
-                if name_node:
-                    name = _get_node_text(name_node, source_bytes)
-                    fqname = f"{scope}.{name}" if scope else name
-                    body_node = child.child_by_field_name("body") or child
-                    body_hash = hashlib.sha256(
-                        source_bytes[body_node.start_byte : body_node.end_byte]
-                    ).hexdigest()
-                    symbols.append(
-                        {
-                            "fqname": fqname,
-                            "name": name,
-                            "kind": "function",
-                            "file_path": rel_path,
-                            "start_line": child.start_point[0] + 1,
-                            "end_line": child.end_point[0] + 1,
-                            "body_sha256": body_hash,
-                            "visibility": "public" if is_exported else "package",
-                            "decorators_json": "[]",
-                        }
-                    )
+                elif child.type == "method_definition":
+                    name_node = child.child_by_field_name("name")
+                    if name_node:
+                        name = _get_node_text(name_node, source_bytes)
+                        fqname = f"{scope}.{name}" if scope else name
+                        body_node = child.child_by_field_name("body") or child
+                        body_hash = hashlib.sha256(
+                            source_bytes[body_node.start_byte : body_node.end_byte]
+                        ).hexdigest()
+                        visibility = "private" if name.startswith("#") else "public"
+                        symbols.append(
+                            {
+                                "fqname": fqname,
+                                "name": name,
+                                "kind": "method",
+                                "file_path": rel_path,
+                                "start_line": child.start_point[0] + 1,
+                                "end_line": child.end_point[0] + 1,
+                                "body_sha256": body_hash,
+                                "visibility": visibility,
+                                "decorators_json": "[]",
+                            }
+                        )
 
-            elif child.type == "method_definition":
-                name_node = child.child_by_field_name("name")
-                if name_node:
-                    name = _get_node_text(name_node, source_bytes)
-                    fqname = f"{scope}.{name}" if scope else name
-                    body_node = child.child_by_field_name("body") or child
-                    body_hash = hashlib.sha256(
-                        source_bytes[body_node.start_byte : body_node.end_byte]
-                    ).hexdigest()
-                    visibility = "private" if name.startswith("#") else "public"
-                    symbols.append(
-                        {
-                            "fqname": fqname,
-                            "name": name,
-                            "kind": "method",
-                            "file_path": rel_path,
-                            "start_line": child.start_point[0] + 1,
-                            "end_line": child.end_point[0] + 1,
-                            "body_sha256": body_hash,
-                            "visibility": visibility,
-                            "decorators_json": "[]",
-                        }
-                    )
+                elif child.type in ("lexical_declaration", "variable_declaration"):
+                    # Handle `export const foo = () => ...`
+                    for decl in child.children:
+                        if decl.type == "variable_declarator":
+                            name_node = decl.child_by_field_name("name")
+                            val_node = decl.child_by_field_name("value")
+                            if (
+                                name_node
+                                and val_node
+                                and val_node.type
+                                in (
+                                    "arrow_function",
+                                    "function_expression",
+                                )
+                            ):
+                                name = _get_node_text(name_node, source_bytes)
+                                fqname = f"{scope}.{name}" if scope else name
+                                body_hash = hashlib.sha256(
+                                    source_bytes[val_node.start_byte : val_node.end_byte]
+                                ).hexdigest()
+                                symbols.append(
+                                    {
+                                        "fqname": fqname,
+                                        "name": name,
+                                        "kind": "function",
+                                        "file_path": rel_path,
+                                        "start_line": decl.start_point[0] + 1,
+                                        "end_line": decl.end_point[0] + 1,
+                                        "body_sha256": body_hash,
+                                        "visibility": "public" if is_exported else "package",
+                                        "decorators_json": "[]",
+                                    }
+                                )
 
-            elif child.type in ("lexical_declaration", "variable_declaration"):
-                # Handle `export const foo = () => ...`
-                for decl in child.children:
-                    if decl.type == "variable_declarator":
-                        name_node = decl.child_by_field_name("name")
-                        val_node = decl.child_by_field_name("value")
-                        if (
-                            name_node
-                            and val_node
-                            and val_node.type
-                            in (
-                                "arrow_function",
-                                "function_expression",
-                            )
-                        ):
-                            name = _get_node_text(name_node, source_bytes)
-                            fqname = f"{scope}.{name}" if scope else name
-                            body_hash = hashlib.sha256(
-                                source_bytes[val_node.start_byte : val_node.end_byte]
-                            ).hexdigest()
-                            symbols.append(
-                                {
-                                    "fqname": fqname,
-                                    "name": name,
-                                    "kind": "function",
-                                    "file_path": rel_path,
-                                    "start_line": decl.start_point[0] + 1,
-                                    "end_line": decl.end_point[0] + 1,
-                                    "body_sha256": body_hash,
-                                    "visibility": "public" if is_exported else "package",
-                                    "decorators_json": "[]",
-                                }
-                            )
-
-            elif child.type in ("program", "statement_block", "class_body"):
-                self._collect_definitions(
-                    child, source_bytes, rel_path, scope, symbols, is_exported=is_exported
-                )
+                elif child.type in ("program", "statement_block", "class_body"):
+                    stack.append((child, scope, is_exported))
 
     def index_unit_tier2(
         self,
@@ -520,7 +521,10 @@ class TypeScriptPlugin(LanguagePlugin):
         bound_names: set[str] = set()
         curr_dir = os.path.dirname(rel_path)
 
-        def walk(node: Node) -> None:
+        stack: list[Node] = [root]
+        while stack:
+            node = stack.pop()
+
             # 1. Imports
             if node.type == "import_statement":
                 line = node.start_point[0] + 1
@@ -563,6 +567,7 @@ class TypeScriptPlugin(LanguagePlugin):
 
                         # Extract imported specifiers
                         spec_nodes = []
+                        namespace_alias = ""
                         clause = node.child_by_field_name("clause") or node
                         for c in clause.children:
                             if c.type == "import_clause":
@@ -573,10 +578,18 @@ class TypeScriptPlugin(LanguagePlugin):
                                         )
                                     elif sc.type == "identifier":
                                         spec_nodes.append(sc)
+                                    elif sc.type == "namespace_import":
+                                        for nsc in sc.children:
+                                            if nsc.type == "identifier":
+                                                namespace_alias = _get_node_text(nsc, source_bytes)
                             elif c.type == "named_imports":
                                 spec_nodes.extend(
                                     [x for x in c.children if x.type == "import_specifier"]
                                 )
+                            elif c.type == "namespace_import":
+                                for nsc in c.children:
+                                    if nsc.type == "identifier":
+                                        namespace_alias = _get_node_text(nsc, source_bytes)
 
                         if spec_nodes:
                             for sp in spec_nodes:
@@ -620,7 +633,8 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "ref_kind": "import",
                                     }
                                 )
-                                file_imports[os.path.basename(import_path)] = mod_key
+                                if namespace_alias:
+                                    file_imports[namespace_alias] = mod_key
                             else:
                                 unresolved_refs.append(
                                     {
@@ -726,7 +740,7 @@ class TypeScriptPlugin(LanguagePlugin):
                     first = args[0] if args else None
                     second = args[1] if len(args) > 1 else None
                     api_call: tuple[str, str, str] | None = None
-                    if fn_text == "fetch" or fn_text.endswith(".fetch"):
+                    if fn_text in GLOBAL_FETCH_CALLEES:
                         route_url = _string_value(first, source_bytes) or "fetch"
                         method = (
                             _string_value(
@@ -776,7 +790,4 @@ class TypeScriptPlugin(LanguagePlugin):
                             }
                         )
 
-            for child in node.children:
-                walk(child)
-
-        walk(root)
+            stack.extend(reversed(node.children))
