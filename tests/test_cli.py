@@ -122,6 +122,42 @@ def test_cli_toolchain_ensure(tmp_path, capsys):
         assert "scip-python" in captured.out
 
 
+def test_cli_toolchain_ensure_prints_runtime_lines(tmp_path, capsys):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+
+    with patch(
+        "arch_indexer.cli.ensure_toolchain",
+        return_value={
+            "active_languages": ["java", "infra"],
+            "installed": ["scip-java"],
+            "skipped": [],
+            "warnings": [],
+            "runtimes": [
+                "java: portable runtime 17.0.21.1+2 (downloaded) at /cache/runtimes/jdk",
+                "mvn: portable runtime 3.9.16 (reused) at /cache/runtimes/maven",
+            ],
+            "cache_dir": str(cache),
+        },
+    ):
+        code = main(
+            [
+                "toolchain",
+                "ensure",
+                "--repo",
+                str(repo),
+                "--cache-dir",
+                str(cache),
+                "--fetch-runtime",
+            ]
+        )
+
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "(downloaded) at /cache/runtimes/jdk" in out
+    assert "(reused) at /cache/runtimes/maven" in out
+
+
 def test_cli_fetch_runtime_passes_flag_through(tmp_path, capsys):
     repo = FIXTURES_DIR / "java_maven"
     cache = tmp_path / "cache"

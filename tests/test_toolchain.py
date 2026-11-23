@@ -958,13 +958,14 @@ def test_prepare_java_runtime_keeps_host_commands_when_complete(tmp_path):
         patch("arch_indexer.toolchain.shutil.which", side_effect=_which),
         patch("arch_indexer.toolchain.ensure_portable_runtimes") as ensure_portable,
     ):
-        runtime = _prepare_java_runtime(tmp_path / "cache")
+        runtimes, runtime, messages = _prepare_java_runtime(tmp_path / "cache")
 
     ensure_portable.assert_not_called()
-    assert runtime.portable is False
+    assert runtimes["java"].available is True
     assert runtime.java_cmd == "/usr/bin/java"
     assert runtime.mvn_cmd == "/usr/bin/mvn"
     assert runtime.env == {}
+    assert messages == []
 
 
 def test_fetch_runtime_installs_scip_java_with_portable_runtime_env(tmp_path):
@@ -1003,6 +1004,10 @@ def test_fetch_runtime_installs_scip_java_with_portable_runtime_env(tmp_path):
     jdk_path = cache / "runtimes" / "temurin-jdk-test"
     maven_path = cache / "runtimes" / "apache-maven-test"
     assert res["installed"] == ["scip-java"]
+    assert res["runtimes"] == [
+        f"java: portable runtime 17.0.21.1+2 (downloaded) at {jdk_path}",
+        f"mvn: portable runtime 3.9.16 (downloaded) at {maven_path}",
+    ]
     assert len(bootstrap_calls) == 1
     bootstrap_cmd, bootstrap_kwargs = bootstrap_calls[0]
     assert bootstrap_cmd[0] == str(jdk_path / "bin" / "java")
@@ -1089,6 +1094,7 @@ def test_toolchain_ensure_reuses_cached_portable_runtime(tmp_path):
     cache = tmp_path / "cache"
     manifest = _manifest_with_portable_runtimes()
     jdk_path, _ = _seed_portable_runtime(cache, manifest)
+    maven_path = cache / "runtimes" / "apache-maven-test"
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
@@ -1108,3 +1114,67 @@ def test_toolchain_ensure_reuses_cached_portable_runtime(tmp_path):
     assert res["installed"] == []
     assert res["warnings"] == []
     urlopen.assert_not_called()
+    # A cached runtime is reused without --fetch-runtime, but never silently.
+    assert res["runtimes"] == [
+        f"java: portable runtime 17.0.21.1+2 (reused) at {jdk_path}",
+        f"mvn: portable runtime 3.9.16 (reused) at {maven_path}",
+    ]
+
+
+def test_ensure_fetches_runtime_after_node_tools_install(tmp_path):
+    """A failing runtime fetch must not prevent the independent Node tools."""
+    repo = FIXTURES_DIR / "mixed"
+    cache = tmp_path / "cache"
+    manifest_mock = {
+        "tools": {**NODE_MANIFEST["tools"], **_java_tools(b"coursier-launcher-jar")},
+        "runtimes": _runtime_pin_manifest(_jdk_tar_bytes(), _maven_tar_bytes())["runtimes"],
+    }
+
+    def failing_urlopen(req, timeout=None):
+        raise OSError("network is down")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=_fake_node_subprocess_run),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_which),
+        patch("urllib.request.urlopen", side_effect=failing_urlopen),
+        pytest.raises(OSError, match="network is down"),
+    ):
+        ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    # Python/TypeScript tools are still installed and recorded before the failure.
+    bin_dir = cache / "tools" / "node" / "node_modules" / ".bin"
+    assert (bin_dir / "scip-python").is_file()
+    assert (bin_dir / "scip-typescript").is_file()
+    lock = json.loads((cache / "tools" / "manifest.lock.json").read_text())
+    assert lock["tools"]["scip-python"]["version"] == "0.6.8"
+    assert lock["tools"]["scip-typescript"]["version"] == "0.6.2"
+    assert "scip-java" not in lock["tools"]
+    assert not (cache / "tools" / "java").exists()
+    assert not (cache / "runtimes" / "temurin-jdk-test").exists()
+
+
+def test_ensure_without_flag_never_downloads_runtimes(tmp_path):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+    manifest_mock = {"tools": _java_tools(b"coursier-launcher-jar"), "runtimes": RUNTIMES}
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_which),
+        patch("urllib.request.urlopen") as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache)
+
+    urlopen.assert_not_called()
+    assert not (cache / "runtimes").exists()
+    assert res["runtimes"] == []
+    assert any("Host java >= 17 is absent" in warning for warning in res["warnings"])

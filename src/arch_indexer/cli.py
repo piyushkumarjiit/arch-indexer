@@ -62,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Fetch the pinned Temurin JDK (min java "
             f"{java_min}) and Apache Maven into <cache>/runtimes/ when host "
-            "java is too old or mvn is missing (Java/Maven repos only)"
+            "java is too old or mvn is missing (Java/Maven repos only). Only "
+            "this flag downloads; an already fetched runtime is reused and "
+            "reported without it"
         ),
     )
 
@@ -254,6 +256,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"  Installed tools:  {', '.join(result['installed'])}")
                 if result["skipped"]:
                     print(f"  Already present:  {', '.join(result['skipped'])}")
+                for line in result.get("runtimes", []):
+                    print(f"  Runtimes:         {line}")
                 for w in result["warnings"]:
                     sys.stderr.write(f"Warning: {w}\n")
                 return EXIT_OK

@@ -473,8 +473,6 @@ class JavaRuntime:
     java_cmd: str
     mvn_cmd: str | None
     env: dict[str, str] = field(default_factory=dict)
-    portable: bool = False
-    java_home: Path | None = None
 
 
 def _host_arch() -> str:
@@ -755,8 +753,8 @@ def _ready_portable_runtimes(
 
 def _effective_runtimes(
     cache_dir: str | Path | None = None,
-) -> tuple[dict[str, RuntimeStatus], JavaRuntime]:
-    """Host runtimes plus the JAVA_HOME/PATH overlay from cached portable runtimes."""
+) -> tuple[dict[str, RuntimeStatus], JavaRuntime, dict[str, RuntimeInstall]]:
+    """Host runtimes, the subprocess runtime, and the portable installs in use."""
     manifest = load_toolchain_manifest()
     java_min = manifest["runtimes"]["java_min_version"]
     runtimes = dict(check_host_runtimes())
@@ -764,13 +762,13 @@ def _effective_runtimes(
 
     env: dict[str, str] = {}
     path_entries: list[str] = []
-    java_home: Path | None = None
+    portable: dict[str, RuntimeInstall] = {}
     java_cmd = shutil.which("java")
     mvn_cmd = shutil.which("mvn")
 
     jdk = installed.get("jdk")
     if jdk is not None and not runtimes["java"].available:
-        java_home = jdk.path
+        portable["jdk"] = jdk
         java_cmd = str(jdk.executable)
         env["JAVA_HOME"] = str(jdk.path)
         path_entries.append(str(jdk.path / "bin"))
@@ -784,6 +782,7 @@ def _effective_runtimes(
 
     maven = installed.get("maven")
     if maven is not None and not runtimes["mvn"].available:
+        portable["maven"] = maven
         mvn_cmd = str(maven.executable)
         path_entries.append(str(maven.path / "bin"))
         runtimes["mvn"] = RuntimeStatus(
@@ -795,27 +794,53 @@ def _effective_runtimes(
 
     if path_entries:
         env["PATH"] = os.pathsep.join([*path_entries, os.environ.get("PATH", "")])
-    return runtimes, JavaRuntime(
-        java_cmd=java_cmd or "java",
-        mvn_cmd=mvn_cmd,
-        env=env,
-        portable=bool(path_entries),
-        java_home=java_home,
+    return (
+        runtimes,
+        JavaRuntime(java_cmd=java_cmd or "java", mvn_cmd=mvn_cmd, env=env),
+        portable,
     )
 
 
-def _prepare_java_runtime(cache_dir: str | Path | None = None) -> JavaRuntime:
-    """Resolve java/mvn for scip-java, fetching portable runtimes only when needed."""
-    runtimes, runtime = _effective_runtimes(cache_dir)
-    kinds = tuple(
-        kind
-        for kind, status in (("jdk", runtimes["java"]), ("maven", runtimes["mvn"]))
-        if not status.available
-    )
-    if not kinds:
-        return runtime
-    ensure_portable_runtimes(cache_dir, kinds=kinds)
-    return _effective_runtimes(cache_dir)[1]
+def _describe_portable_runtime(
+    kind: str,
+    portable: dict[str, RuntimeInstall],
+    downloaded: dict[str, RuntimeInstall],
+) -> str:
+    """One user-facing line naming a cached portable runtime and how it got here."""
+    name = {"jdk": "java", "maven": "mvn"}[kind]
+    install = portable[kind]
+    fetched = downloaded.get(kind)
+    action = "downloaded" if fetched is not None and not fetched.reused else "reused"
+    return f"{name}: portable runtime {install.version} ({action}) at {install.path}"
+
+
+def _prepare_java_runtime(
+    cache_dir: str | Path | None = None, fetch_runtime: bool = True
+) -> tuple[dict[str, RuntimeStatus], JavaRuntime, list[str]]:
+    """Resolve java/mvn for scip-java and report the portable runtimes in use.
+
+    Pinned runtimes are downloaded only when fetch_runtime is set. An already
+    downloaded, checksum-verified runtime is reused without it, and the returned
+    messages say which portable runtime was used and whether it was just fetched.
+    """
+    runtimes, runtime, portable = _effective_runtimes(cache_dir)
+    downloaded: dict[str, RuntimeInstall] = {}
+    if fetch_runtime:
+        kinds = tuple(
+            kind
+            for kind, status in (("jdk", runtimes["java"]), ("maven", runtimes["mvn"]))
+            if not status.available
+        )
+        if kinds:
+            downloaded = ensure_portable_runtimes(cache_dir, kinds=kinds)
+            runtimes, runtime, portable = _effective_runtimes(cache_dir)
+
+    messages = [
+        _describe_portable_runtime(kind, portable, downloaded)
+        for kind in ("jdk", "maven")
+        if kind in portable
+    ]
+    return runtimes, runtime, messages
 
 
 def _install_scip_java(
@@ -965,7 +990,7 @@ def get_toolchain_status(
     c_dir = get_cache_dir(cache_dir)
     detected_files = detect_repo_files(repo)
     active_langs = detect_languages(repo)
-    runtimes, java_runtime = _effective_runtimes(c_dir)
+    runtimes, java_runtime, _portable = _effective_runtimes(c_dir)
     java_env = java_runtime.env or None
 
     tools: dict[str, ToolStatus] = {}
@@ -1034,10 +1059,13 @@ def ensure_toolchain(
     - Installs only missing tools into <cache>/tools/
     - Node tools (scip-python, scip-typescript) installed via npm into <cache>/tools/node
     - Java tool (scip-java) bootstrapped with coursier into <cache>/tools/java
-    - Downloads a pinned portable JDK/Maven into <cache>/runtimes/ only when
-      fetch_runtime is set, Java files are detected, and host java/mvn are missing
-      or unusable; the scip-java subprocess then uses that runtime via JAVA_HOME/PATH
-    - Updates <cache>/tools/manifest.lock.json
+    - With fetch_runtime, downloads a pinned portable JDK/Maven into <cache>/runtimes/
+      for Java repos whose host java/mvn is missing or unusable; a runtime that is
+      already downloaded and verified is reused without the flag, and the summary
+      names each portable runtime used. The scip-java subprocess then uses it via
+      JAVA_HOME/PATH for that subprocess only.
+    - Updates <cache>/tools/manifest.lock.json; a runtime download failure exits
+      non-zero only after the independent Node tools are installed and recorded
     """
     manifest = load_toolchain_manifest()
     tools_cfg = manifest["tools"]
@@ -1048,10 +1076,6 @@ def ensure_toolchain(
 
     active_langs = detect_languages(repo)
     warnings: list[str] = []
-    java_runtime: JavaRuntime | None = None
-    if fetch_runtime and "java" in active_langs:
-        java_runtime = _prepare_java_runtime(c_dir)
-
     lock_data = get_installed_manifest_lock(c_dir)
     if "tools" not in lock_data:
         lock_data["tools"] = {}
@@ -1112,11 +1136,17 @@ def ensure_toolchain(
         save_manifest_lock(lock_data, cache_dir=c_dir)
         lock_dirty = False
 
-    # 3. Java -> scip-java
+    # 3. Java -> scip-java (portable runtime fetched only after the Node tools)
+    runtime_messages: list[str] = []
     if "java" in active_langs:
-        runtimes, effective_runtime = _effective_runtimes(c_dir)
-        if java_runtime is None:
-            java_runtime = effective_runtime
+        runtimes, java_runtime, runtime_messages = _prepare_java_runtime(
+            c_dir, fetch_runtime=fetch_runtime
+        )
+        # ensure_portable_runtimes records its installs in the lock after we read it;
+        # merge those entries so the final save does not drop them.
+        runtime_lock = get_installed_manifest_lock(c_dir).get("runtimes")
+        if runtime_lock:
+            lock_data["runtimes"] = runtime_lock
         if not runtimes["java"].available:
             warnings.append(
                 f"Host java >= {java_min} is absent; scip-java will not be installed and Java "
@@ -1159,5 +1189,6 @@ def ensure_toolchain(
         "installed": installed_now,
         "skipped": skipped_existing,
         "warnings": warnings,
+        "runtimes": runtime_messages,
         "cache_dir": str(c_dir),
     }
