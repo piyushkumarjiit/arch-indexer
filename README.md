@@ -26,6 +26,9 @@ pip install -e .   # add "[dev]" to also install pytest and ruff
 arch-indexer toolchain status --repo /path/to/repo
 arch-indexer toolchain ensure --repo /path/to/repo   # the only command that uses the network
 
+# Index a repository (Tier 2 tree-sitter)
+arch-indexer index /path/to/repo
+
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
 arch-indexer check-citations /path/to/repo [--docs-dir docs] [--file <path>] [--format text|json]
 arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
@@ -36,7 +39,11 @@ arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
 - **`check-citations`**: Parses footnote references (``[^n]: `file_path:line` — `symbol` ``) in `docs/DESIGN.md` and `docs/USER_GUIDE.md` (or specific files passed with `--file`). Verifies that each cited file exists within the repository, line numbers are in range, and symbols match definitions in `index.db` or literal line tokens. Detects dangling footnote references, duplicate definitions, format errors, and drifted symbols (`SYMBOL_DRIFTED_TO:<line>`).
 - **`check-mermaid`**: Pure-Python static validator for fenced ```` ```mermaid ```` diagram blocks in documentation. Verifies diagram declaration headers (`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram-v2`), non-empty bodies, balanced `subgraph`/`end` blocks and delimiters, balanced `sequenceDiagram` blocks (`loop`, `alt`/`else`, `opt`, `par`/`and`, `rect`, `critical`/`option`, `break`, `box` each closed by `end`), node ID characters, edge arrows, and `AUTO-DIAGRAM` markers.
 
-The `index`, `query`, `plan`, and `assemble` commands are not implemented yet: they print an error and exit `1`.
+### Indexing
+
+`index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line summary. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
+
+Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detection, `state.json`, graph export and the viewer are not implemented yet, so `--force-full`, `--docs-dir` and `--auto-relocate-citations` are accepted but have no effect. Because `state.json` is never written, every `index` run is a first run and exits `2` (`DELTA_DETECTED`) after writing `index.db`. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
 
 `ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning and that language falls back to Tier 2 tree-sitter indexing. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
 
@@ -44,6 +51,8 @@ The `index`, `query`, `plan`, and `assemble` commands are not implemented yet: t
 arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 ```
 
+The `query`, `plan`, and `assemble` commands are not implemented yet: they print an error and exit `1`.
+
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`) and validation gates slice (`check-citations`, `check-mermaid`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`) and Tier 2 `tree-sitter` indexing (`index`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands it specifies beyond these slices are not implemented yet.

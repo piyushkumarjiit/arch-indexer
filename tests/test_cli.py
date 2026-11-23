@@ -224,8 +224,6 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
 @pytest.mark.parametrize(
     "cmd_args,expected_cmd",
     [
-        (["index", "some/repo"], "index"),
-        (["index", "some/repo", "--offline", "--strict-tier1"], "index"),
         (["query", "some/repo", "def", "MyClass"], "query"),
         (["query", "some/repo", "refs", "MyClass", "--limit", "50"], "query"),
         (["query", "some/repo", "file-symbols", "src/foo.py"], "query"),

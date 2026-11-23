@@ -15,6 +15,7 @@ from arch_indexer.config import (
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
     DEFAULT_UNIT_TIMEOUT_SEC,
 )
+from arch_indexer.indexer import run_index
 from arch_indexer.toolchain import (
     ensure_toolchain,
     format_status_report,
@@ -29,6 +30,16 @@ EXIT_ERROR: int = 1
 EXIT_DELTA_DETECTED: int = 2
 EXIT_VALIDATION_FAILED: int = 3
 EXIT_TOOLCHAIN_MISSING: int = 4
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-tier1",
         action="store_true",
         default=False,
-        help="Fail if Tier 1 indexer is unavailable",
+        help="With --offline, exit 4 if a Tier 1 indexer is unavailable",
     )
     index_parser.add_argument(
         "--force-full",
@@ -109,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.add_argument(
         "--chunk-files",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_CHUNK_FILES,
         help="Max files per indexing chunk",
     )
@@ -265,6 +276,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
                 sys.stderr.write(f"Error ensuring toolchain: {e}\n")
                 return EXIT_ERROR
+
+    elif args.command == "index":
+        try:
+            return run_index(
+                args.repo,
+                offline=args.offline,
+                strict_tier1=args.strict_tier1,
+                force_full=args.force_full,
+                node_max_heap_mb=args.node_max_heap_mb,
+                jvm_max_heap_mb=args.jvm_max_heap_mb,
+                unit_timeout_sec=args.unit_timeout_sec,
+                chunk_files=args.chunk_files,
+                docs_dir=args.docs_dir,
+                auto_relocate_citations=args.auto_relocate_citations,
+                cache_dir=args.cache_dir,
+            )
+        except (OSError, RuntimeError, ValueError) as e:
+            sys.stderr.write(f"Error during indexing: {e}\n")
+            return EXIT_ERROR
 
     elif args.command == "check-citations":
         try:
