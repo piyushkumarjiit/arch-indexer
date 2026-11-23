@@ -110,8 +110,8 @@ def is_path_excluded(path_str: str) -> bool:
 def get_repo_files(repo_path: Path | str) -> list[str]:
     """Collect candidate repository files respecting .gitignore when in a git repo."""
     repo = Path(repo_path).resolve()
-    if not repo.exists():
-        return []
+    if not repo.is_dir():
+        raise NotADirectoryError(f"Repository is not a readable directory: {repo}")
 
     # Try git ls-files if inside a git repository
     with contextlib.suppress(subprocess.SubprocessError, OSError):
@@ -123,15 +123,23 @@ def get_repo_files(repo_path: Path | str) -> list[str]:
         )
         if git_check.returncode == 0 and git_check.stdout.strip() == "true":
             ls_res = subprocess.run(
-                ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             if ls_res.returncode == 0:
                 files = []
-                for line in ls_res.stdout.splitlines():
-                    rel_path = line.strip()
+                for rel_path in ls_res.stdout.split("\0"):
                     if rel_path and not is_path_excluded(rel_path) and (repo / rel_path).is_file():
                         files.append(rel_path)
                 return sorted(files)
@@ -600,69 +608,47 @@ def ensure_toolchain(
     skipped_existing: list[str] = []
     warnings: list[str] = []
 
-    # 1. Python -> scip-python
-    if "python" in active_langs:
-        status = check_tool_status("scip-python", cache_dir=c_dir)
-        if status.installed:
-            skipped_existing.append("scip-python")
-        else:
-            cfg = tools_cfg.get("scip-python", PINNED_TOOLS["scip-python"])
-            pkg = cfg.get("package", "@sourcegraph/scip-python")
-            ver = cfg.get("version", "0.6.8")
-            target_pkg = f"{pkg}@{ver}"
-            node_dir = get_node_tools_dir(c_dir)
-            node_dir.mkdir(parents=True, exist_ok=True)
+    # 1-2. Node tools -> scip-python, scip-typescript (one npm install keeps both)
+    node_installs: list[tuple[str, str, str]] = []
+    for lang, tool_name in (("python", "scip-python"), ("typescript", "scip-typescript")):
+        if lang not in active_langs:
+            continue
+        if check_tool_status(tool_name, cache_dir=c_dir).installed:
+            skipped_existing.append(tool_name)
+            continue
+        cfg = {**PINNED_TOOLS[tool_name], **tools_cfg.get(tool_name, {})}
+        node_installs.append((tool_name, cfg["package"], cfg["version"]))
 
-            npm_cmd = shutil.which("npm")
-            if not npm_cmd:
-                raise RuntimeError("npm is required to install scip-python but was not found")
+    if node_installs:
+        npm_cmd = shutil.which("npm")
+        if not npm_cmd:
+            names = ", ".join(tool_name for tool_name, _, _ in node_installs)
+            raise RuntimeError(f"npm is required to install {names} but was not found")
 
-            cmd = [npm_cmd, "install", "--prefix", str(node_dir), "--no-save", target_pkg]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode != 0:
-                raise RuntimeError(f"Failed to install {target_pkg}: {res.stderr or res.stdout}")
+        node_dir = get_node_tools_dir(c_dir)
+        node_dir.mkdir(parents=True, exist_ok=True)
+        targets = [f"{pkg}@{ver}" for _, pkg, ver in node_installs]
+        res = subprocess.run(
+            [npm_cmd, "install", "--prefix", str(node_dir), *targets],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Failed to install {', '.join(targets)}: {res.stderr or res.stdout}"
+            )
 
-            bin_path = node_dir / "node_modules" / ".bin" / "scip-python"
-            lock_data["tools"]["scip-python"] = {
+        for tool_name, pkg, ver in node_installs:
+            bin_path = node_dir / "node_modules" / ".bin" / tool_name
+            lock_data["tools"][tool_name] = {
                 "package": pkg,
                 "version": ver,
                 "install_type": "npm",
                 "path": str(bin_path),
                 "installed_at": datetime.now(timezone.utc).isoformat(),
             }
-            installed_now.append("scip-python")
-
-    # 2. TypeScript -> scip-typescript
-    if "typescript" in active_langs:
-        status = check_tool_status("scip-typescript", cache_dir=c_dir)
-        if status.installed:
-            skipped_existing.append("scip-typescript")
-        else:
-            cfg = tools_cfg.get("scip-typescript", PINNED_TOOLS["scip-typescript"])
-            pkg = cfg.get("package", "@sourcegraph/scip-typescript")
-            ver = cfg.get("version", "0.6.2")
-            target_pkg = f"{pkg}@{ver}"
-            node_dir = get_node_tools_dir(c_dir)
-            node_dir.mkdir(parents=True, exist_ok=True)
-
-            npm_cmd = shutil.which("npm")
-            if not npm_cmd:
-                raise RuntimeError("npm is required to install scip-typescript but was not found")
-
-            cmd = [npm_cmd, "install", "--prefix", str(node_dir), "--no-save", target_pkg]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode != 0:
-                raise RuntimeError(f"Failed to install {target_pkg}: {res.stderr or res.stdout}")
-
-            bin_path = node_dir / "node_modules" / ".bin" / "scip-typescript"
-            lock_data["tools"]["scip-typescript"] = {
-                "package": pkg,
-                "version": ver,
-                "install_type": "npm",
-                "path": str(bin_path),
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            }
-            installed_now.append("scip-typescript")
+            installed_now.append(tool_name)
 
     # 3. Java -> scip-java
     if "java" in active_langs:
@@ -697,9 +683,13 @@ def ensure_toolchain(
             java_dir.mkdir(parents=True, exist_ok=True)
             jar_path = java_dir / "scip-java.jar"
 
-            req = urllib.request.Request(url, headers={"User-Agent": "arch-indexer"})
-            with urllib.request.urlopen(req) as resp, open(jar_path, "wb") as out_f:
-                shutil.copyfileobj(resp, out_f)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "arch-indexer"})
+                with urllib.request.urlopen(req, timeout=60) as resp, open(jar_path, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+            except Exception:
+                jar_path.unlink(missing_ok=True)
+                raise
 
             actual_sha = compute_file_sha256(jar_path)
             if actual_sha != expected_sha:

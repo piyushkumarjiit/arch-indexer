@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -122,6 +123,18 @@ def test_language_detection_git_respects_gitignore(tmp_path):
     assert "app.ts" in files["typescript"]
 
 
+def test_language_detection_git_handles_non_ascii_paths(tmp_path):
+    repo = tmp_path / "git_repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+
+    (repo / "caf\u00e9.py").write_text("print('accented')\n")
+
+    files = detect_repo_files(repo)
+    assert "caf\u00e9.py" in files["python"]
+    assert detect_languages(repo) == ["python", "infra"]
+
+
 def test_check_host_runtimes():
     runtimes = check_host_runtimes()
     assert "python" in runtimes
@@ -224,13 +237,35 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
     }
 
     def fake_subprocess_run(cmd, *args, **kwargs):
-        # Create mocked binary in node_modules/.bin/
-        if "npm" in cmd[0]:
-            pkg = cmd[-1]
-            bin_name = "scip-python" if "scip-python" in pkg else "scip-typescript"
-            bin_dir = cache / "tools" / "node" / "node_modules" / ".bin"
+        # Model npm >= 7 prefix installs: unrecorded packages are pruned on the next install.
+        if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
+            prefix = Path(cmd[cmd.index("--prefix") + 1])
+            no_save = "--no-save" in cmd
+            targets = [a for a in cmd[cmd.index("--prefix") + 2 :] if not a.startswith("-")]
+
+            pkg_json = prefix / "package.json"
+            recorded = {}
+            if pkg_json.is_file():
+                recorded = json.loads(pkg_json.read_text()).get("dependencies", {})
+
+            requested = {}
+            for target in targets:
+                name, _, version = target.rpartition("@")
+                requested[name] = version
+
+            scope_dir = prefix / "node_modules" / "@sourcegraph"
+            present = {p.name for p in scope_dir.iterdir()} if scope_dir.is_dir() else set()
+            keep = set(recorded) | set(requested)
+            for stale in present - keep:
+                shutil.rmtree(scope_dir / stale)
+
+            if not no_save:
+                pkg_json.write_text(json.dumps({"dependencies": recorded | requested}))
+
+            bin_dir = prefix / "node_modules" / ".bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
-            (bin_dir / bin_name).write_text("#!/bin/sh\n")
+            for name in requested:
+                (bin_dir / name.split("/")[-1]).write_text("#!/bin/sh\n")
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -251,6 +286,16 @@ def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
         assert "scip-typescript" in res["installed"]
         assert "scip-java" in res["installed"]
         assert len(res["skipped"]) == 0
+
+        # Both node tools must survive the install into the shared prefix
+        bin_dir = cache / "tools" / "node" / "node_modules" / ".bin"
+        assert (bin_dir / "scip-python").is_file()
+        assert (bin_dir / "scip-typescript").is_file()
+        node_pkg = json.loads((cache / "tools" / "node" / "package.json").read_text())
+        assert node_pkg["dependencies"] == {
+            "@sourcegraph/scip-python": "0.6.8",
+            "@sourcegraph/scip-typescript": "0.6.2",
+        }
 
         # Verify manifest.lock.json was created
         lock_path = cache / "tools" / "manifest.lock.json"

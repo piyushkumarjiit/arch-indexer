@@ -8,11 +8,9 @@ from collections.abc import Sequence
 from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
     DEFAULT_DOCS_DIR,
-    DEFAULT_JVM_MAX_HEAP_MB,
     DEFAULT_MAX_LINES_PER_WORKER,
     DEFAULT_MAX_SECTIONS_PER_WORKER,
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
-    DEFAULT_NODE_MAX_HEAP_MB,
     DEFAULT_UNIT_TIMEOUT_SEC,
 )
 from arch_indexer.toolchain import (
@@ -83,13 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument(
         "--node-max-heap-mb",
         type=int,
-        default=DEFAULT_NODE_MAX_HEAP_MB,
+        default=None,
         help="Node max heap in MB",
     )
     index_parser.add_argument(
         "--jvm-max-heap-mb",
         type=int,
-        default=DEFAULT_JVM_MAX_HEAP_MB,
+        default=None,
         help="JVM max heap in MB",
     )
     index_parser.add_argument(
@@ -216,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
-        return e.code if isinstance(e.code, int) else EXIT_ERROR
+        return EXIT_OK if e.code in (0, None) else EXIT_ERROR
 
     # Execute implemented commands
     if args.command == "toolchain":
