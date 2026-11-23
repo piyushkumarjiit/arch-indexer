@@ -716,8 +716,94 @@ def test_assemble_inserts_new_slice_in_packet_id_order(tmp_path):
     )
 
 
-def test_assemble_rejects_duplicate_packet_ids_for_one_section(tmp_path):
-    """Two drafts claiming the same packet slice exit 3 instead of one overwriting the other."""
+def test_assemble_remove_slice_retires_stale_slice(tmp_path):
+    """Retiring a deleted packet's slice drops its prose and citations, keeping siblings."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "billing.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "Billing module debits accounts[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "orders.md",
+        "design-sec2-mod-orders",
+        ["design-sec2"],
+        "Orders module tracks shipments[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+
+    drafts.mkdir(parents=True)
+    _write_design_draft(
+        drafts,
+        "orders.md",
+        "design-sec2-mod-orders",
+        ["design-sec2"],
+        "Orders module tracks shipments v2[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        remove_slices=["design-sec2-mod-billing"],
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Billing module debits accounts" not in content
+    assert "<!-- SLICE:design-sec2-mod-billing:START -->" not in content
+    assert "src/app.py:1" not in content
+    assert "Orders module tracks shipments v2[^1]." in content
+    assert "[^1]: `src/app.py:4` — `beta`" in content
+    assert content.count("## 2. Components & Modules") == 1
+
+
+def test_assemble_remove_slice_without_drafts(tmp_path):
+    """--remove-slice alone retires slices even when the drafts directory is gone."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "billing.md",
+        "design-sec2-mod-billing",
+        ["design-sec2"],
+        "Billing module debits accounts[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    _write_design_draft(
+        drafts,
+        "orders.md",
+        "design-sec2-mod-orders",
+        ["design-sec2"],
+        "Orders module tracks shipments[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+    )
+    assert assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO()) == 0
+    assert not drafts.exists()
+
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        remove_slices=["design-sec2-mod-billing", "design-sec2-mod-orders"],
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "<!-- SLICE:" not in content
+    assert "Billing module debits accounts" not in content
+    assert "Orders module tracks shipments" not in content
+    assert "src/app.py:1" not in content
+    assert "src/app.py:4" not in content
+    assert "## 2. Components & Modules" in content
+
+
+@pytest.mark.parametrize(
+    "second_sections",
+    [["design-sec2"], ["design-sec4"]],
+    ids=["same-section", "different-section"],
+)
+def test_assemble_rejects_repeated_packet_id_across_drafts(tmp_path, second_sections):
+    """A packet_id declared by two drafts exits 1 and keeps both, whatever sections they patch."""
     repo, drafts = _repo_with_app(tmp_path)
     _write_design_draft(
         drafts,
@@ -730,17 +816,47 @@ def test_assemble_rejects_duplicate_packet_ids_for_one_section(tmp_path):
         drafts,
         "second.md",
         "design-sec2-mod-billing",
-        ["design-sec2"],
+        second_sections,
         "Second billing prose[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
     )
 
     err = io.StringIO()
     code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
-    assert code == 3
+    assert code == 1
     assert "design-sec2-mod-billing" in err.getvalue()
     assert (drafts / "first.md").is_file()
     assert (drafts / "second.md").is_file()
     assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_rejects_packet_id_reused_by_two_documents(tmp_path):
+    """A packet_id reused by a DESIGN and a USER_GUIDE draft exits 1 before merging citations."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "design.md",
+        "pkt-shared",
+        ["design-sec2"],
+        "Design prose[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    (drafts / "guide.md").write_text(
+        "---\n"
+        "packet_id: pkt-shared\n"
+        "target_doc: USER_GUIDE.md\n"
+        "section_ids: [guide-sec2]\n"
+        "---\n"
+        "Guide prose[^1].\n\n[^1]: `src/app.py:4` — `beta`\n",
+        encoding="utf-8",
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 1
+    assert "pkt-shared" in err.getvalue()
+    assert (drafts / "design.md").is_file()
+    assert (drafts / "guide.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+    assert not (repo / "docs" / "USER_GUIDE.md").exists()
 
 
 def test_assemble_rejects_undeclared_marker_naming_the_section(tmp_path):
@@ -986,8 +1102,10 @@ def test_assemble_deletes_only_consumed_draft_files(tmp_path):
         ("design-sec3", "flow-overview", "`src/app.py:4` — `beta`"),
     ],
 )
-def test_assemble_rejects_drafts_that_author_diagram_slots(tmp_path, section_id, slot_id, citation):
-    """A draft may not ship its own AUTO-DIAGRAM slot, which would duplicate the document's."""
+def test_assemble_keeps_one_copy_of_a_draft_authored_diagram_slot(
+    tmp_path, section_id, slot_id, citation
+):
+    """A draft's own AUTO-DIAGRAM slot replaces the document's, so the diagram renders once."""
     repo, drafts = _repo_with_app(tmp_path)
     _write_design_draft(
         drafts,
@@ -1002,18 +1120,20 @@ def test_assemble_rejects_drafts_that_author_diagram_slots(tmp_path, section_id,
     diagrams_file = tmp_path / "diagrams.json"
     diagrams_file.write_text(json.dumps({slot_id: "flowchart TD\n  A --> B"}), encoding="utf-8")
 
-    err = io.StringIO()
     code = assemble(
         repo=repo,
         drafts_dir="docs/.drafts",
         diagrams=diagrams_file,
         out=io.StringIO(),
-        err=err,
+        err=io.StringIO(),
     )
-    assert code == 3
-    assert "AUTO-DIAGRAM" in err.getvalue()
-    assert (drafts / "slot.md").is_file()
-    assert not (repo / "docs" / "DESIGN.md").exists()
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert content.count(f"<!-- AUTO-DIAGRAM:{slot_id}:START -->") == 1
+    assert content.count("A --> B") == 1
+    assert content.index("Prose beside a slot") < content.index(
+        f"<!-- AUTO-DIAGRAM:{slot_id}:START -->"
+    )
 
 
 def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):

@@ -34,7 +34,6 @@ SLICE_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
-AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
 
 
 class DraftFormatError(ValueError):
@@ -210,8 +209,6 @@ def parse_draft_file(path: Path) -> DraftPacket:
             raise DraftFormatError("draft body has text outside its SECTION markers")
     if SLICE_MARKER_RE.search(rewritten_body):
         raise DraftFormatError("draft body must not contain SLICE markers")
-    if AUTO_DIAGRAM_MARKER_RE.search(rewritten_body):
-        raise DraftFormatError("draft body must not contain AUTO-DIAGRAM markers")
     undeclared_sections = [sec_id for sec_id in sections if sec_id not in section_ids]
     if undeclared_sections:
         raise DraftFormatError(
@@ -270,6 +267,19 @@ def _strip_leading_heading(text: str, max_level: int) -> str:
     return text
 
 
+def _keep_first_auto_diagram_slot(text: str, seen: set[str]) -> str:
+    """Drop AUTO-DIAGRAM slots whose id was already emitted earlier in the section."""
+
+    def keep_first(m: re.Match[str]) -> str:
+        slot_id = m.group("id").strip()
+        if slot_id in seen:
+            return ""
+        seen.add(slot_id)
+        return m.group(0)
+
+    return AUTO_DIAGRAM_SLOT_RE.sub(keep_first, text)
+
+
 def patch_section_in_doc(
     doc_text: str, sec_id: str, draft_bodies: Sequence[tuple[str, str]]
 ) -> str:
@@ -285,11 +295,10 @@ def patch_section_in_doc(
         rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>]+|\s+[^>]+)?\s*-->", re.IGNORECASE
     )
     end_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->", re.IGNORECASE)
-    drafted: dict[str, str] = {}
-    for packet_id, body in draft_bodies:
-        if packet_id in drafted:
-            raise DraftFormatError(f"duplicate packet_id '{packet_id}' for section '{sec_id}'")
-        drafted[packet_id] = end_pat.sub("", start_pat.sub("", body.strip())).strip()
+    drafted = {
+        packet_id: end_pat.sub("", start_pat.sub("", body.strip())).strip()
+        for packet_id, body in draft_bodies
+    }
 
     start_match = next(
         (m for m in SECTION_START_RE.finditer(doc_text) if m.group("id") == sec_id), None
@@ -322,6 +331,9 @@ def patch_section_in_doc(
         f"<!-- SLICE:{packet_id}:END -->"
         for packet_id in sorted(slice_bodies)
     ]
+    seen_slot_ids: set[str] = set()
+    blocks = [_keep_first_auto_diagram_slot(block, seen_slot_ids) for block in blocks]
+    owned_parts = [_keep_first_auto_diagram_slot(part, seen_slot_ids) for part in owned_parts]
     content = "\n\n".join(part for part in [*owned_parts, *blocks] if part)
 
     # Preserve start marker and end marker
@@ -479,11 +491,24 @@ def inject_diagrams(doc_text: str, diagrams: dict[str, str] | None) -> str:
     return AUTO_DIAGRAM_SLOT_RE.sub(replace_slot, doc_text)
 
 
+def remove_slices_from_doc(doc_text: str, packet_ids: Sequence[str]) -> str:
+    """Delete the SLICE blocks belonging to the named packets from a document."""
+    for packet_id in packet_ids:
+        block = re.compile(
+            rf"\n*<!--\s*SLICE:{re.escape(packet_id)}:START\s*-->"
+            rf".*?<!--\s*SLICE:{re.escape(packet_id)}:END\s*-->\n*",
+            re.DOTALL | re.IGNORECASE,
+        )
+        doc_text = block.sub("\n", doc_text)
+    return doc_text
+
+
 def assemble(
     repo: str | Path,
     drafts_dir: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
     diagrams: str | Path | None = None,
+    remove_slices: Sequence[str] | None = None,
     cache_dir: str | Path | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
@@ -510,7 +535,7 @@ def assemble(
         )
         return 1
 
-    if not resolved_drafts_dir.is_dir():
+    if not resolved_drafts_dir.is_dir() and not remove_slices:
         stderr.write(f"Error: Drafts directory '{resolved_drafts_dir}' does not exist\n")
         return 1
 
@@ -545,13 +570,15 @@ def assemble(
             return 1
 
     # Find draft files
+    requested_removals = list(remove_slices or [])
     draft_files = sorted(resolved_drafts_dir.glob("*.md"))
-    if not draft_files:
+    if not draft_files and not requested_removals:
         stderr.write(f"Error: No draft files (*.md) found in '{resolved_drafts_dir}'\n")
         return 1
 
     # Parse all drafts and group by target_doc
     drafts_by_doc: dict[str, list[DraftPacket]] = {}
+    packet_paths: dict[str, Path] = {}
     for d_path in draft_files:
         try:
             packet = parse_draft_file(d_path)
@@ -564,11 +591,31 @@ def assemble(
         except Exception as e:
             stderr.write(f"Error parsing draft '{d_path}': {e}\n")
             return 1
+        previous_path = packet_paths.get(packet.packet_id)
+        if previous_path is not None:
+            stderr.write(
+                f"Error: packet_id '{packet.packet_id}' is declared by both "
+                f"'{previous_path}' and '{d_path}'. "
+                f"Retaining drafts in '{resolved_drafts_dir}'.\n"
+            )
+            return 1
+        packet_paths[packet.packet_id] = d_path
         drafts_by_doc.setdefault(packet.target_doc, []).append(packet)
+
+    # Documents to rewrite: those this run drafts plus any holding a retired slice
+    docs_to_render: dict[str, list[DraftPacket]] = dict(drafts_by_doc)
+    if requested_removals:
+        for doc_name in CANONICAL_DOCS:
+            doc_path = target_docs_dir / doc_name
+            if doc_name in docs_to_render or not doc_path.is_file():
+                continue
+            existing_text = doc_path.read_text(encoding="utf-8", errors="replace")
+            if remove_slices_from_doc(existing_text, requested_removals) != existing_text:
+                docs_to_render[doc_name] = []
 
     # Build every patched document in memory first so a bad draft writes nothing
     rendered: dict[str, str] = {}
-    for doc_name, packets in drafts_by_doc.items():
+    for doc_name, packets in docs_to_render.items():
         doc_path = target_docs_dir / doc_name
         if doc_path.is_file():
             doc_text = doc_path.read_text(encoding="utf-8", errors="replace")
@@ -600,6 +647,9 @@ def assemble(
                     f"Retaining drafts in '{resolved_drafts_dir}'.\n"
                 )
                 return 3
+
+        if requested_removals:
+            doc_text = remove_slices_from_doc(doc_text, requested_removals)
 
         # Globally renumber and deduplicate footnotes, then inject diagrams
         doc_text = renumber_footnotes_in_doc(doc_text, doc_definitions)
@@ -640,7 +690,10 @@ def assemble(
             stderr.write(f"Warning: Failed to delete draft '{d_path}': {e}\n")
     with contextlib.suppress(OSError):
         resolved_drafts_dir.rmdir()
-    stdout.write(f"Assembly succeeded. Deleted drafts from '{resolved_drafts_dir}'.\n")
+    if draft_files:
+        stdout.write(f"Assembly succeeded. Deleted drafts from '{resolved_drafts_dir}'.\n")
+    else:
+        stdout.write("Assembly succeeded.\n")
 
     return 0
 
@@ -650,6 +703,7 @@ def run_assemble(
     drafts_dir: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
     diagrams: str | Path | None = None,
+    remove_slices: Sequence[str] | None = None,
     cache_dir: str | Path | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
@@ -660,6 +714,7 @@ def run_assemble(
         drafts_dir=drafts_dir,
         docs_dir=docs_dir,
         diagrams=diagrams,
+        remove_slices=remove_slices,
         cache_dir=cache_dir,
         out=out,
         err=err,

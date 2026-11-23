@@ -209,6 +209,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to JSON file containing diagram id -> mermaid text mapping",
     )
+    assemble_parser.add_argument(
+        "--remove-slice",
+        action="append",
+        dest="remove_slices",
+        default=None,
+        metavar="PACKET_ID",
+        help="Delete the slice of this packet id from the canonical docs (repeatable)",
+    )
     assemble_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 6. check-citations
@@ -309,6 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 drafts_dir=args.drafts_dir,
                 docs_dir=args.docs_dir,
                 diagrams=args.diagrams,
+                remove_slices=args.remove_slices,
                 cache_dir=args.cache_dir,
             )
         except Exception as e:
