@@ -1017,3 +1017,94 @@ def test_fetch_runtime_installs_scip_java_with_portable_runtime_env(tmp_path):
     assert lock["runtimes"]["jdk"]["version"] == "17.0.21.1+2"
     assert lock["runtimes"]["maven"]["version"] == "3.9.16"
     assert lock["tools"]["scip-java"]["version"] == "0.10.2"
+
+
+def _portable_launcher_run(jdk_path):
+    """Model the coursier launcher: runs only when JAVA_HOME/PATH point at a JDK."""
+
+    def run(cmd, *args, **kwargs):
+        env = kwargs.get("env") or {}
+        path_entries = env.get("PATH", "").split(os.pathsep)
+        ok = env.get("JAVA_HOME") == str(jdk_path) and path_entries[0] == str(jdk_path / "bin")
+        return subprocess.CompletedProcess(cmd, returncode=0 if ok else 1, stdout="", stderr="")
+
+    return run
+
+
+def _seed_portable_runtime(cache, manifest):
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=_runtime_downloads(jdk_bytes, maven_bytes),
+    ):
+        ensure_portable_runtimes(cache, manifest=manifest)
+    launcher_dir = cache / "tools" / "java"
+    launcher_dir.mkdir(parents=True, exist_ok=True)
+    launcher = launcher_dir / "scip-java-0.10.2"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    return cache / "runtimes" / "temurin-jdk-test", launcher
+
+
+def _manifest_with_portable_runtimes():
+    return {
+        **_runtime_pin_manifest(_jdk_tar_bytes(), _maven_tar_bytes()),
+        "tools": _java_tools(b"coursier-launcher-jar"),
+    }
+
+
+def test_toolchain_status_uses_cached_portable_runtime(tmp_path):
+    cache = tmp_path / "cache"
+    manifest = _manifest_with_portable_runtimes()
+    jdk_path, launcher = _seed_portable_runtime(cache, manifest)
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch(
+            "arch_indexer.toolchain.subprocess.run",
+            side_effect=_portable_launcher_run(jdk_path),
+        ),
+    ):
+        report = get_toolchain_status(FIXTURES_DIR / "java_maven", cache_dir=cache)
+
+    assert report.runtimes["java"].available is True
+    assert report.runtimes["java"].version == "17.0.21.1+2"
+    assert report.runtimes["mvn"].available is True
+    assert report.runtimes["mvn"].version == "3.9.16"
+    assert report.tools["scip-java"].installed is True
+    assert report.tools["scip-java"].install_path == launcher
+
+    text = format_status_report(report)
+    assert "java    : 17.0.21.1+2 (min 17) -> OK (portable runtime)" in text
+    assert "mvn     : 3.9.16 -> OK (portable runtime)" in text
+    assert "INSTALLED" in text.split("Tier 1 Indexer Tools")[1]
+
+
+def test_toolchain_ensure_reuses_cached_portable_runtime(tmp_path):
+    cache = tmp_path / "cache"
+    manifest = _manifest_with_portable_runtimes()
+    jdk_path, _ = _seed_portable_runtime(cache, manifest)
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch(
+            "arch_indexer.toolchain.subprocess.run",
+            side_effect=_portable_launcher_run(jdk_path),
+        ),
+        patch("arch_indexer.toolchain.urllib.request.urlopen") as urlopen,
+    ):
+        res = ensure_toolchain(FIXTURES_DIR / "java_maven", cache_dir=cache)
+
+    assert res["skipped"] == ["scip-java"]
+    assert res["installed"] == []
+    assert res["warnings"] == []
+    urlopen.assert_not_called()
