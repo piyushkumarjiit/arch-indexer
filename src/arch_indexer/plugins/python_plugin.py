@@ -249,6 +249,44 @@ def _first_argument(call: Node, source_bytes: bytes, keyword: str) -> Node | Non
     return None
 
 
+def _get_call_kwarg_string(
+    call_node: Node, source_bytes: bytes, kwarg_names: tuple[str, ...]
+) -> str | None:
+    """Return the string value of a named keyword argument in a call."""
+    args = call_node.child_by_field_name("arguments")
+    if args is None:
+        return None
+    for child in args.named_children:
+        if child.type == "keyword_argument":
+            name_node = child.child_by_field_name("name")
+            if name_node and _get_node_text(name_node, source_bytes) in kwarg_names:
+                val_node = child.child_by_field_name("value")
+                if val_node:
+                    text = _get_node_text(val_node, source_bytes).strip()
+                    m = re.match(r"^['\"]+(.*?)['\"]+$", text)
+                    return m.group(1) if m else text
+    return None
+
+
+def _join_route_paths(*parts: str | None) -> str:
+    """Combine route prefix parts and route path into a normalized route path."""
+    cleaned = [p for p in parts if p is not None and p != ""]
+    if not cleaned:
+        return "/"
+    path = ""
+    for p in cleaned:
+        if not path:
+            path = p if p.startswith("/") else f"/{p}"
+        else:
+            if path.endswith("/") and p.startswith("/"):
+                path = path[:-1] + p
+            elif not path.endswith("/") and not p.startswith("/"):
+                path = f"{path}/{p}"
+            else:
+                path = f"{path}{p}"
+    return path if path.startswith("/") else f"/{path}"
+
+
 def _dependency_calls(node: Node | None, source_bytes: bytes) -> list[tuple[str, str, Node]]:
     """Find FastAPI ``Depends(x)``/``Security(x)`` calls under a node.
 
@@ -316,6 +354,7 @@ class _FunctionFacts:
     dependencies: list[tuple[str, str]] = field(default_factory=list)
     # names used in parameter annotations; may be ``Annotated`` dependency aliases
     annotations: list[str] = field(default_factory=list)
+    constructs_argparse: bool = False
 
 
 @dataclass
@@ -337,6 +376,9 @@ class _ModuleFacts:
     aliases: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # every other module-level definition (classes)
     other_names: set[str] = field(default_factory=set)
+    classes: dict[str, list[str]] = field(default_factory=dict)
+    router_prefixes: dict[str, str] = field(default_factory=dict)
+    router_dependencies: dict[str, list[tuple[str, str, Node]]] = field(default_factory=dict)
 
 
 def _assignment_call(node: Node, source_bytes: bytes) -> tuple[str, int, str | None] | None:
@@ -422,9 +464,9 @@ def _gather_module_facts(
             assigned = _assignment_call(node, source_bytes)
             if assigned is not None:
                 name, _, callee = assigned
+                right = node.child_by_field_name("right")
                 if module_level:
                     facts.variables.setdefault(name, callee)
-                    right = node.child_by_field_name("right")
                     if right is not None and right.type == "subscript":
                         deps = [
                             (marker, text)
@@ -435,6 +477,26 @@ def _gather_module_facts(
                             facts.aliases.setdefault(name, deps)
                 if callee is not None:
                     facts.scoped_calls.setdefault(name, callee)
+                if right is not None and right.type == "call":
+                    prefix = _get_call_kwarg_string(right, source_bytes, ("prefix", "url_prefix"))
+                    if prefix is not None:
+                        facts.router_prefixes[name] = prefix
+                    args = right.child_by_field_name("arguments")
+                    if args is not None:
+                        for arg in args.named_children:
+                            if arg.type == "keyword_argument":
+                                arg_name = arg.child_by_field_name("name")
+                                if (
+                                    arg_name is not None
+                                    and _get_node_text(arg_name, source_bytes) == "dependencies"
+                                ):
+                                    val_node = arg.child_by_field_name("value")
+                                    if val_node is not None:
+                                        deps = _dependency_calls(val_node, source_bytes)
+                                        if deps:
+                                            facts.router_dependencies[name] = [
+                                                (m, t, n) for m, t, n in deps if t
+                                            ]
         elif node.type == "function_definition" and module_level:
             name_node = node.child_by_field_name("name")
             if name_node is not None:
@@ -447,11 +509,31 @@ def _gather_module_facts(
                             if split is not None:
                                 ffacts.decorators.append((split[0], split[1]))
                 ffacts.dependencies, ffacts.annotations = _function_dependencies(node, source_bytes)
+                f_stack = [node]
+                while f_stack:
+                    f_curr = f_stack.pop()
+                    if f_curr.type == "call":
+                        fn = f_curr.child_by_field_name("function")
+                        if fn is not None:
+                            fn_txt = _get_node_text(fn, source_bytes).strip()
+                            if fn_txt == "ArgumentParser" or fn_txt.endswith(".ArgumentParser"):
+                                ffacts.constructs_argparse = True
+                                break
+                    f_stack.extend(f_curr.children)
                 facts.functions.setdefault(_get_node_text(name_node, source_bytes), ffacts)
         elif node.type == "class_definition" and module_level:
             name_node = node.child_by_field_name("name")
             if name_node is not None:
-                facts.other_names.add(_get_node_text(name_node, source_bytes))
+                cls_name = _get_node_text(name_node, source_bytes)
+                facts.other_names.add(cls_name)
+                superclasses_node = node.child_by_field_name("superclasses")
+                if superclasses_node is not None:
+                    bases = []
+                    for c in superclasses_node.named_children:
+                        if c.type in ("identifier", "attribute"):
+                            bases.append(_get_node_text(c, source_bytes))
+                    if bases:
+                        facts.classes[cls_name] = bases
         nested = module_level and node.type not in ("function_definition", "class_definition")
         stack.extend((child, nested) for child in reversed(node.children))
     return facts
@@ -460,6 +542,7 @@ def _gather_module_facts(
 # Resolution targets: ("internal", module, name), ("module", module, ""),
 # ("external", dotted, "").
 _Target = tuple[str, str, str]
+_MountRecord = tuple[_Target | None, str, list[tuple[str, str, str, Node]]]
 
 
 class _Resolver:
@@ -480,6 +563,7 @@ class _Resolver:
         self.paths = {r["module"]: r["path"] for r in file_records if r.get("module")}
         self.cache: dict[str, _ModuleFacts | None] = {}
         self.auth_cache: dict[tuple[str, str], bool] = {}
+        self.mounts: dict[_Target, list[_MountRecord]] = {}
 
     def facts(self, module: str) -> _ModuleFacts | None:
         if module not in self.cache:
@@ -570,24 +654,204 @@ class _Resolver:
         target = self.resolve(module, receiver, depth)
         return None if target is None else self.target_kind(target, depth)
 
-    @staticmethod
-    def _is_scheme_class(target: _Target | None) -> bool:
-        if target is None or target[0] != "external":
+    def record_mount(
+        self,
+        parent_target: _Target | None,
+        target: _Target,
+        prefix: str,
+        deps: list[tuple[str, str, str, Node]],
+    ) -> None:
+        mounts = self.mounts.setdefault(target, [])
+        entry = (parent_target, prefix, deps)
+        if entry not in mounts:
+            mounts.append(entry)
+
+    def get_router_prefix(self, target: _Target) -> str:
+        if target[0] != "internal":
+            return ""
+        facts = self.facts(target[1])
+        return (facts.router_prefixes.get(target[2], "") or "") if facts is not None else ""
+
+    def get_router_dependencies(self, target: _Target) -> list[tuple[str, str, str, Node]]:
+        if target[0] != "internal":
+            return []
+        facts = self.facts(target[1])
+        if facts is None:
+            return []
+        return [
+            (marker, text, target[1], node)
+            for marker, text, node in facts.router_dependencies.get(target[2], [])
+        ]
+
+    def get_effective_prefixes_and_deps(
+        self, target: _Target, visited: frozenset[_Target] = frozenset()
+    ) -> tuple[list[str], list[tuple[str, str, str, Node]]]:
+        if target in visited or target[0] != "internal":
+            return [], []
+
+        def_prefix = self.get_router_prefix(target)
+        def_deps = self.get_router_dependencies(target)
+
+        mount_list = self.mounts.get(target)
+        if not mount_list:
+            prefixes = [def_prefix] if def_prefix else []
+            return prefixes, def_deps
+
+        parent_target, mount_prefix, mount_deps = mount_list[0]
+        parent_prefixes: list[str] = []
+        parent_deps: list[tuple[str, str, str, Node]] = []
+        if parent_target is not None and parent_target[0] == "internal":
+            parent_prefixes, parent_deps = self.get_effective_prefixes_and_deps(
+                parent_target, visited | {target}
+            )
+
+        prefixes = [*parent_prefixes]
+        if mount_prefix:
+            prefixes.append(mount_prefix)
+        if def_prefix:
+            prefixes.append(def_prefix)
+
+        deps = parent_deps + mount_deps + def_deps
+        return prefixes, deps
+
+    def get_effective_route_path_and_deps(
+        self, module: str, receiver: str, route_path: str
+    ) -> tuple[str, list[tuple[str, str, str, Node]]]:
+        target = self.resolve(module, receiver)
+        if target is None or target[0] != "internal":
+            return route_path, []
+        prefixes, deps = self.get_effective_prefixes_and_deps(target)
+        full_path = _join_route_paths(*prefixes, route_path)
+        return full_path, deps
+
+    def is_security_scheme_class(
+        self, target: _Target | None, seen: frozenset[tuple[str, str]] = frozenset()
+    ) -> bool:
+        if target is None:
             return False
-        parts = target[1].split(".")
-        return parts[0] == "fastapi" and parts[-1] in FASTAPI_SECURITY_SCHEMES
+        if target[0] == "external":
+            parts = target[1].split(".")
+            return parts[0] == "fastapi" and parts[-1] in FASTAPI_SECURITY_SCHEMES
+        if target[0] != "internal":
+            return False
+        key = (target[1], target[2])
+        if key in seen:
+            return False
+        facts = self.facts(target[1])
+        if facts is None:
+            return False
+        bases = facts.classes.get(target[2], [])
+        for base in bases:
+            base_target = self.resolve(target[1], base)
+            if self.is_security_scheme_class(base_target, seen | {key}):
+                return True
+        return False
 
     def is_security_scheme(self, module: str, text: str) -> bool:
         """Whether ``text`` is a FastAPI security scheme instance: an inline
-        ``OAuth2PasswordBearer(...)`` call or a variable assigned from one."""
+        ``OAuth2PasswordBearer(...)`` / subclass call or a variable assigned from one."""
         if "(" in text:
-            return self._is_scheme_class(self.resolve(module, text.split("(", 1)[0].strip()))
+            callee_text = text.split("(", 1)[0].strip()
+            target = self.resolve(module, callee_text)
+            return self.is_security_scheme_class(target)
         target = self.resolve(module, text)
-        if target is None or target[0] != "internal":
+        if target is None:
             return False
-        facts = self.facts(target[1])
-        callee = facts.variables.get(target[2]) if facts is not None else None
-        return bool(callee) and self._is_scheme_class(self.resolve(target[1], callee or ""))
+        if target[0] == "internal":
+            facts = self.facts(target[1])
+            callee = facts.variables.get(target[2]) if facts is not None else None
+            if bool(callee):
+                callee_name = callee.split("(", 1)[0].strip() if "(" in callee else callee
+                return self.is_security_scheme_class(self.resolve(target[1], callee_name))
+        return self.is_security_scheme_class(target)
+
+    def is_argparse_receiver(
+        self,
+        module: str,
+        expr_node: Node | None,
+        source_bytes: bytes,
+        parser_constructed_in_file: bool = False,
+    ) -> bool:
+        """Whether expr_node is an ArgumentParser instance or built by an ArgumentParser factory."""
+        if expr_node is None:
+            return False
+        if expr_node.type == "call":
+            fn = expr_node.child_by_field_name("function")
+            if fn is not None:
+                fn_text = _get_node_text(fn, source_bytes).strip()
+                if fn_text == "ArgumentParser" or fn_text.endswith(".ArgumentParser"):
+                    return True
+                target = self.resolve(module, fn_text)
+                if target is not None:
+                    if target[0] == "external" and target[1] == "argparse.ArgumentParser":
+                        return True
+                    if target[0] == "internal":
+                        facts = self.facts(target[1])
+                        if facts is not None:
+                            func = facts.functions.get(target[2])
+                            if func is not None and func.constructs_argparse:
+                                return True
+        elif expr_node.type == "identifier":
+            name = _get_node_text(expr_node, source_bytes).strip()
+            local_facts = self.facts(module)
+            callee = None
+            if local_facts is not None:
+                callee = local_facts.variables.get(name) or local_facts.scoped_calls.get(name)
+            if callee:
+                callee_name = callee.split("(", 1)[0].strip() if "(" in callee else callee
+                if callee_name == "ArgumentParser" or callee_name.endswith(".ArgumentParser"):
+                    return True
+                callee_target = self.resolve(module, callee_name)
+                if callee_target is not None:
+                    if (
+                        callee_target[0] == "external"
+                        and callee_target[1] == "argparse.ArgumentParser"
+                    ):
+                        return True
+                    if callee_target[0] == "internal":
+                        c_facts = self.facts(callee_target[1])
+                        if c_facts is not None:
+                            func = c_facts.functions.get(callee_target[2])
+                            if func is not None and func.constructs_argparse:
+                                return True
+            target = self.resolve(module, name)
+            if target is not None and target[0] == "internal":
+                t_facts = self.facts(target[1])
+                if t_facts is not None:
+                    callee = t_facts.variables.get(target[2]) or t_facts.scoped_calls.get(target[2])
+                    if callee:
+                        callee_name = callee.split("(", 1)[0].strip() if "(" in callee else callee
+                        if callee_name == "ArgumentParser" or callee_name.endswith(
+                            ".ArgumentParser"
+                        ):
+                            return True
+                        callee_target = self.resolve(target[1], callee_name)
+                        if callee_target is not None:
+                            if (
+                                callee_target[0] == "external"
+                                and callee_target[1] == "argparse.ArgumentParser"
+                            ):
+                                return True
+                            if callee_target[0] == "internal":
+                                c_facts = self.facts(callee_target[1])
+                                if c_facts is not None:
+                                    func = c_facts.functions.get(callee_target[2])
+                                    if func is not None and func.constructs_argparse:
+                                        return True
+        elif expr_node.type == "attribute":
+            text = _get_node_text(expr_node, source_bytes).strip()
+            target = self.resolve(module, text)
+            if target is not None and target[0] == "internal":
+                facts = self.facts(target[1])
+                if facts is not None and target[2] in facts.variables:
+                    callee = facts.variables[target[2]]
+                    if callee and (
+                        callee == "ArgumentParser" or callee.endswith(".ArgumentParser")
+                    ):
+                        return True
+            if parser_constructed_in_file:
+                return True
+        return False
 
     def alias_dependencies(self, module: str, name: str) -> list[tuple[str, str, str]]:
         """``(marker, dependency_text, alias_module)`` for an ``Annotated`` alias name."""
@@ -903,6 +1167,33 @@ class PythonPlugin(LanguagePlugin):
                 elif child.type in ("decorated_definition", "block", "module"):
                     stack.append((child, scope, in_class))
 
+    def _scan_router_mounts(
+        self,
+        root: Node,
+        source_bytes: bytes,
+        rel_path: str,
+        module_name: str,
+        resolver: _Resolver,
+    ) -> None:
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type == "call":
+                fn_node = node.child_by_field_name("function")
+                if fn_node is not None:
+                    fn_text = _get_node_text(fn_node, source_bytes).strip()
+                    self._record_router_mount(
+                        node,
+                        fn_text,
+                        source_bytes,
+                        rel_path,
+                        module_name,
+                        resolver,
+                        [],
+                        record_ref=False,
+                    )
+            stack.extend(reversed(node.children))
+
     def index_unit_tier2(
         self,
         unit: IndexUnit,
@@ -942,6 +1233,7 @@ class PythonPlugin(LanguagePlugin):
         unresolved_refs: list[dict[str, Any]] = []
         entrypoints: list[dict[str, Any]] = []
 
+        parsed_files: list[tuple[Path, str, str, str, bool, str, bytes, Node]] = []
         for full_path in unit.files:
             try:
                 rel_path = full_path.relative_to(repo_root).as_posix()
@@ -961,8 +1253,34 @@ class PythonPlugin(LanguagePlugin):
             resolver.cache[module_name] = _gather_module_facts(
                 tree.root_node, source_bytes, module_name, importable, is_package, project
             )
+            parsed_files.append(
+                (
+                    full_path,
+                    rel_path,
+                    module_name,
+                    importable,
+                    is_package,
+                    project,
+                    source_bytes,
+                    tree.root_node,
+                )
+            )
+
+        for _, rel_path, module_name, _, _, _, source_bytes, root_node in parsed_files:
+            self._scan_router_mounts(root_node, source_bytes, rel_path, module_name, resolver)
+
+        for (
+            _,
+            rel_path,
+            module_name,
+            importable,
+            is_package,
+            project,
+            source_bytes,
+            root_node,
+        ) in parsed_files:
             self._analyze_file(
-                tree.root_node,
+                root_node,
                 source_bytes,
                 rel_path,
                 module_name,
@@ -997,6 +1315,7 @@ class PythonPlugin(LanguagePlugin):
         self,
         func_node: Node,
         call_node: Node | None,
+        receiver: str,
         attr: str,
         dec: str,
         decorators: list[str],
@@ -1012,8 +1331,11 @@ class PythonPlugin(LanguagePlugin):
         """Build an ``http`` entrypoint for a resolved route decorator."""
         args_match = re.search(r"\(([^)]*)\)", dec)
         args_str = args_match.group(1) if args_match else ""
-        path_match = re.search(r"['\"]([^'\"]+)['\"]", args_str)
-        route_path = path_match.group(1) if path_match else "/"
+        path_match = re.search(r"['\"]([^'\"]*)['\"]", args_str)
+        raw_route_path = path_match.group(1) if path_match else "/"
+        route_path, router_deps = resolver.get_effective_route_path_and_deps(
+            module_name, receiver, raw_route_path
+        )
         method_name = attr.upper()
         # ``.route``/``.api_route`` declare methods=['GET', 'POST'] (or the tuple form)
         if attr in ("route", "api_route"):
@@ -1026,9 +1348,10 @@ class PythonPlugin(LanguagePlugin):
             ]
             method_name = ",".join(declared) or "GET"
 
-        # Dependencies come from the decorator (``dependencies=[...]``) and the signature
-        # (including ``Annotated`` aliases), never the body. Each is persisted as a
-        # ``call`` reference (FastAPI calls it); auth is resolved, never guessed from names.
+        # Dependencies come from the decorator (``dependencies=[...]``), the signature
+        # (including ``Annotated`` aliases), and router-level dependencies (from
+        # ``APIRouter(dependencies=[...])`` and ``include_router(..., dependencies=[...])``).
+        # Each direct dependency is persisted as a ``call`` reference; auth is resolved.
         auth_symbols: list[str] = []
         params = func_node.child_by_field_name("parameters")
         found: list[tuple[str, str, str, Node]] = [
@@ -1060,6 +1383,13 @@ class PythonPlugin(LanguagePlugin):
                 marker == "Security" or resolver.is_auth_dependency(where, text)
             ) and text not in auth_symbols:
                 auth_symbols.append(text)
+
+        for marker, text, where, _ in router_deps:
+            if (
+                marker == "Security" or resolver.is_auth_dependency(where, text)
+            ) and text not in auth_symbols:
+                auth_symbols.append(text)
+
         if any(d.startswith("@login_required") for d in decorators):
             auth_symbols.append("login_required")
 
@@ -1083,8 +1413,9 @@ class PythonPlugin(LanguagePlugin):
         module_name: str,
         resolver: _Resolver,
         references: list[dict[str, Any]],
+        record_ref: bool = True,
     ) -> None:
-        """Record ``app.include_router(r)``/``register_blueprint(bp)`` as an edge only."""
+        """Record ``app.include_router(r)``/``register_blueprint(bp)`` as an edge and mount."""
         receiver, _, attr = fn_text.rpartition(".")
         if attr not in ROUTER_MOUNT_ATTRS or not receiver:
             return
@@ -1100,15 +1431,45 @@ class PythonPlugin(LanguagePlugin):
             return
         if resolver.target_kind(target) not in RECEIVER_ROUTE_ATTRS:
             return
-        references.append(
-            {
-                "symbol_fqname": resolver.fqname(target, ""),
-                "file_path": rel_path,
-                "line": arg.start_point[0] + 1,
-                "col": arg.start_point[1],
-                "ref_kind": "read",
-            }
-        )
+        if record_ref:
+            references.append(
+                {
+                    "symbol_fqname": resolver.fqname(target, ""),
+                    "file_path": rel_path,
+                    "line": arg.start_point[0] + 1,
+                    "col": arg.start_point[1],
+                    "ref_kind": "read",
+                }
+            )
+
+        parent_target = resolver.resolve(module_name, receiver)
+        prefix = _get_call_kwarg_string(call, source_bytes, ("prefix", "url_prefix")) or ""
+        mount_deps: list[tuple[str, str, str, Node]] = []
+        args_node = call.child_by_field_name("arguments")
+        if args_node is not None:
+            for c in args_node.named_children:
+                if c.type == "keyword_argument":
+                    kname = c.child_by_field_name("name")
+                    if kname is not None and _get_node_text(kname, source_bytes) == "dependencies":
+                        val_node = c.child_by_field_name("value")
+                        if val_node is not None:
+                            for m, t, n in _dependency_calls(val_node, source_bytes):
+                                if t:
+                                    mount_deps.append((m, t, module_name, n))
+                                    if record_ref:
+                                        sym_fq = resolver.fqname(
+                                            resolver.resolve(module_name, t), t
+                                        )
+                                        references.append(
+                                            {
+                                                "symbol_fqname": sym_fq,
+                                                "file_path": rel_path,
+                                                "line": n.start_point[0] + 1,
+                                                "col": n.start_point[1],
+                                                "ref_kind": "call",
+                                            }
+                                        )
+        resolver.record_mount(parent_target, target, prefix, mount_deps)
 
     def _analyze_file(
         self,
@@ -1134,6 +1495,7 @@ class PythonPlugin(LanguagePlugin):
         argument_parser_names: set[str] = set()  # local names bound to ArgumentParser
         parser_constructed = False
         parses_argv = False
+        argparse_parse_calls: list[Node] = []
         is_test = _is_test_path(rel_path)
 
         def is_argument_parser(fn_text: str) -> bool:
@@ -1249,6 +1611,38 @@ class PythonPlugin(LanguagePlugin):
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                             record_import(full_sym, alias, line, col)
 
+            # 1b. Assignments
+            elif node.type == "assignment":
+                right = node.child_by_field_name("right")
+                if right is not None and right.type == "call":
+                    args = right.child_by_field_name("arguments")
+                    if args is not None:
+                        for arg in args.named_children:
+                            if arg.type == "keyword_argument":
+                                arg_name = arg.child_by_field_name("name")
+                                if (
+                                    arg_name is not None
+                                    and _get_node_text(arg_name, source_bytes) == "dependencies"
+                                ):
+                                    val_node = arg.child_by_field_name("value")
+                                    if val_node is not None:
+                                        for _marker, t, n in _dependency_calls(
+                                            val_node, source_bytes
+                                        ):
+                                            if t:
+                                                sym_fq = resolver.fqname(
+                                                    resolver.resolve(module_name, t), t
+                                                )
+                                                references.append(
+                                                    {
+                                                        "symbol_fqname": sym_fq,
+                                                        "file_path": rel_path,
+                                                        "line": n.start_point[0] + 1,
+                                                        "col": n.start_point[1],
+                                                        "ref_kind": "call",
+                                                    }
+                                                )
+
             # 2. Calls
             elif node.type == "call":
                 fn_node = node.child_by_field_name("function")
@@ -1263,6 +1657,7 @@ class PythonPlugin(LanguagePlugin):
                         parser_constructed = True
                     if called_attr in ("parse_args", "parse_known_args"):
                         parses_argv = True
+                        argparse_parse_calls.append(node)
 
                     for alias in sorted(file_imports, key=len, reverse=True):
                         if fn_text == alias or fn_text.startswith(f"{alias}."):
@@ -1331,6 +1726,7 @@ class PythonPlugin(LanguagePlugin):
                                 self._route_entrypoint(
                                     func_node,
                                     call_node,
+                                    receiver,
                                     attr,
                                     dec,
                                     decorators,
@@ -1355,6 +1751,15 @@ class PythonPlugin(LanguagePlugin):
                                     "line": func_line,
                                     "symbol_fqname": func_fqname,
                                     "auth_symbols_json": "[]",
+                                }
+                            )
+                        else:
+                            unresolved_refs.append(
+                                {
+                                    "file_path": rel_path,
+                                    "line": dec_node.start_point[0] + 1,
+                                    "raw_symbol": f"{receiver}.{attr}",
+                                    "language": "python",
                                 }
                             )
 
@@ -1387,8 +1792,22 @@ class PythonPlugin(LanguagePlugin):
             stack.extend((child, child_scope) for child in reversed(node.children))
 
         # 3c. Argparse CLI detection: the file builds an ``ArgumentParser`` and parses
-        # argv with it, so the file is a CLI.
+        # argv with it, or calls parse_args on an imported ArgumentParser / builder.
+        is_cli = False
         if parser_constructed and parses_argv:
+            is_cli = True
+        elif parses_argv:
+            for call_n in argparse_parse_calls:
+                fn_n = call_n.child_by_field_name("function")
+                if fn_n and fn_n.type == "attribute":
+                    recv_node = fn_n.child_by_field_name("object")
+                    if resolver.is_argparse_receiver(
+                        module_name, recv_node, source_bytes, parser_constructed
+                    ):
+                        is_cli = True
+                        break
+
+        if is_cli:
             add_entrypoint(
                 {
                     "kind": "cli",

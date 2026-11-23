@@ -1757,3 +1757,287 @@ def cycle(x=Depends(ping)): pass
     auth = {e["name"]: json.loads(e["auth_symbols_json"]) for e in res.entrypoints}
     # both chains reach the scheme (d2 in 5 hops, d1 in 6); the cycle still stops
     assert auth == {"near": ["d2"], "far": ["d1"], "cycle": []}
+
+
+def test_python_router_and_blueprint_prefixes_applied_to_routes(tmp_path: Path):
+    """Router and blueprint prefixes (both definition and mount) apply to stored route paths.
+
+    Tests:
+    1. APIRouter(prefix=...)
+    2. app.include_router(..., prefix=...)
+    3. Blueprint(url_prefix=...)
+    4. app.register_blueprint(..., url_prefix=...)
+    """
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "routes_users.py").write_text(
+        "from fastapi import APIRouter\n"
+        "\n"
+        "router = APIRouter(prefix='/users')\n"
+        "\n"
+        "@router.get('/{id}')\n"
+        "def get_user(id: int): pass\n"
+    )
+    (tmp_path / "app" / "routes_items.py").write_text(
+        "from fastapi import APIRouter\n"
+        "\n"
+        "router = APIRouter(prefix='/items')\n"
+        "\n"
+        "@router.post('')\n"
+        "def create_item(): pass\n"
+        "\n"
+        "@router.get('/{item_id}')\n"
+        "def get_item(item_id: int): pass\n"
+    )
+    (tmp_path / "app" / "bp_auth.py").write_text(
+        "from flask import Blueprint\n"
+        "\n"
+        "auth_bp = Blueprint('auth', __name__, url_prefix='/auth')\n"
+        "\n"
+        "@auth_bp.route('/login', methods=['POST'])\n"
+        "def login(): pass\n"
+    )
+    (tmp_path / "app" / "bp_admin.py").write_text(
+        "from flask import Blueprint\n"
+        "\n"
+        "admin_bp = Blueprint('admin', __name__, url_prefix='/admin')\n"
+        "\n"
+        "@admin_bp.route('/dashboard')\n"
+        "def dashboard(): pass\n"
+    )
+    (tmp_path / "app" / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from flask import Flask\n"
+        "from app.routes_users import router as users_router\n"
+        "from app.routes_items import router as items_router\n"
+        "from app.bp_auth import auth_bp\n"
+        "from app.bp_admin import admin_bp\n"
+        "\n"
+        "app_fastapi = FastAPI()\n"
+        "app_fastapi.include_router(users_router)\n"
+        "app_fastapi.include_router(items_router, prefix='/api/v1')\n"
+        "\n"
+        "app_flask = Flask(__name__)\n"
+        "app_flask.register_blueprint(auth_bp)\n"
+        "app_flask.register_blueprint(admin_bp, url_prefix='/api/v2')\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:app",
+        name="app",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted((tmp_path / "app").glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    http_routes = {
+        (e["name"], e["method"], e["route_or_trigger"])
+        for e in res.entrypoints
+        if e["kind"] == "http"
+    }
+    assert http_routes == {
+        # APIRouter(prefix='/users') mounted with no prefix -> /users/{id}
+        ("get_user", "GET", "/users/{id}"),
+        # APIRouter(prefix='/items') mounted with prefix='/api/v1'
+        ("create_item", "POST", "/api/v1/items"),
+        ("get_item", "GET", "/api/v1/items/{item_id}"),
+        # Blueprint(url_prefix='/auth') registered with no prefix -> /auth/login
+        ("login", "POST", "/auth/login"),
+        # Blueprint(url_prefix='/admin') registered with url_prefix='/api/v2'
+        ("dashboard", "GET", "/api/v2/admin/dashboard"),
+    }
+
+
+def test_python_router_level_dependencies_attached_for_auth(tmp_path: Path):
+    """Router-level dependencies (from APIRouter and include_router) attach to every route."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "security.py").write_text(
+        "from fastapi import Depends\n"
+        "from fastapi.security import OAuth2PasswordBearer\n"
+        "\n"
+        "oauth2_scheme = OAuth2PasswordBearer(tokenUrl='token')\n"
+        "\n"
+        "def get_current_user(token=Depends(oauth2_scheme)):\n"
+        "    return token\n"
+        "\n"
+        "def require_admin(user=Depends(get_current_user)):\n"
+        "    return user\n"
+        "\n"
+        "def get_db():\n"
+        "    return object()\n"
+    )
+    (tmp_path / "app" / "routes.py").write_text(
+        "from fastapi import APIRouter, Depends\n"
+        "from app.security import get_current_user, get_db, require_admin\n"
+        "\n"
+        "router = APIRouter(\n"
+        "    prefix='/users',\n"
+        "    dependencies=[Depends(get_current_user), Depends(get_db)],\n"
+        ")\n"
+        "\n"
+        "@router.get('/profile')\n"
+        "def profile(): pass\n"
+        "\n"
+        "@router.get('/admin', dependencies=[Depends(require_admin)])\n"
+        "def admin(): pass\n"
+    )
+    (tmp_path / "app" / "main.py").write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "from app.routes import router\n"
+        "from app.security import require_admin\n"
+        "\n"
+        "app = FastAPI()\n"
+        "app.include_router(router, prefix='/api', dependencies=[Depends(require_admin)])\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:app",
+        name="app",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted((tmp_path / "app").glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    eps = {e["name"]: e for e in res.entrypoints if e["kind"] == "http"}
+    auth_by_route = {name: set(json.loads(e["auth_symbols_json"])) for name, e in eps.items()}
+    assert eps["profile"]["route_or_trigger"] == "/api/users/profile"
+    assert eps["admin"]["route_or_trigger"] == "/api/users/admin"
+    # profile route inherits require_admin and get_current_user; get_db is not auth
+    assert auth_by_route["profile"] == {"require_admin", "get_current_user"}
+    # admin route has require_admin declared and inherited, plus get_current_user
+    assert auth_by_route["admin"] == {"require_admin", "get_current_user"}
+
+
+def test_python_security_scheme_subclasses_recognised(tmp_path: Path):
+    """Subclasses of FastAPI security schemes are recognised through class hierarchy."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "security.py").write_text(
+        "from fastapi.security import HTTPBearer\n"
+        "\n"
+        "class JWTBearer(HTTPBearer):\n"
+        "    pass\n"
+        "\n"
+        "class ExtendedJWTBearer(JWTBearer):\n"
+        "    pass\n"
+        "\n"
+        "jwt_scheme = JWTBearer()\n"
+    )
+    (tmp_path / "app" / "api.py").write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "from app.security import ExtendedJWTBearer, jwt_scheme\n"
+        "\n"
+        "app = FastAPI()\n"
+        "\n"
+        "@app.get('/direct_instance')\n"
+        "def direct_route(token=Depends(jwt_scheme)):\n"
+        "    return token\n"
+        "\n"
+        "@app.get('/inline_call')\n"
+        "def inline_route(token=Depends(ExtendedJWTBearer())):\n"
+        "    return token\n"
+        "\n"
+        "def get_auth_user(token=Depends(ExtendedJWTBearer())):\n"
+        "    return token\n"
+        "\n"
+        "@app.get('/transitive')\n"
+        "def transitive_route(user=Depends(get_auth_user)):\n"
+        "    return user\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:app",
+        name="app",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted((tmp_path / "app").glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    auth = {
+        e["name"]: json.loads(e["auth_symbols_json"])
+        for e in res.entrypoints
+        if e["kind"] == "http"
+    }
+    assert auth["direct_route"] == ["jwt_scheme"]
+    assert auth["inline_route"] == ["ExtendedJWTBearer()"]
+    assert auth["transitive_route"] == ["get_auth_user"]
+
+
+def test_python_unresolvable_route_receiver_recorded_as_unresolved_ref(tmp_path: Path):
+    """A route receiver imported from an unresolvable module becomes an unresolved_ref row."""
+    # Common requirements.txt-only layout without a pyproject.toml in backend/
+    backend = tmp_path / "backend"
+    (backend / "app").mkdir(parents=True)
+    (backend / "app" / "routes.py").write_text(
+        "from fastapi import APIRouter\n\nrouter = APIRouter()\n"
+    )
+    (backend / "app" / "views.py").write_text(
+        "from app.routes import router\n\n@router.get('/{id}')\ndef get_item(id: int): pass\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:backend",
+        name="backend",
+        language="python",
+        root_dir=tmp_path,
+        files=[
+            backend / "app" / "routes.py",
+            backend / "app" / "views.py",
+        ],
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    # The route decorator on unresolvable receiver must NOT be dropped silently
+    views_eps = [e for e in res.entrypoints if e["file_path"] == "backend/app/views.py"]
+    assert views_eps == []
+    unresolved = [
+        (u["file_path"], u["line"], u["raw_symbol"])
+        for u in res.unresolved_refs
+        if u["file_path"] == "backend/app/views.py"
+    ]
+    # Both the import and the decorator receiver are recorded as unresolved_refs
+    assert ("backend/app/views.py", 1, "app.routes.router") in unresolved
+    assert ("backend/app/views.py", 3, "router.get") in unresolved
+
+
+def test_python_argparse_cross_file_builder_detected(tmp_path: Path):
+    """Argparse CLI entrypoint detected when parser is built in one file and parsed in another."""
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    (tool_dir / "__init__.py").write_text("")
+    (tool_dir / "parser.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def build_parser():\n"
+        "    parser = argparse.ArgumentParser(prog='mytool')\n"
+        "    parser.add_argument('--config')\n"
+        "    return parser\n"
+    )
+    (tool_dir / "__main__.py").write_text(
+        "from tool.parser import build_parser\n"
+        "\n"
+        "def main():\n"
+        "    args = build_parser().parse_args()\n"
+    )
+    (tool_dir / "runner.py").write_text(
+        "from tool.parser import build_parser\n"
+        "\n"
+        "def run():\n"
+        "    p = build_parser()\n"
+        "    return p.parse_args()\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:tool",
+        name="tool",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted(tool_dir.glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    cli_eps = {e["file_path"]: e for e in res.entrypoints if e["kind"] == "cli"}
+    # tool/parser.py only constructs the parser, so it emits NO CLI entrypoint
+    assert "tool/parser.py" not in cli_eps
+    # tool/__main__.py calls build_parser().parse_args() -> CLI entrypoint
+    assert "tool/__main__.py" in cli_eps
+    assert cli_eps["tool/__main__.py"]["name"] == "__main__"
+    assert cli_eps["tool/__main__.py"]["route_or_trigger"] == "argparse"
+    # tool/runner.py assigns p = build_parser(); p.parse_args() -> CLI entrypoint
+    assert "tool/runner.py" in cli_eps
+    assert cli_eps["tool/runner.py"]["name"] == "runner"
+    assert cli_eps["tool/runner.py"]["route_or_trigger"] == "argparse"
