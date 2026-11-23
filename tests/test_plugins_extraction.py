@@ -346,6 +346,39 @@ public class ReportController {
         assert eps["create"]["route_or_trigger"] == "/"
 
 
+def test_java_spring_positional_array_and_multiline_annotations():
+    code = b"""
+package com.example.demo;
+
+@RestController
+@RequestMapping({"/api"})
+public class ArrayController {
+    @GetMapping({"/x", "/y"})
+    public String first() { return ""; }
+
+    @PostMapping(
+        value = "/multi"
+    )
+    public String second() { return ""; }
+}
+"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        (p / "ArrayController.java").write_bytes(code)
+        plugin = JavaPlugin()
+        unit = IndexUnit(
+            unit_id="java:root",
+            name="root",
+            language="java",
+            root_dir=p,
+            files=[p / "ArrayController.java"],
+        )
+        res = plugin.index_unit_tier2(unit)
+        eps = {e["name"]: e for e in res.entrypoints if e["kind"] == "http"}
+        assert eps["first"]["route_or_trigger"] == "/api/x"
+        assert eps["second"]["route_or_trigger"] == "/api/multi"
+
+
 def test_typescript_express_and_axios_filtering():
     code = b"""
 import express from 'express';
@@ -363,6 +396,7 @@ app.get('/health', handler);
 axios.create({ baseURL: '/api' });
 axios.interceptors.response.use((r) => r);
 axios.get('/api/items');
+axios.request({ url: '/api/request', method: 'post' });
 """
     with tempfile.TemporaryDirectory() as td:
         p = Path(td)
@@ -380,8 +414,10 @@ axios.get('/api/items');
             (e["method"], e["route_or_trigger"]) for e in res.entrypoints if e["kind"] == "http"
         }
         assert http_eps == {("ALL", "/static"), ("GET", "/health")}
-        api_routes = {e["route_or_trigger"] for e in res.entrypoints if e["kind"] == "api_call"}
-        assert api_routes == {"/api/items"}
+        api_calls = {
+            e["route_or_trigger"]: e["method"] for e in res.entrypoints if e["kind"] == "api_call"
+        }
+        assert api_calls == {"/api/items": "GET", "/api/request": "POST"}
 
 
 def test_infra_compose_lines_dockerfile_flags_and_raw_sha(tmp_path: Path):

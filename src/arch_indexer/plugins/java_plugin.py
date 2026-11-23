@@ -32,7 +32,7 @@ def _annotation_path(annotation_args: str) -> str:
     attr_match = re.search(r"\b(?:value|path)\b\s*=\s*\{?\s*['\"]([^'\"]+)['\"]", annotation_args)
     if attr_match:
         return attr_match.group(1)
-    bare_match = re.match(r"\s*['\"]([^'\"]+)['\"]", annotation_args)
+    bare_match = re.match(r"\s*\{?\s*['\"]([^'\"]+)['\"]", annotation_args)
     return bare_match.group(1) if bare_match else ""
 
 
@@ -296,9 +296,9 @@ class JavaPlugin(LanguagePlugin):
         known_prefixes: set[str] = set()
 
         if symbol_context:
-            known_fqnames = symbol_context.get("fqnames", set())
+            known_fqnames = symbol_context.get("fqnames", {}).get(self.name, set())
             known_names = symbol_context.get("names", {}).get(self.name, {})
-            known_prefixes = symbol_context.get("prefixes", set())
+            known_prefixes = symbol_context.get("prefixes", {}).get(self.name, set())
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
@@ -470,6 +470,7 @@ class JavaPlugin(LanguagePlugin):
                     spring_match = re.search(
                         r"@(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\b(?:\((.*)\))?",
                         ann,
+                        flags=re.DOTALL,
                     )
                     if spring_match:
                         ann_type = spring_match.group(1)

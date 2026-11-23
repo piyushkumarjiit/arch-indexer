@@ -26,13 +26,29 @@ def _get_node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
 
-def _module_info(rel_path: str) -> tuple[str, bool]:
+def _source_root_parts(repo_root: Path, rel_path: str) -> list[str]:
+    """Find the nearest Python project root for a repository-relative file."""
+    parts = [part for part in Path(rel_path).parts if part]
+    for i in range(len(parts) - 1, -1, -1):
+        dir_parts = parts[:i]
+        dir_path = repo_root.joinpath(*dir_parts) if dir_parts else repo_root
+        if any(
+            (dir_path / marker).is_file() for marker in ("pyproject.toml", "setup.py", "setup.cfg")
+        ):
+            return dir_parts
+    return []
+
+
+def _module_info(repo_root: Path, rel_path: str) -> tuple[str, bool]:
     """Derive the importable module name and whether the file is a package."""
     mod_path = rel_path[:-3] if rel_path.endswith(".py") else rel_path
     parts = [part for part in mod_path.split("/") if part]
     is_package = bool(parts) and parts[-1] == "__init__"
     if is_package:
         parts = parts[:-1]
+    root_parts = _source_root_parts(repo_root, rel_path)
+    if root_parts and parts[: len(root_parts)] == root_parts:
+        parts = parts[len(root_parts) :]
     if parts and parts[0] == "src":
         parts = parts[1:]
     return ".".join(parts), is_package
@@ -163,7 +179,7 @@ class PythonPlugin(LanguagePlugin):
             line_count = len(lines)
             sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-            module_name, _ = _module_info(rel_path)
+            module_name, _ = _module_info(repo_root, rel_path)
 
             file_records.append(
                 {
@@ -290,9 +306,9 @@ class PythonPlugin(LanguagePlugin):
         known_modules: set[str] = set()
 
         if symbol_context:
-            known_fqnames = symbol_context.get("fqnames", set())
+            known_fqnames = symbol_context.get("fqnames", {}).get(self.name, set())
             known_names = symbol_context.get("names", {}).get(self.name, {})
-            known_modules = symbol_context.get("modules", set())
+            known_modules = symbol_context.get("modules", {}).get(self.name, set())
         else:
             for s in symbol_records:
                 known_fqnames.add(s["fqname"])
@@ -315,7 +331,7 @@ class PythonPlugin(LanguagePlugin):
             except OSError:
                 continue
 
-            module_name, is_package = _module_info(rel_path)
+            module_name, is_package = _module_info(repo_root, rel_path)
 
             tree = self.parser.parse(source_bytes)
             self._analyze_file(
@@ -363,6 +379,7 @@ class PythonPlugin(LanguagePlugin):
     ) -> None:
         """Extract imports, call references, and entrypoints for a Python file."""
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
+        bound_names: set[str] = set()
         has_argparse = False
 
         def walk(node: Node) -> None:
@@ -375,6 +392,7 @@ class PythonPlugin(LanguagePlugin):
                 for child in node.children:
                     if child.type == "dotted_name":
                         raw_sym = _get_node_text(child, source_bytes)
+                        bound_names.add(raw_sym.split(".", 1)[0])
                         if raw_sym == "argparse":
                             has_argparse = True
                         if raw_sym in known_modules or raw_sym in known_fqnames:
@@ -402,9 +420,12 @@ class PythonPlugin(LanguagePlugin):
                         alias_node = child.child_by_field_name("alias")
                         if orig_node:
                             raw_sym = _get_node_text(orig_node, source_bytes)
-                            alias = (
-                                _get_node_text(alias_node, source_bytes) if alias_node else raw_sym
-                            )
+                            if alias_node:
+                                alias = _get_node_text(alias_node, source_bytes)
+                                bound_names.add(alias)
+                            else:
+                                alias = raw_sym
+                                bound_names.add(raw_sym.split(".", 1)[0])
                             if raw_sym in known_modules or raw_sym in known_fqnames:
                                 references.append(
                                     {
@@ -455,6 +476,7 @@ class PythonPlugin(LanguagePlugin):
                 for child in node.children:
                     if child.type == "dotted_name" and child != mod_name_node:
                         sym_name = _get_node_text(child, source_bytes)
+                        bound_names.add(sym_name)
                         full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                         if full_sym in known_fqnames or full_sym in known_modules:
                             references.append(
@@ -484,6 +506,7 @@ class PythonPlugin(LanguagePlugin):
                             alias = (
                                 _get_node_text(alias_node, source_bytes) if alias_node else sym_name
                             )
+                            bound_names.add(alias)
                             full_sym = f"{resolved_mod}.{sym_name}" if resolved_mod else sym_name
                             if full_sym in known_fqnames or full_sym in known_modules:
                                 references.append(
@@ -527,7 +550,7 @@ class PythonPlugin(LanguagePlugin):
                         local_fqname = f"{module_name}.{fn_text}"
                         if local_fqname in known_fqnames:
                             target_fqname = local_fqname
-                        elif fn_text in known_names:
+                        elif fn_text.split(".", 1)[0] not in bound_names and fn_text in known_names:
                             target_fqname = known_names[fn_text]
 
                     references.append(

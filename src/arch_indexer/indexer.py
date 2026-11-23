@@ -69,9 +69,9 @@ def run_index(
             all_units.append((plugin, u))
 
     # Phase 1: Pre-extract symbols to build global repository symbol table
-    repo_fqnames: set[str] = set()
-    repo_modules: set[str] = set()
     repo_files: set[str] = set()
+    fqnames_by_language: dict[str, set[str]] = {}
+    modules_by_language: dict[str, set[str]] = {}
     symbols_by_language: dict[str, list[dict[str, Any]]] = {}
     files_by_language: dict[str, list[dict[str, Any]]] = {}
     definitions_by_unit: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
@@ -79,11 +79,13 @@ def run_index(
     for plugin, unit in all_units:
         file_recs, sym_recs = plugin.extract_definitions(unit)
         definitions_by_unit[unit.unit_id] = (file_recs, sym_recs)
+        language_fqnames = fqnames_by_language.setdefault(plugin.name, set())
+        language_modules = modules_by_language.setdefault(plugin.name, set())
         for f in file_recs:
             repo_files.add(f["path"])
-            repo_modules.update(module_with_parents(f["module"]))
+            language_modules.update(module_with_parents(f["module"]))
         for s in sym_recs:
-            repo_fqnames.add(s["fqname"])
+            language_fqnames.add(s["fqname"])
         symbols_by_language.setdefault(plugin.name, []).extend(sym_recs)
         files_by_language.setdefault(plugin.name, []).extend(file_recs)
 
@@ -95,9 +97,12 @@ def run_index(
     }
 
     symbol_context = {
-        "fqnames": repo_fqnames,
-        "prefixes": build_fqname_prefixes(repo_fqnames),
-        "modules": repo_modules,
+        "fqnames": fqnames_by_language,
+        "prefixes": {
+            language: build_fqname_prefixes(fqnames)
+            for language, fqnames in fqnames_by_language.items()
+        },
+        "modules": modules_by_language,
         "names": names_by_language,
         "files": repo_files,
     }

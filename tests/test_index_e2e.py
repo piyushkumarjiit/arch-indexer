@@ -194,6 +194,129 @@ def test_bare_call_names_are_language_and_kind_scoped(tmp_path: Path, capsys):
     conn.close()
 
 
+def test_python_project_root_imports(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    backend = repo / "backend"
+    app = backend / "app"
+    app.mkdir(parents=True)
+    (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
+    (app / "__init__.py").write_text("")
+    (app / "core.py").write_text("class Engine:\n    pass\n")
+    (app / "main.py").write_text(
+        "from app.core import Engine\n\ndef build():\n    return Engine()\n"
+    )
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" '
+        'WHERE file_path="backend/app/main.py" AND ref_kind="import"'
+    )
+    assert "app.core.Engine" in {row[0] for row in c.fetchall()}
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" '
+        'WHERE file_path="backend/app/main.py" AND ref_kind="call"'
+    )
+    assert "app.core.Engine" in {row[0] for row in c.fetchall()}
+
+    c.execute('SELECT raw_symbol FROM unresolved_refs WHERE file_path="backend/app/main.py"')
+    assert not any(row[0].startswith("app") for row in c.fetchall())
+
+    conn.close()
+
+
+def test_imported_names_shadow_external_imports(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "util.py").write_text("def dumps(value):\n    return value\n")
+    (repo / "a.py").write_text("from json import dumps\n\ndef run():\n    dumps({})\n")
+    (repo / "util.ts").write_text("export function format(value: string) { return value; }\n")
+    (repo / "app.ts").write_text("import { format } from 'date-fns';\nformat('x');\n")
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute('SELECT symbol_fqname FROM "references" WHERE file_path="a.py" AND ref_kind="call"')
+    python_calls = {row[0] for row in c.fetchall()}
+    assert python_calls == {"dumps"}
+
+    c.execute('SELECT symbol_fqname FROM "references" WHERE file_path="app.ts" AND ref_kind="call"')
+    assert {row[0] for row in c.fetchall()} == {"format"}
+
+    conn.close()
+
+
+def test_cross_language_module_tables(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    types_dir = repo / "types"
+    types_dir.mkdir(parents=True)
+    (types_dir / "index.ts").write_text("export const value = 1;\n")
+    (repo / "use.py").write_text("import types\n")
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="use.py" AND ref_kind="import"'
+    )
+    assert "types" not in {row[0] for row in c.fetchall()}
+
+    c.execute('SELECT raw_symbol FROM unresolved_refs WHERE file_path="use.py"')
+    assert "types" in {row[0] for row in c.fetchall()}
+
+    conn.close()
+
+
+def test_typescript_esm_js_specifier(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    lib = repo / "lib"
+    lib.mkdir(parents=True)
+    (lib / "utils.ts").write_text("export function x() { return 1; }\n")
+    (lib / "app.ts").write_text(
+        "import { x as runX } from './utils.js';\nexport function go() { runX(); }\n"
+    )
+
+    cache = tmp_path / "cache"
+    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    assert code == EXIT_OK
+
+    db_path = next((cache / "repos").glob("*/index.db"))
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="lib/app.ts" AND ref_kind="import"'
+    )
+    assert {row[0] for row in c.fetchall()} == {"lib.utils.x"}
+
+    c.execute(
+        'SELECT symbol_fqname FROM "references" WHERE file_path="lib/app.ts" AND ref_kind="call"'
+    )
+    assert {row[0] for row in c.fetchall()} == {"lib.utils.x"}
+
+    c.execute('SELECT raw_symbol FROM unresolved_refs WHERE file_path="lib/app.ts"')
+    assert c.fetchall() == []
+
+    conn.close()
+
+
 def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
     repo = tmp_path / "multi_file_repo"
     repo.mkdir()

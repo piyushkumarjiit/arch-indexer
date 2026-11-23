@@ -40,6 +40,41 @@ def _module_name(rel_path: str) -> str:
     return mod_path.replace("/", ".")
 
 
+def _imported_local_names(node: Node, source_bytes: bytes) -> list[str]:
+    """Return the local names bound by a TypeScript/JavaScript import statement."""
+    names: list[str] = []
+
+    def add_named_imports(container: Node) -> None:
+        for spec in container.children:
+            if spec.type == "import_specifier":
+                name_node = spec.child_by_field_name("name")
+                alias_node = spec.child_by_field_name("alias")
+                names.append(_get_node_text(alias_node or name_node or spec, source_bytes))
+
+    def add_namespace_import(namespace: Node) -> None:
+        for child in namespace.children:
+            if child.type == "identifier":
+                names.append(_get_node_text(child, source_bytes))
+
+    clause = node.child_by_field_name("clause") or node
+    for child in clause.children:
+        if child.type == "import_clause":
+            for item in child.children:
+                if item.type == "named_imports":
+                    add_named_imports(item)
+                elif item.type == "identifier":
+                    names.append(_get_node_text(item, source_bytes))
+                elif item.type == "namespace_import":
+                    add_namespace_import(item)
+        elif child.type == "named_imports":
+            add_named_imports(child)
+        elif child.type == "identifier":
+            names.append(_get_node_text(child, source_bytes))
+        elif child.type == "namespace_import":
+            add_namespace_import(child)
+    return names
+
+
 class TypeScriptPlugin(LanguagePlugin):
     """Tier 2 tree-sitter plugin for TypeScript / JavaScript per spec section 4."""
 
@@ -347,7 +382,7 @@ class TypeScriptPlugin(LanguagePlugin):
         known_files: set[str] = set()
 
         if symbol_context:
-            known_fqnames = symbol_context.get("fqnames", set())
+            known_fqnames = symbol_context.get("fqnames", {}).get(self.name, set())
             known_names = symbol_context.get("names", {}).get(self.name, {})
             known_files = symbol_context.get("files", set())
         else:
@@ -422,6 +457,7 @@ class TypeScriptPlugin(LanguagePlugin):
     ) -> None:
         """Extract imports, call references, Express entrypoints, and fetch/axios callers."""
         file_imports: dict[str, str] = {}
+        bound_names: set[str] = set()
         curr_dir = os.path.dirname(rel_path)
 
         def walk(node: Node) -> None:
@@ -429,6 +465,7 @@ class TypeScriptPlugin(LanguagePlugin):
             if node.type == "import_statement":
                 line = node.start_point[0] + 1
                 col = node.start_point[1]
+                bound_names.update(_imported_local_names(node, source_bytes))
                 source_node = node.child_by_field_name("source")
                 if source_node:
                     import_path = _get_node_text(source_node, source_bytes).strip("'\"`")
@@ -437,7 +474,12 @@ class TypeScriptPlugin(LanguagePlugin):
                         resolved_path = os.path.normpath(
                             os.path.join(curr_dir, import_path)
                         ).replace("\\", "/")
-                        target_matched = False
+                        candidates = [resolved_path]
+                        for esm_ext in (".js", ".jsx", ".mjs", ".cjs"):
+                            if resolved_path.endswith(esm_ext):
+                                stem = resolved_path[: -len(esm_ext)]
+                                candidates.extend([f"{stem}.ts", f"{stem}.tsx"])
+                                break
                         for ext in (
                             "",
                             ".ts",
@@ -448,7 +490,10 @@ class TypeScriptPlugin(LanguagePlugin):
                             "/index.tsx",
                             "/index.js",
                         ):
-                            candidate = f"{resolved_path}{ext}"
+                            candidates.append(f"{resolved_path}{ext}")
+
+                        target_matched = False
+                        for candidate in candidates:
                             if candidate in known_files:
                                 target_matched = True
                                 resolved_path = candidate
@@ -555,7 +600,7 @@ class TypeScriptPlugin(LanguagePlugin):
                         local_fqname = f"{module_name}.{fn_text}"
                         if local_fqname in known_fqnames:
                             target_fqname = local_fqname
-                        elif fn_text in known_names:
+                        elif fn_text.split(".", 1)[0] not in bound_names and fn_text in known_names:
                             target_fqname = known_names[fn_text]
 
                     references.append(
@@ -646,13 +691,18 @@ class TypeScriptPlugin(LanguagePlugin):
                         )
                         if axios_match:
                             route_url = "axios"
-                            method = (axios_match.group(1) or "GET").upper()
+                            axios_method = (axios_match.group(1) or "").upper()
+                            method = (
+                                axios_method
+                                if axios_method in {"GET", "POST", "PUT", "DELETE", "PATCH"}
+                                else "GET"
+                            )
                             if args_node:
                                 args_text = _get_node_text(args_node, source_bytes)
                                 url_match = re.search(r"['\"`]([^'\"`]+)['\"`]", args_text)
                                 if url_match:
                                     route_url = url_match.group(1)
-                                if axios_match.group(1) is None:
+                                if axios_method in ("", "REQUEST"):
                                     method_match = re.search(
                                         r"method\s*:\s*['\"`]([A-Z]+)['\"`]",
                                         args_text,
