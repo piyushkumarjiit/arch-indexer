@@ -45,6 +45,10 @@ arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
 
 Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detection, `state.json`, graph export and the viewer are not implemented yet, so `--force-full`, `--docs-dir` and `--auto-relocate-citations` are accepted but have no effect. Because `state.json` is never written, every `index` run is a first run and exits `2` (`DELTA_DETECTED`) after writing `index.db`. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
 
+### Flow viewer
+
+This slice also implements the standalone interactive architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`). It generates a single-file, fully self-contained offline HTML document (`flow-viewer.html`) with hierarchical drill-down navigation (system -> module -> file group -> file -> symbol/endpoint), layered deterministic layout by kind, guided flow tracing from entrypoints to data stores and external sinks, pan/zoom, and client-side filtering and search. The CLI wiring for `arch-indexer index` and `arch-indexer graph` to export this viewer directly from the CLI is not yet implemented (they print an error and exit `1`).
+
 `ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning and that language falls back to Tier 2 tree-sitter indexing. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
 
 ```bash
@@ -55,4 +59,4 @@ The `query`, `plan`, and `assemble` commands are not implemented yet: they print
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`) and Tier 2 `tree-sitter` indexing (`index`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands it specifies beyond these slices are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.

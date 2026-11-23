@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from arch_indexer.viewer import generate_synthetic_graph, render_viewer, safe_json_embed
+from arch_indexer.viewer import render_viewer, safe_json_embed
+from tests.synthetic_generator import generate_synthetic_graph
 
 
 @pytest.fixture
@@ -22,12 +23,18 @@ def sample_graph() -> dict[str, Any]:
 
 
 def test_render_viewer_deterministic(sample_graph: dict[str, Any]) -> None:
-    """Output must be 100% deterministic (byte-for-byte identical) for the same input."""
+    """Output must be 100% deterministic and contain expected structure."""
     html1 = render_viewer(sample_graph)
     html2 = render_viewer(sample_graph)
     assert html1 == html2
     assert len(html1) > 1000
     assert '<script id="arch-graph-data" type="application/json">' in html1
+
+    # Independent structural expectations
+    assert '<div class="breadcrumbs" id="breadcrumbs">' in html1
+    assert '<div class="zoom-level-badge" id="zoom-level-badge">system</div>' in html1
+    assert '<svg id="canvas-svg" class="graph-svg">' in html1
+    assert "sample-store-service" in html1
 
 
 def test_no_external_resources(sample_graph: dict[str, Any]) -> None:
@@ -126,11 +133,37 @@ def test_embedded_json_roundtrip_hostile_labels() -> None:
 
 
 def test_synthetic_scale() -> None:
-    """Scale test: generator generates ~5,000 nodes/15,000 edges and renders responsively."""
+    """Scale test: generator generates ~5,000 nodes/15,000 edges and adheres to SPEC 6.1."""
     graph = generate_synthetic_graph(num_nodes=5000, num_edges=15000, seed=42)
     assert len(graph["nodes"]) == 5000
     assert len(graph["edges"]) == 15000
     assert len(graph["modules"]) == 20
+
+    # SPEC 6.1 valid edge kinds
+    valid_edge_kinds = {"calls", "http_request", "reads", "writes", "publishes", "depends_on"}
+    edge_kinds = {e["kind"] for e in graph["edges"]}
+    assert edge_kinds.issubset(valid_edge_kinds), (
+        f"Invalid edge kinds found: {edge_kinds - valid_edge_kinds}"
+    )
+    assert "http_api" not in edge_kinds, "Edge kind 'http_api' is invalid (SPEC 6.1)"
+
+    # Verify ds: targets have both reads and writes
+    ds_edge_kinds = {e["kind"] for e in graph["edges"] if "ds:" in e["target"]}
+    assert "reads" in ds_edge_kinds, "ds: targets must have reads edges"
+    assert "writes" in ds_edge_kinds, "ds: targets must have writes edges"
+
+    # Verify ext: targets have http_request edges
+    ext_edge_kinds = {e["kind"] for e in graph["edges"] if "ext:" in e["target"]}
+    assert ext_edge_kinds == {"http_request"}, (
+        f"ext: targets must have http_request kind, got {ext_edge_kinds}"
+    )
+
+    # Verify canonical tier values
+    valid_tiers = {"scip", "tree-sitter"}
+    module_tiers = {m["tier"] for m in graph["modules"]}
+    assert module_tiers.issubset(valid_tiers), f"Invalid module tiers: {module_tiers}"
+    node_tiers = {n["tier"] for n in graph["nodes"]}
+    assert node_tiers.issubset(valid_tiers), f"Invalid node tiers: {node_tiers}"
 
     # Rendering to HTML must complete and produce deterministic output
     html = render_viewer(graph)

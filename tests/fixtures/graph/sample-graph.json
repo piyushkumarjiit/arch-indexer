@@ -41,7 +41,7 @@
       "file": "frontend/src/Checkout.tsx",
       "line": 55,
       "symbol": "submitOrder",
-      "tier": "treesitter",
+      "tier": "tree-sitter",
       "metadata": {
         "framework": "react",
         "route": "/checkout"
@@ -171,7 +171,7 @@
       "kind": "http_request",
       "file": "frontend/src/Checkout.tsx",
       "line": 55,
-      "tier": "treesitter"
+      "tier": "tree-sitter"
     },
     {
       "source": "ep:POST:/api/auth/login",

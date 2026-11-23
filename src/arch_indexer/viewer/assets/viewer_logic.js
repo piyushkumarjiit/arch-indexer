@@ -77,7 +77,7 @@
         label: ds.label || ds.id,
         storeKind: ds.kind,
         evidence: ds.evidence || [],
-        tier: "scip",
+        tier: ds.tier || null,
         file: (ds.evidence && ds.evidence[0]) ? ds.evidence[0].split(":")[0] : "",
         line: (ds.evidence && ds.evidence[0]) ? parseInt(ds.evidence[0].split(":")[1], 10) : 0,
       };
@@ -98,7 +98,7 @@
         label: ext.label || ext.id,
         sinkKind: ext.kind,
         evidence: ext.evidence || [],
-        tier: "scip",
+        tier: ext.tier || null,
         file: (ext.evidence && ext.evidence[0]) ? ext.evidence[0].split(":")[0] : "",
         line: (ext.evidence && ext.evidence[0]) ? parseInt(ext.evidence[0].split(":")[1], 10) : 0,
       };
@@ -396,10 +396,21 @@
           if (modId && !activeFilters.modules.has(modId)) return false;
         }
         if (activeFilters.kinds && activeFilters.kinds.size > 0) {
-          if (!activeFilters.kinds.has(n.kind)) return false;
+          // Keep intermediate structural aggregate containers (file_group, file)
+          // which are needed for hierarchical drill-down navigation and do not have leaf kind checkboxes.
+          if (n.kind !== "file_group" && n.kind !== "file") {
+            if (!activeFilters.kinds.has(n.kind)) return false;
+          }
         }
         if (activeFilters.tiers && activeFilters.tiers.size > 0) {
-          if (n.tier && !activeFilters.tiers.has(n.tier)) return false;
+          if (n.tier) {
+            const canonical = n.tier === "treesitter" ? "tree-sitter" : n.tier;
+            const matchesTier =
+              activeFilters.tiers.has(n.tier) ||
+              activeFilters.tiers.has(canonical) ||
+              (canonical === "tree-sitter" && activeFilters.tiers.has("treesitter"));
+            if (!matchesTier) return false;
+          }
         }
         return true;
       });
@@ -529,14 +540,18 @@
       };
     }
 
-    // Build adjacency list
-    const adj = new Map();
+    // Build forward and backward adjacency maps
+    const forwardAdj = new Map();
+    const backwardAdj = new Map();
+
     edges.forEach((edge) => {
-      if (!adj.has(edge.source)) adj.set(edge.source, []);
-      adj.get(edge.source).push(edge);
+      if (!forwardAdj.has(edge.source)) forwardAdj.set(edge.source, []);
+      forwardAdj.get(edge.source).push(edge);
+
+      if (!backwardAdj.has(edge.target)) backwardAdj.set(edge.target, []);
+      backwardAdj.get(edge.target).push(edge);
     });
 
-    // BFS to find all paths to datastores and external sinks
     const isTarget = (id) => {
       const n = nodeMap.get(id);
       return (
@@ -548,76 +563,109 @@
       );
     };
 
-    const queue = [[entrypointId]];
-    const visitedInPath = new Set();
-    const targetPaths = [];
-    const reachableSinks = [];
-    const reachableSinkIds = new Set();
+    // 1. Forward BFS from entrypointId tracking shortest path tree via parent pointers
+    const visitedForward = new Set([entrypointId]);
+    const parentMap = new Map(); // childId -> { from: parentId, edge }
+    const queue = [entrypointId];
+    const reachedSinks = [];
+    const reachedSinkIds = new Set();
 
     while (queue.length > 0) {
-      const path = queue.shift();
-      const current = path[path.length - 1];
+      const current = queue.shift();
 
       if (isTarget(current) && current !== entrypointId) {
-        targetPaths.push(path);
-        if (!reachableSinkIds.has(current)) {
-          reachableSinkIds.add(current);
-          reachableSinks.push(nodeMap.get(current));
+        if (!reachedSinkIds.has(current)) {
+          reachedSinkIds.add(current);
+          reachedSinks.push(nodeMap.get(current));
         }
+        // Targets are sinks, don't expand further downstream from them
         continue;
       }
 
-      if (path.length > 15) continue; // bound max depth
-
-      const nextEdges = adj.get(current) || [];
+      const nextEdges = forwardAdj.get(current) || [];
       for (const e of nextEdges) {
-        if (!path.includes(e.target)) {
-          queue.push([...path, e.target]);
+        if (!visitedForward.has(e.target)) {
+          visitedForward.add(e.target);
+          parentMap.set(e.target, { from: current, edge: e });
+          queue.push(e.target);
         }
       }
     }
 
-    // Collect all unique nodes and edges involved in the paths
-    const reachableNodesSet = new Set();
-    const reachableEdgesSet = new Set();
+    // 2. Backward BFS from reached sinks within the forward-reachable subgraph
+    let reachableNodesSet;
+    let reachableEdgesSet;
 
-    if (targetPaths.length === 0) {
-      // If no sink reached, include forward reachable closure
-      const q = [entrypointId];
-      reachableNodesSet.add(entrypointId);
-      while (q.length > 0) {
-        const u = q.shift();
-        const nextEdges = adj.get(u) || [];
-        for (const e of nextEdges) {
-          reachableEdgesSet.add(`${e.source}->${e.target}`);
-          if (!reachableNodesSet.has(e.target)) {
-            reachableNodesSet.add(e.target);
-            q.push(e.target);
+    if (reachedSinks.length > 0) {
+      const visitedBackward = new Set(reachedSinkIds);
+      const queueBack = Array.from(reachedSinkIds);
+
+      while (queueBack.length > 0) {
+        const current = queueBack.shift();
+        const incomingEdges = backwardAdj.get(current) || [];
+        for (const e of incomingEdges) {
+          const u = e.source;
+          if (visitedForward.has(u) && !visitedBackward.has(u)) {
+            visitedBackward.add(u);
+            queueBack.push(u);
           }
         }
       }
+
+      // Nodes on any path from entrypoint to a sink: intersection of visitedForward & visitedBackward
+      reachableNodesSet = new Set();
+      visitedForward.forEach((id) => {
+        if (visitedBackward.has(id)) {
+          reachableNodesSet.add(id);
+        }
+      });
+      // Always ensure entrypoint is in reachableNodes
+      reachableNodesSet.add(entrypointId);
+
+      // Edges connecting nodes in reachableNodesSet
+      reachableEdgesSet = new Set();
+      edges.forEach((e) => {
+        if (reachableNodesSet.has(e.source) && reachableNodesSet.has(e.target)) {
+          reachableEdgesSet.add(`${e.source}->${e.target}`);
+        }
+      });
     } else {
-      targetPaths.forEach((p) => {
-        for (let i = 0; i < p.length; i++) {
-          reachableNodesSet.add(p[i]);
-          if (i < p.length - 1) {
-            reachableEdgesSet.add(`${p[i]}->${p[i + 1]}`);
-          }
+      // If no sinks reached, include the entire forward reachable closure
+      reachableNodesSet = visitedForward;
+      reachableEdgesSet = new Set();
+      edges.forEach((e) => {
+        if (visitedForward.has(e.source) && visitedForward.has(e.target)) {
+          reachableEdgesSet.add(`${e.source}->${e.target}`);
         }
       });
     }
 
-    // Build step-by-step sequential steps for guided walkthrough
+    // 3. Reconstruct shortest path(s) using parent pointers for the step walkthrough
+    const paths = [];
+    if (reachedSinks.length > 0) {
+      // Build a path for each reached sink (deterministic sort by sink ID)
+      reachedSinks.sort((a, b) => a.id.localeCompare(b.id));
+      reachedSinks.forEach((sink) => {
+        const path = [];
+        let curr = sink.id;
+        while (curr) {
+          path.push(curr);
+          if (curr === entrypointId) break;
+          const p = parentMap.get(curr);
+          curr = p ? p.from : null;
+        }
+        if (path[path.length - 1] === entrypointId) {
+          path.reverse();
+          paths.push(path);
+        }
+      });
+    }
+
+    const primaryPath = paths.length > 0 ? paths[0] : [entrypointId];
+
+    // 4. Build step walkthrough
     const steps = [];
-    const stepVisited = new Set();
-
-    // Primary path is shortest target path, or order of nodes
-    const primaryPath = targetPaths.length > 0 ? targetPaths[0] : Array.from(reachableNodesSet);
-
     primaryPath.forEach((nodeId, idx) => {
-      if (stepVisited.has(nodeId)) return;
-      stepVisited.add(nodeId);
-
       const n = nodeMap.get(nodeId) || { id: nodeId, label: nodeId, kind: "unknown" };
       let fileLine = "";
       if (n.file && n.line) {
@@ -650,10 +698,10 @@
     return {
       entrypointId,
       entrypoint: entryNode,
-      reachableSinks,
-      reachableNodes: Array.from(reachableNodesSet),
-      reachableEdges: Array.from(reachableEdgesSet),
-      paths: targetPaths,
+      reachableSinks: reachedSinks,
+      reachableNodes: Array.from(reachableNodesSet).sort(),
+      reachableEdges: Array.from(reachableEdgesSet).sort(),
+      paths,
       steps,
     };
   }
@@ -965,6 +1013,7 @@
      * Drill down one level into a node.
      */
     drillDown(nodeId) {
+      if (this.trace) this.stopTrace();
       const node = this.hierarchy.nodeLookup.get(nodeId);
       if (!node) return false;
 
@@ -1001,6 +1050,7 @@
      * Navigate up one level in hierarchy.
      */
     goUp() {
+      if (this.trace) this.stopTrace();
       if (this.breadcrumbs.length <= 1) return false;
       this.breadcrumbs.pop();
       const parent = this.breadcrumbs[this.breadcrumbs.length - 1];
@@ -1014,6 +1064,7 @@
      * Jump directly to a breadcrumb index.
      */
     goToBreadcrumb(index) {
+      if (this.trace) this.stopTrace();
       if (index < 0 || index >= this.breadcrumbs.length) return false;
       this.breadcrumbs = this.breadcrumbs.slice(0, index + 1);
       const target = this.breadcrumbs[this.breadcrumbs.length - 1];
@@ -1028,6 +1079,7 @@
      * Navigates the hierarchy so the node is visible, selects it, and sets breadcrumbs.
      */
     focusNode(nodeId) {
+      if (this.trace) this.stopTrace();
       const node = this.hierarchy.nodeLookup.get(nodeId);
       if (!node) return false;
 
@@ -1085,6 +1137,55 @@
      * Get current view nodes and layout.
      */
     getCurrentView(options) {
+      if (this.trace) {
+        // Trace mode: isolate and display the full transitive trace subgraph
+        const traceNodeIds = new Set(this.trace.reachableNodes);
+        const traceNodes = [];
+        traceNodeIds.forEach((id) => {
+          const n = this.hierarchy.nodeLookup.get(id);
+          if (n) traceNodes.push(n);
+        });
+
+        const rawEdges = this.graph.edges || [];
+        const edgeMap = new Map();
+
+        rawEdges.forEach((e) => {
+          if (traceNodeIds.has(e.source) && traceNodeIds.has(e.target)) {
+            const key = `${e.source}->${e.target}`;
+            if (!edgeMap.has(key)) {
+              edgeMap.set(key, {
+                source: e.source,
+                target: e.target,
+                kind: e.kind,
+                count: 0,
+                underlying: [],
+              });
+            }
+            const agg = edgeMap.get(key);
+            agg.count++;
+            agg.underlying.push(e);
+          }
+        });
+
+        traceNodes.sort((a, b) => a.id.localeCompare(b.id));
+        const edgesList = Array.from(edgeMap.values()).sort((a, b) => {
+          return `${a.source}->${a.target}`.localeCompare(`${b.source}->${b.target}`);
+        });
+
+        const layout = computeLayeredLayout(traceNodes, edgesList, options);
+        return {
+          level: "trace",
+          scopeId: this.trace.entrypointId,
+          breadcrumbs: this.breadcrumbs,
+          selectedNodeId: this.selectedNodeId,
+          nodes: layout.nodes,
+          edges: layout.edges,
+          width: layout.width,
+          height: layout.height,
+          trace: this.trace,
+        };
+      }
+
       const scopeData = getHierarchyScope(
         this.hierarchy,
         this.currentLevel,

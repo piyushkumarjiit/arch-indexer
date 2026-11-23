@@ -31,7 +31,7 @@ def generate_synthetic_graph(
                 "language": "python" if rng.random() > 0.3 else "typescript",
                 "path": mod_path,
                 "file_count": files_per_module,
-                "tier": "scip" if rng.random() > 0.1 else "treesitter",
+                "tier": "scip" if rng.random() > 0.1 else "tree-sitter",
             }
         )
 
@@ -115,7 +115,7 @@ def generate_synthetic_graph(
     for i in range(num_nodes):
         mod_id, file_path, _ = all_files[i % len(all_files)]
         line_num = 10 + (i % 150)
-        tier = "scip" if rng.random() > 0.15 else "treesitter"
+        tier = "scip" if rng.random() > 0.15 else "tree-sitter"
 
         # 5% entrypoints, 2% frontend callers, rest services
         r = rng.random()
@@ -189,15 +189,13 @@ def generate_synthetic_graph(
         tgt = rng.choice(all_targetable)
         if src != tgt and (src, tgt) not in edge_set:
             edge_set.add((src, tgt))
-            kind = (
-                "reads"
-                if "ds:" in tgt
-                else "writes"
-                if rng.random() > 0.5 and "ds:" in tgt
-                else "http_api"
-                if "ext:" in tgt
-                else "calls"
-            )
+            if "ds:" in tgt:
+                kind = "writes" if rng.random() > 0.5 else "reads"
+            elif "ext:" in tgt:
+                kind = "http_request"
+            else:
+                kind = "calls"
+
             edges.append(
                 {
                     "source": src,

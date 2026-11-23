@@ -74,18 +74,25 @@
       (state.graph.modules || []).forEach((mod) => {
         const label = document.createElement("label");
         label.className = "filter-item";
-        label.innerHTML = `
-          <input type="checkbox" value="${mod.id}" checked>
-          <span>${mod.name || mod.id}</span>
-          <span class="count-pill">${mod.file_count || 0}</span>
-        `;
-        label.querySelector("input").addEventListener("change", (e) => {
-          if (e.target.checked) {
-            state.filters.modules.delete(mod.id);
-          } else {
-            // When unchecked, add all checked ones except this
-            rebuildModuleFilters();
-          }
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = mod.id;
+        input.checked = true;
+
+        const span = document.createElement("span");
+        span.textContent = mod.name || mod.id;
+
+        const count = document.createElement("span");
+        count.className = "count-pill";
+        count.textContent = String(mod.file_count || 0);
+
+        label.appendChild(input);
+        label.appendChild(span);
+        label.appendChild(count);
+
+        input.addEventListener("change", () => {
+          rebuildModuleFilters();
           render();
         });
         modulesContainer.appendChild(label);
@@ -119,11 +126,19 @@
       kinds.forEach((k) => {
         const label = document.createElement("label");
         label.className = "filter-item";
-        label.innerHTML = `
-          <input type="checkbox" value="${k}" checked>
-          <span>${k.replace("_", " ")}</span>
-        `;
-        label.querySelector("input").addEventListener("change", () => {
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = k;
+        input.checked = true;
+
+        const span = document.createElement("span");
+        span.textContent = k.replace("_", " ");
+
+        label.appendChild(input);
+        label.appendChild(span);
+
+        input.addEventListener("change", () => {
           const inputs = kindsContainer.querySelectorAll("input");
           const unchecked = Array.from(inputs).some((i) => !i.checked);
           if (!unchecked) {
@@ -142,16 +157,24 @@
     }
 
     if (tiersContainer) {
-      const tiers = ["scip", "treesitter"];
+      const tiers = ["scip", "tree-sitter"];
       tiersContainer.innerHTML = "";
       tiers.forEach((t) => {
         const label = document.createElement("label");
         label.className = "filter-item";
-        label.innerHTML = `
-          <input type="checkbox" value="${t}" checked>
-          <span>${t}</span>
-        `;
-        label.querySelector("input").addEventListener("change", () => {
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = t;
+        input.checked = true;
+
+        const span = document.createElement("span");
+        span.textContent = t === "scip" ? "SCIP" : t === "tree-sitter" ? "Tree-sitter" : t;
+
+        label.appendChild(input);
+        label.appendChild(span);
+
+        input.addEventListener("change", () => {
           const inputs = tiersContainer.querySelectorAll("input");
           const unchecked = Array.from(inputs).some((i) => !i.checked);
           if (!unchecked) {
@@ -181,7 +204,9 @@
     if (!container) return;
 
     container.innerHTML = "";
-    if (zoomBadge) zoomBadge.textContent = state.currentLevel.replace("_", " ");
+    if (zoomBadge) {
+      zoomBadge.textContent = state.trace ? "flow trace" : state.currentLevel.replace("_", " ");
+    }
 
     state.breadcrumbs.forEach((crumb, idx) => {
       const isLast = idx === state.breadcrumbs.length - 1;
@@ -336,7 +361,13 @@
       g.addEventListener("dblclick", (e) => {
         e.stopPropagation();
         if (state.drillDown(node.id)) {
-          window.location.hash = `#node=${node.id}`;
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState(
+              null,
+              "",
+              window.location.pathname + window.location.search + "#drill=" + encodeURIComponent(node.id)
+            );
+          }
           render();
         }
       });
@@ -367,7 +398,7 @@
     content.innerHTML = `
       <div class="detail-row">
         <span class="detail-label">Kind</span>
-        <div><span class="kind-badge badge-${details.kind}">${details.kind.replace("_", " ")}</span></div>
+        <div><span class="kind-badge badge-${escapeHtml(details.kind)}">${escapeHtml(details.kind.replace("_", " "))}</span></div>
       </div>
       <div class="detail-row">
         <span class="detail-label">ID</span>
@@ -414,13 +445,13 @@
       <div class="detail-row">
         <span class="detail-label">Uses (${details.uses.length})</span>
         <div class="links-list" id="inspector-uses">
-          ${details.uses.map((u) => `<div class="link-item" data-id="${u.id}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
+          ${details.uses.map((u) => `<div class="link-item" data-id="${escapeHtml(u.id)}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
         </div>
       </div>
       <div class="detail-row">
         <span class="detail-label">Used By (${details.usedBy.length})</span>
         <div class="links-list" id="inspector-used-by">
-          ${details.usedBy.map((u) => `<div class="link-item" data-id="${u.id}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
+          ${details.usedBy.map((u) => `<div class="link-item" data-id="${escapeHtml(u.id)}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
         </div>
       </div>
     `;
@@ -431,7 +462,13 @@
     if (drillBtn) {
       drillBtn.addEventListener("click", () => {
         if (state.drillDown(details.id)) {
-          window.location.hash = `#node=${details.id}`;
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState(
+              null,
+              "",
+              window.location.pathname + window.location.search + "#drill=" + encodeURIComponent(details.id)
+            );
+          }
           render();
         }
       });
@@ -447,7 +484,9 @@
     content.querySelectorAll(".link-item").forEach((el) => {
       el.addEventListener("click", () => {
         const targetId = el.getAttribute("data-id");
-        window.location.hash = `#node=${targetId}`;
+        if (targetId) {
+          window.location.hash = `#node=${encodeURIComponent(targetId)}`;
+        }
       });
     });
   }
@@ -472,15 +511,18 @@
       </div>
       <div class="detail-row">
         <div class="links-list">
-          <div class="link-item" data-id="${edge.source}"><span>Source: ${escapeHtml(edge.source)}</span></div>
-          <div class="link-item" data-id="${edge.target}"><span>Target: ${escapeHtml(edge.target)}</span></div>
+          <div class="link-item" data-id="${escapeHtml(edge.source)}"><span>Source: ${escapeHtml(edge.source)}</span></div>
+          <div class="link-item" data-id="${escapeHtml(edge.target)}"><span>Target: ${escapeHtml(edge.target)}</span></div>
         </div>
       </div>
     `;
 
     content.querySelectorAll(".link-item").forEach((el) => {
       el.addEventListener("click", () => {
-        window.location.hash = `#node=${el.getAttribute("data-id")}`;
+        const targetId = el.getAttribute("data-id");
+        if (targetId) {
+          window.location.hash = `#node=${encodeURIComponent(targetId)}`;
+        }
       });
     });
 
@@ -588,17 +630,32 @@
         results.forEach((res) => {
           const item = document.createElement("div");
           item.className = "search-item";
-          item.innerHTML = `
-            <div class="search-item-info">
-              <span class="search-item-label">${escapeHtml(res.label)}</span>
-              <span class="search-item-sub">${escapeHtml(res.file ? `${res.file}:${res.line || 0}` : res.id)}</span>
-            </div>
-            <span class="kind-badge badge-${res.kind}">${res.kind}</span>
-          `;
+
+          const info = document.createElement("div");
+          info.className = "search-item-info";
+
+          const labelSpan = document.createElement("span");
+          labelSpan.className = "search-item-label";
+          labelSpan.textContent = res.label || res.id;
+
+          const subSpan = document.createElement("span");
+          subSpan.className = "search-item-sub";
+          subSpan.textContent = res.file ? `${res.file}:${res.line || 0}` : res.id;
+
+          info.appendChild(labelSpan);
+          info.appendChild(subSpan);
+
+          const badge = document.createElement("span");
+          badge.className = `kind-badge badge-${res.kind}`;
+          badge.textContent = res.kind || "";
+
+          item.appendChild(info);
+          item.appendChild(badge);
+
           item.addEventListener("click", () => {
             dropdown.classList.remove("active");
             input.value = "";
-            window.location.hash = `#node=${res.id}`;
+            window.location.hash = `#node=${encodeURIComponent(res.id)}`;
           });
           dropdown.appendChild(item);
         });
@@ -710,8 +767,25 @@
 
   function handleHashChange() {
     const hash = window.location.hash;
-    if (hash && hash.startsWith("#node=")) {
-      const nodeId = decodeURIComponent(hash.substring(6));
+    if (hash && hash.startsWith("#drill=")) {
+      const raw = hash.substring(7);
+      let drillId = raw;
+      try {
+        drillId = decodeURIComponent(raw);
+      } catch (e) {
+        drillId = raw;
+      }
+      if (state && state.drillDown(drillId)) {
+        render();
+      }
+    } else if (hash && hash.startsWith("#node=")) {
+      const raw = hash.substring(6);
+      let nodeId = raw;
+      try {
+        nodeId = decodeURIComponent(raw);
+      } catch (e) {
+        nodeId = raw;
+      }
       if (state && state.focusNode(nodeId)) {
         render();
         selectNode(nodeId);
@@ -725,7 +799,7 @@
   }
 
   function escapeHtml(str) {
-    if (!str) return "";
+    if (str == null) return "";
     return String(str)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
@@ -734,5 +808,27 @@
       .replace(/'/g, "&#039;");
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  if (typeof document !== "undefined" && document.addEventListener) {
+    document.addEventListener("DOMContentLoaded", init);
+  }
+
+  if (typeof window !== "undefined") {
+    window.__archViewer = {
+      getState: () => state,
+      init,
+      handleHashChange,
+      render,
+      selectNode,
+      startTrace,
+    };
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      init,
+      getState: () => state,
+      handleHashChange,
+      escapeHtml,
+    };
+  }
 })();
