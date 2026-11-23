@@ -12,6 +12,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -42,63 +43,12 @@ EXCLUDED_DIR_NAMES = {
     ".mypy_cache",
 }
 
-# Pinned defaults as fallback if toolchain.toml is missing
-PINNED_TOOLS = {
-    "scip-python": {
-        "package": "@sourcegraph/scip-python",
-        "version": "0.6.8",
-        "install_type": "npm",
-        "install_dir": "node",
-        "purpose": "Tier 1 Python indexer",
-    },
-    "scip-typescript": {
-        "package": "@sourcegraph/scip-typescript",
-        "version": "0.6.2",
-        "install_type": "npm",
-        "install_dir": "node",
-        "purpose": "Tier 1 TypeScript indexer",
-    },
-    "scip-java": {
-        "version": "0.10.2",
-        "tag": "v0.10.2",
-        "install_type": "download",
-        "install_dir": "java",
-        "url": "https://repo1.maven.org/maven2/com/sourcegraph/scip-java_2.13/0.10.2/scip-java_2.13-0.10.2.jar",
-        "sha256": "09f4da5fb973462926e05a507a9e1097efcfa7d4484a68be3f52288821415f0d",
-        "filename": "scip-java.jar",
-        "purpose": "Tier 1 Java/Maven indexer",
-    },
-}
 
-REQUIRED_RUNTIMES = {
-    "node_min_version": "18.0.0",
-    "java_min_version": "17",
-}
-
-
-def load_toolchain_manifest(manifest_path: Path | None = None) -> dict[str, Any]:
-    """Load toolchain.toml manifest, searching known locations if path is None."""
-    candidates = []
-    if manifest_path is not None:
-        candidates.append(Path(manifest_path))
-    else:
-        here = Path(__file__).resolve().parent
-        candidates.append(here / "toolchain.toml")
-        candidates.append(here.parent.parent / "toolchain.toml")
-        candidates.append(Path.cwd() / "toolchain.toml")
-
-    for candidate in candidates:
-        if candidate.is_file():
-            with (
-                contextlib.suppress(OSError, tomllib.TOMLDecodeError),
-                open(candidate, "rb") as f,
-            ):
-                return tomllib.load(f)
-
-    return {
-        "tools": PINNED_TOOLS,
-        "runtimes": REQUIRED_RUNTIMES,
-    }
+def load_toolchain_manifest() -> dict[str, Any]:
+    """Load the packaged pinned toolchain.toml manifest."""
+    manifest = resources.files("arch_indexer").joinpath("toolchain.toml")
+    with manifest.open("rb") as f:
+        return tomllib.load(f)
 
 
 def is_path_excluded(path_str: str) -> bool:
@@ -134,13 +84,15 @@ def get_repo_files(repo_path: Path | str) -> list[str]:
                     "--exclude-standard",
                 ],
                 capture_output=True,
-                text=True,
                 check=False,
             )
             if ls_res.returncode == 0:
                 files = []
-                for rel_path in ls_res.stdout.split("\0"):
-                    if rel_path and not is_path_excluded(rel_path) and (repo / rel_path).is_file():
+                for raw_path in ls_res.stdout.split(b"\0"):
+                    if not raw_path:
+                        continue
+                    rel_path = os.fsdecode(raw_path)
+                    if not is_path_excluded(rel_path) and (repo / rel_path).is_file():
                         files.append(rel_path)
                 return sorted(files)
 
@@ -371,7 +323,6 @@ class ToolStatus:
     pinned_version: str
     installed: bool
     install_path: Path | None = None
-    verified_hash: str | None = None
     message: str = ""
 
 
@@ -404,46 +355,102 @@ def compute_file_sha256(file_path: Path) -> str:
     return h.hexdigest()
 
 
+def _launcher_help_ok(launcher: Path) -> bool:
+    try:
+        res = subprocess.run(
+            [str(launcher), "--help"], capture_output=True, text=True, check=False
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return res.returncode == 0
+
+
+def _download_verified(url: str, expected_sha256: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "arch-indexer"})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out_f:
+            shutil.copyfileobj(resp, out_f)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+
+    actual_sha256 = compute_file_sha256(dest)
+    if actual_sha256 != expected_sha256:
+        dest.unlink(missing_ok=True)
+        raise ValueError(
+            f"Checksum mismatch downloading {url}: expected {expected_sha256}, "
+            f"got {actual_sha256}"
+        )
+
+
+def _install_scip_java(tools_cfg: dict[str, Any], cache_dir: Path) -> Path:
+    scip_java_cfg = tools_cfg["scip-java"]
+    coursier_cfg = tools_cfg["coursier"]
+    java_cmd = shutil.which("java")
+    if not java_cmd:
+        raise RuntimeError("java executable not found in PATH")
+
+    java_dir = get_java_tools_dir(cache_dir)
+    java_dir.mkdir(parents=True, exist_ok=True)
+
+    coursier_jar = java_dir / coursier_cfg["filename"]
+    expected_sha256 = coursier_cfg["sha256"]
+    if not (coursier_jar.is_file() and compute_file_sha256(coursier_jar) == expected_sha256):
+        _download_verified(coursier_cfg["url"], expected_sha256, coursier_jar)
+
+    launcher = java_dir / scip_java_cfg["filename"]
+    launcher.unlink(missing_ok=True)
+    bootstrap = subprocess.run(
+        [
+            java_cmd,
+            "-jar",
+            str(coursier_jar),
+            "bootstrap",
+            "--standalone",
+            "--main-class",
+            scip_java_cfg["main_class"],
+            f"{scip_java_cfg['module']}:{scip_java_cfg['version']}",
+            "-o",
+            str(launcher),
+            "--force",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if bootstrap.returncode != 0:
+        launcher.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Failed to bootstrap scip-java: {bootstrap.stderr or bootstrap.stdout}"
+        )
+    if not _launcher_help_ok(launcher):
+        launcher.unlink(missing_ok=True)
+        raise RuntimeError("Bootstrapped scip-java launcher failed to run --help")
+
+    return launcher
+
+
 def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> ToolStatus:
     """Inspect installation and verification status of a tool in the local cache."""
     manifest = load_toolchain_manifest()
-    tool_info = manifest.get("tools", {}).get(tool_name) or PINNED_TOOLS.get(tool_name, {})
+    tool_info = manifest.get("tools", {}).get(tool_name, {})
     pinned_version = tool_info.get("version", "")
-    pkg_or_tag = tool_info.get("package") or tool_info.get("tag", "")
+    pkg_or_tag = tool_info.get("package") or tool_info.get("module") or tool_info.get("tag", "")
 
-    if tool_name == "scip-python":
-        node_dir = get_node_tools_dir(cache_dir)
-        bin_path = node_dir / "node_modules" / ".bin" / "scip-python"
-        pkg_json = node_dir / "node_modules" / "@sourcegraph" / "scip-python" / "package.json"
-        if bin_path.is_file() or pkg_json.is_file():
-            actual_version = ""
-            if pkg_json.is_file():
-                with (
-                    contextlib.suppress(OSError, json.JSONDecodeError),
-                    open(pkg_json, encoding="utf-8") as f,
-                ):
-                    actual_version = json.load(f).get("version", "")
-            if not actual_version or actual_version == pinned_version:
-                return ToolStatus(
-                    name=tool_name,
-                    package_or_tag=pkg_or_tag,
-                    pinned_version=pinned_version,
-                    installed=True,
-                    install_path=bin_path if bin_path.exists() else pkg_json.parent,
-                    message="Installed",
-                )
+    if not tool_info:
         return ToolStatus(
             name=tool_name,
             package_or_tag=pkg_or_tag,
             pinned_version=pinned_version,
             installed=False,
-            message="Not installed in cache",
+            message="Unknown tool",
         )
 
-    if tool_name == "scip-typescript":
+    if tool_name in ("scip-python", "scip-typescript"):
         node_dir = get_node_tools_dir(cache_dir)
-        bin_path = node_dir / "node_modules" / ".bin" / "scip-typescript"
-        pkg_json = node_dir / "node_modules" / "@sourcegraph" / "scip-typescript" / "package.json"
+        bin_path = node_dir / "node_modules" / ".bin" / tool_name
+        pkg_json = node_dir / "node_modules" / "@sourcegraph" / tool_name / "package.json"
         if bin_path.is_file() or pkg_json.is_file():
             actual_version = ""
             if pkg_json.is_file():
@@ -470,36 +477,23 @@ def check_tool_status(tool_name: str, cache_dir: str | Path | None = None) -> To
         )
 
     if tool_name == "scip-java":
-        java_dir = get_java_tools_dir(cache_dir)
-        jar_path = java_dir / "scip-java.jar"
-        expected_sha = tool_info.get("sha256", "")
-        if jar_path.is_file():
-            actual_sha = compute_file_sha256(jar_path)
-            if actual_sha == expected_sha:
-                return ToolStatus(
-                    name=tool_name,
-                    package_or_tag=pkg_or_tag,
-                    pinned_version=pinned_version,
-                    installed=True,
-                    install_path=jar_path,
-                    verified_hash=actual_sha,
-                    message="Installed and verified SHA-256",
-                )
+        launcher = get_java_tools_dir(cache_dir) / tool_info["filename"]
+        if launcher.is_file() and _launcher_help_ok(launcher):
             return ToolStatus(
                 name=tool_name,
                 package_or_tag=pkg_or_tag,
                 pinned_version=pinned_version,
-                installed=False,
-                install_path=jar_path,
-                verified_hash=actual_sha,
-                message=f"Checksum mismatch: expected {expected_sha[:8]}, got {actual_sha[:8]}",
+                installed=True,
+                install_path=launcher,
+                message="Installed and verified (--help)",
             )
         return ToolStatus(
             name=tool_name,
             package_or_tag=pkg_or_tag,
             pinned_version=pinned_version,
             installed=False,
-            message="Not installed in cache",
+            install_path=launcher if launcher.is_file() else None,
+            message="Launcher missing or failed --help",
         )
 
     return ToolStatus(
@@ -590,14 +584,19 @@ def ensure_toolchain(
     - Detects languages for repo_path
     - Installs only missing tools into <cache>/tools/
     - Node tools (scip-python, scip-typescript) installed via npm into <cache>/tools/node
-    - Java tool (scip-java) downloaded and verified with sha256 into <cache>/tools/java
-    - Prefers host java/mvn; never downloads JDK/Maven unless fetch_runtime is True
+    - Java tool (scip-java) bootstrapped with coursier into <cache>/tools/java
+    - Never downloads JDK/Maven; requires host java for scip-java
     - Updates <cache>/tools/manifest.lock.json
     """
+    if fetch_runtime:
+        raise RuntimeError(
+            "--fetch-runtime is not supported yet: portable JDK/Maven download is disabled; "
+            "install host java >= 17 and mvn instead."
+        )
+
     repo = Path(repo_path).resolve()
     c_dir = get_cache_dir(cache_dir)
-    manifest = load_toolchain_manifest()
-    tools_cfg = manifest.get("tools", PINNED_TOOLS)
+    tools_cfg = load_toolchain_manifest()["tools"]
 
     active_langs = detect_languages(repo)
     lock_data = get_installed_manifest_lock(c_dir)
@@ -616,101 +615,72 @@ def ensure_toolchain(
         if check_tool_status(tool_name, cache_dir=c_dir).installed:
             skipped_existing.append(tool_name)
             continue
-        cfg = {**PINNED_TOOLS[tool_name], **tools_cfg.get(tool_name, {})}
+        cfg = tools_cfg[tool_name]
         node_installs.append((tool_name, cfg["package"], cfg["version"]))
 
     if node_installs:
         npm_cmd = shutil.which("npm")
-        if not npm_cmd:
+        if not npm_cmd or not shutil.which("node"):
             names = ", ".join(tool_name for tool_name, _, _ in node_installs)
-            raise RuntimeError(f"npm is required to install {names} but was not found")
-
-        node_dir = get_node_tools_dir(c_dir)
-        node_dir.mkdir(parents=True, exist_ok=True)
-        targets = [f"{pkg}@{ver}" for _, pkg, ver in node_installs]
-        res = subprocess.run(
-            [npm_cmd, "install", "--prefix", str(node_dir), *targets],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if res.returncode != 0:
-            raise RuntimeError(
-                f"Failed to install {', '.join(targets)}: {res.stderr or res.stdout}"
+            warnings.append(
+                f"npm or node not found; {names} will not be installed and Tier 1 "
+                "Python/TypeScript indexing will fall back to Tier 2 tree-sitter."
             )
+        else:
+            node_dir = get_node_tools_dir(c_dir)
+            node_dir.mkdir(parents=True, exist_ok=True)
+            targets = [f"{pkg}@{ver}" for _, pkg, ver in node_installs]
+            res = subprocess.run(
+                [npm_cmd, "install", "--prefix", str(node_dir), *targets],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to install {', '.join(targets)}: {res.stderr or res.stdout}"
+                )
 
-        for tool_name, pkg, ver in node_installs:
-            bin_path = node_dir / "node_modules" / ".bin" / tool_name
-            lock_data["tools"][tool_name] = {
-                "package": pkg,
-                "version": ver,
-                "install_type": "npm",
-                "path": str(bin_path),
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            }
-            installed_now.append(tool_name)
+            for tool_name, pkg, ver in node_installs:
+                bin_path = node_dir / "node_modules" / ".bin" / tool_name
+                lock_data["tools"][tool_name] = {
+                    "package": pkg,
+                    "version": ver,
+                    "install_type": "npm",
+                    "path": str(bin_path),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                installed_now.append(tool_name)
 
     # 3. Java -> scip-java
     if "java" in active_langs:
         runtimes = check_host_runtimes()
-        java_ok = runtimes.get("java", RuntimeStatus("java", False)).available
-        mvn_ok = runtimes.get("mvn", RuntimeStatus("mvn", False)).available
-
-        if not (java_ok and mvn_ok):
-            if not fetch_runtime:
-                warnings.append(
-                    "Host java (>=17) or mvn is absent. Java indexing will fall back cleanly to "
-                    "Tier 2 tree-sitter unless --fetch-runtime is passed."
-                )
-            else:
-                warnings.append("--fetch-runtime passed: portable JDK/Maven download gated.")
-
-        status = check_tool_status("scip-java", cache_dir=c_dir)
-        if status.installed:
-            skipped_existing.append("scip-java")
+        java_available = runtimes.get("java", RuntimeStatus("java", False)).available
+        if not java_available:
+            warnings.append(
+                "Host java >= 17 is absent; scip-java will not be installed and Java indexing "
+                "will fall back to Tier 2 tree-sitter."
+            )
         else:
-            cfg = tools_cfg.get("scip-java", PINNED_TOOLS["scip-java"])
-            ver = cfg.get("version", "0.10.2")
-            url = cfg.get(
-                "url",
-                "https://repo1.maven.org/maven2/com/sourcegraph/scip-java_2.13/0.10.2/scip-java_2.13-0.10.2.jar",
-            )
-            expected_sha = cfg.get(
-                "sha256",
-                "09f4da5fb973462926e05a507a9e1097efcfa7d4484a68be3f52288821415f0d",
-            )
-            java_dir = get_java_tools_dir(c_dir)
-            java_dir.mkdir(parents=True, exist_ok=True)
-            jar_path = java_dir / "scip-java.jar"
-
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "arch-indexer"})
-                with (
-                    urllib.request.urlopen(req, timeout=60) as resp,
-                    open(jar_path, "wb") as out_f,
-                ):
-                    shutil.copyfileobj(resp, out_f)
-            except Exception:
-                jar_path.unlink(missing_ok=True)
-                raise
-
-            actual_sha = compute_file_sha256(jar_path)
-            if actual_sha != expected_sha:
-                jar_path.unlink(missing_ok=True)
-                raise ValueError(
-                    f"Checksum mismatch downloading scip-java: expected {expected_sha}, "
-                    f"got {actual_sha}"
+            if not runtimes.get("mvn", RuntimeStatus("mvn", False)).available:
+                warnings.append(
+                    "Host mvn is absent; scip-java Maven builds may fall back to Tier 2 "
+                    "tree-sitter."
                 )
-
-            lock_data["tools"]["scip-java"] = {
-                "version": ver,
-                "install_type": "download",
-                "url": url,
-                "sha256": actual_sha,
-                "path": str(jar_path),
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            }
-            installed_now.append("scip-java")
+            status = check_tool_status("scip-java", cache_dir=c_dir)
+            if status.installed:
+                skipped_existing.append("scip-java")
+            else:
+                launcher = _install_scip_java(tools_cfg, c_dir)
+                scip_java_cfg = tools_cfg["scip-java"]
+                lock_data["tools"]["scip-java"] = {
+                    "version": scip_java_cfg["version"],
+                    "module": scip_java_cfg["module"],
+                    "install_type": "coursier-bootstrap",
+                    "path": str(launcher),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                installed_now.append("scip-java")
 
     if installed_now:
         save_manifest_lock(lock_data, cache_dir=c_dir)

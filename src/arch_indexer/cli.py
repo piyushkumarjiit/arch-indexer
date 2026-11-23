@@ -55,7 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--fetch-runtime",
         action="store_true",
         default=False,
-        help="Allow downloading portable JDK/Maven runtime if host runtime is absent",
+        help=(
+            "Not supported yet: exits 1 with an error; install host java >= 17 and mvn instead"
+        ),
     )
 
     # 2. index

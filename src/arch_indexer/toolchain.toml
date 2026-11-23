@@ -17,13 +17,21 @@ purpose = "Tier 1 TypeScript indexer"
 
 [tools.scip-java]
 version = "0.10.2"
-tag = "v0.10.2"
+module = "com.sourcegraph:scip-java_2.13"
+main_class = "com.sourcegraph.scip_java.ScipJava"
+install_type = "coursier-bootstrap"
+install_dir = "java"
+filename = "scip-java"
+purpose = "Tier 1 Java/Maven indexer"
+
+[tools.coursier]
+version = "2.1.27"
 install_type = "download"
 install_dir = "java"
-url = "https://repo1.maven.org/maven2/com/sourcegraph/scip-java_2.13/0.10.2/scip-java_2.13-0.10.2.jar"
-sha256 = "09f4da5fb973462926e05a507a9e1097efcfa7d4484a68be3f52288821415f0d"
-filename = "scip-java.jar"
-purpose = "Tier 1 Java/Maven indexer"
+url = "https://github.com/coursier/coursier/releases/download/v2.1.27/coursier.jar"
+sha256 = "8d1e0d684a55c09828b7afda481139472d87a18e0544bb875e2e5e3e300f64b3"
+filename = "coursier.jar"
+purpose = "Coursier bootstrap launcher for scip-java"
 
 [python_packages.protobuf]
 version = "5.29.3"

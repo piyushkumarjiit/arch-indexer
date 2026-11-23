@@ -1,13 +1,17 @@
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+import pytest
 
 from arch_indexer.toolchain import (
     RuntimeStatus,
+    _download_verified,
     check_host_runtimes,
     check_tool_status,
     detect_languages,
@@ -34,6 +38,42 @@ NODE_MANIFEST = {
         },
     }
 }
+
+
+def _java_tools(coursier_bytes):
+    return {
+        "scip-java": {
+            "version": "0.10.2",
+            "module": "com.sourcegraph:scip-java_2.13",
+            "main_class": "com.sourcegraph.scip_java.ScipJava",
+            "install_type": "coursier-bootstrap",
+            "filename": "scip-java",
+        },
+        "coursier": {
+            "version": "2.1.27",
+            "install_type": "download",
+            "url": "https://example.com/coursier.jar",
+            "sha256": hashlib.sha256(coursier_bytes).hexdigest(),
+            "filename": "coursier.jar",
+        },
+    }
+
+
+def _runtimes(java=True, mvn=True):
+    return {
+        "python": RuntimeStatus("python", True, "3.12.0"),
+        "node": RuntimeStatus("node", True, "v20.0.0"),
+        "java": RuntimeStatus("java", java, "21" if java else None),
+        "mvn": RuntimeStatus("mvn", mvn, "3.9.9" if mvn else None),
+    }
+
+
+def _which(name):
+    return {
+        "npm": "/usr/bin/npm",
+        "node": "/usr/bin/node",
+        "java": "/usr/bin/java",
+    }.get(name)
 
 
 def _fake_npm_install(cmd):
@@ -74,23 +114,39 @@ def _fake_npm_install(cmd):
         pkg_json.write_text(json.dumps({"dependencies": recorded | requested}))
 
 
-def _fake_subprocess_run(cmd, *args, **kwargs):
+def _fake_node_subprocess_run(cmd, *args, **kwargs):
     if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
         _fake_npm_install(cmd)
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
     return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
 
+def _fake_java_subprocess_run(cmd, *args, **kwargs):
+    if cmd[0].endswith("npm") and len(cmd) > 1 and cmd[1] == "install":
+        _fake_npm_install(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
+    if "bootstrap" in cmd:
+        launcher = Path(cmd[cmd.index("-o") + 1])
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+    return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+
 def test_manifest_loading():
-    manifest = load_toolchain_manifest()
-    assert "tools" in manifest
-    assert "scip-python" in manifest["tools"]
-    assert "scip-typescript" in manifest["tools"]
-    assert "scip-java" in manifest["tools"]
-    assert manifest["tools"]["scip-python"]["version"] == "0.6.8"
-    assert manifest["tools"]["scip-typescript"]["version"] == "0.6.2"
-    assert manifest["tools"]["scip-java"]["version"] == "0.10.2"
-    assert "sha256" in manifest["tools"]["scip-java"]
+    tools = load_toolchain_manifest()["tools"]
+
+    assert tools["scip-python"]["package"] == "@sourcegraph/scip-python"
+    assert tools["scip-python"]["version"] == "0.6.8"
+    assert tools["scip-typescript"]["package"] == "@sourcegraph/scip-typescript"
+    assert tools["scip-typescript"]["version"] == "0.6.2"
+    assert tools["scip-java"]["module"] == "com.sourcegraph:scip-java_2.13"
+    assert tools["scip-java"]["version"] == "0.10.2"
+    assert len(tools["coursier"]["sha256"]) == 64
+    assert tools["coursier"]["url"] == (
+        f"https://github.com/coursier/coursier/releases/download/"
+        f"v{tools['coursier']['version']}/coursier.jar"
+    )
 
 
 def test_language_detection_python():
@@ -195,6 +251,20 @@ def test_language_detection_git_handles_non_ascii_paths(tmp_path):
     assert detect_languages(repo) == ["python", "infra"]
 
 
+def test_language_detection_git_handles_non_utf8_paths(tmp_path):
+    repo = tmp_path / "git_repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+
+    raw_name = b"caf\xe9.py"
+    with open(os.path.join(os.fsencode(repo), raw_name), "wb") as f:
+        f.write(b"print('latin-1')\n")
+
+    files = detect_repo_files(repo)
+    assert os.fsdecode(raw_name) in files["python"]
+    assert detect_languages(repo) == ["python", "infra"]
+
+
 def test_check_host_runtimes():
     runtimes = check_host_runtimes()
     assert "python" in runtimes
@@ -222,36 +292,29 @@ def test_tool_status_installed_node_tool(tmp_path):
     assert status.install_path == bin_dir / "scip-python"
 
 
-def test_tool_status_scip_java_sha256(tmp_path):
+def test_tool_status_scip_java_verifies_launcher(tmp_path):
     cache = tmp_path / "cache"
     java_dir = cache / "tools" / "java"
     java_dir.mkdir(parents=True)
-    jar = java_dir / "scip-java.jar"
+    launcher = java_dir / "scip-java"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
 
-    content = b"fake jar content"
-    jar.write_bytes(content)
-    actual_hash = hashlib.sha256(content).hexdigest()
-
-    # Mismatch with pinned sha
-    status = check_tool_status("scip-java", cache_dir=cache)
-    assert status.installed is False
-    assert "Checksum mismatch" in status.message
-
-    # Match when we mock the pinned sha to actual_hash
     with patch(
-        "arch_indexer.toolchain.load_toolchain_manifest",
-        return_value={
-            "tools": {
-                "scip-java": {
-                    "version": "0.10.2",
-                    "sha256": actual_hash,
-                }
-            }
-        },
+        "arch_indexer.toolchain.subprocess.run",
+        return_value=subprocess.CompletedProcess([], returncode=0),
+    ) as run:
+        status = check_tool_status("scip-java", cache_dir=cache)
+    assert status.installed is True
+    assert status.install_path == launcher
+    assert run.call_args.args[0] == [str(launcher), "--help"]
+
+    with patch(
+        "arch_indexer.toolchain.subprocess.run",
+        return_value=subprocess.CompletedProcess([], returncode=1),
     ):
         status = check_tool_status("scip-java", cache_dir=cache)
-        assert status.installed is True
-        assert status.verified_hash == actual_hash
+    assert status.installed is False
 
 
 def test_toolchain_status_report(tmp_path):
@@ -268,72 +331,41 @@ def test_toolchain_status_report(tmp_path):
     assert "scip-python" in text
 
 
-def test_toolchain_ensure_missing_tools_and_skips_existing(tmp_path):
+def test_toolchain_ensure_installs_missing_and_skips_existing(tmp_path):
     repo = FIXTURES_DIR / "mixed"
     cache = tmp_path / "cache"
 
-    fake_jar_bytes = b"real-scip-java-jar-data"
-    jar_sha = hashlib.sha256(fake_jar_bytes).hexdigest()
-
-    manifest_mock = {
-        "tools": {
-            "scip-python": {
-                "package": "@sourcegraph/scip-python",
-                "version": "0.6.8",
-                "install_type": "npm",
-            },
-            "scip-typescript": {
-                "package": "@sourcegraph/scip-typescript",
-                "version": "0.6.2",
-                "install_type": "npm",
-            },
-            "scip-java": {
-                "version": "0.10.2",
-                "url": "https://example.com/scip-java.jar",
-                "sha256": jar_sha,
-                "install_type": "download",
-            },
-        }
-    }
-
-    mock_resp = MagicMock()
-    mock_resp.read.side_effect = [fake_jar_bytes, b""]
-    mock_resp.__enter__.return_value = io.BytesIO(fake_jar_bytes)
-    mock_resp.__exit__.return_value = None
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest_mock = {"tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)}}
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
-        patch("subprocess.run", side_effect=_fake_subprocess_run),
-        patch("shutil.which", return_value="/usr/bin/npm"),
-        patch("urllib.request.urlopen", return_value=mock_resp.__enter__.return_value),
+        patch("arch_indexer.toolchain.check_host_runtimes", return_value=_runtimes()),
+        patch("subprocess.run", side_effect=_fake_java_subprocess_run),
+        patch("shutil.which", side_effect=_which),
+        patch("urllib.request.urlopen", return_value=io.BytesIO(coursier_bytes)),
     ):
-        # First run: should install missing tools (python, ts, java)
         res = ensure_toolchain(repo, cache_dir=cache)
-        assert "scip-python" in res["installed"]
-        assert "scip-typescript" in res["installed"]
-        assert "scip-java" in res["installed"]
-        assert len(res["skipped"]) == 0
+        assert set(res["installed"]) == {"scip-python", "scip-typescript", "scip-java"}
+        assert res["skipped"] == []
 
-        # Both node tools must survive the install into the shared prefix
         bin_dir = cache / "tools" / "node" / "node_modules" / ".bin"
         assert (bin_dir / "scip-python").is_file()
         assert (bin_dir / "scip-typescript").is_file()
 
-        # Verify manifest.lock.json was created
-        lock_path = cache / "tools" / "manifest.lock.json"
-        assert lock_path.is_file()
-        lock_data = json.loads(lock_path.read_text())
-        assert "scip-python" in lock_data["tools"]
-        assert "scip-typescript" in lock_data["tools"]
-        assert "scip-java" in lock_data["tools"]
-        assert lock_data["tools"]["scip-java"]["sha256"] == jar_sha
+        java_dir = cache / "tools" / "java"
+        assert (java_dir / "coursier.jar").read_bytes() == coursier_bytes
+        assert (java_dir / "scip-java").is_file()
 
-        # Second run: should skip existing tools without calling npm or download again
+        lock_data = json.loads((cache / "tools" / "manifest.lock.json").read_text())
+        assert lock_data["tools"]["scip-python"]["version"] == "0.6.8"
+        assert lock_data["tools"]["scip-typescript"]["version"] == "0.6.2"
+        assert lock_data["tools"]["scip-java"]["module"] == "com.sourcegraph:scip-java_2.13"
+        assert lock_data["tools"]["scip-java"]["version"] == "0.10.2"
+
         res2 = ensure_toolchain(repo, cache_dir=cache)
-        assert len(res2["installed"]) == 0
-        assert "scip-python" in res2["skipped"]
-        assert "scip-typescript" in res2["skipped"]
-        assert "scip-java" in res2["skipped"]
+        assert res2["installed"] == []
+        assert set(res2["skipped"]) == {"scip-python", "scip-typescript", "scip-java"}
 
 
 def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
@@ -341,8 +373,8 @@ def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=NODE_MANIFEST),
-        patch("subprocess.run", side_effect=_fake_subprocess_run),
-        patch("shutil.which", return_value="/usr/bin/npm"),
+        patch("subprocess.run", side_effect=_fake_node_subprocess_run),
+        patch("shutil.which", side_effect=_which),
     ):
         ensure_toolchain(FIXTURES_DIR / "python", cache_dir=cache)
         assert check_tool_status("scip-python", cache_dir=cache).installed is True
@@ -352,45 +384,83 @@ def test_toolchain_ensure_preserves_other_node_tool_across_repos(tmp_path):
         assert check_tool_status("scip-typescript", cache_dir=cache).installed is True
 
 
-def test_fetch_runtime_gating(tmp_path):
-    repo = FIXTURES_DIR / "java_maven"
+def test_toolchain_ensure_warns_when_npm_missing(tmp_path):
+    repo = FIXTURES_DIR / "mixed"
     cache = tmp_path / "cache"
 
-    fake_jar_bytes = b"scip-java-jar"
-    jar_sha = hashlib.sha256(fake_jar_bytes).hexdigest()
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest_mock = {"tools": {**NODE_MANIFEST["tools"], **_java_tools(coursier_bytes)}}
 
-    manifest_mock = {
-        "tools": {
-            "scip-java": {
-                "version": "0.10.2",
-                "url": "https://example.com/scip-java.jar",
-                "sha256": jar_sha,
-                "install_type": "download",
-            }
-        }
-    }
-
-    mock_runtimes_no_java = {
-        "python": RuntimeStatus("python", True, "3.12.0"),
-        "node": RuntimeStatus("node", True, "v20.0.0"),
-        "java": RuntimeStatus("java", False, message="not found"),
-        "mvn": RuntimeStatus("mvn", False, message="not found"),
-    }
-
-    mock_resp = MagicMock()
-    mock_resp.read.side_effect = [fake_jar_bytes, b""]
-    mock_resp.__enter__.return_value = io.BytesIO(fake_jar_bytes)
-    mock_resp.__exit__.return_value = None
+    def which(name):
+        return "/usr/bin/java" if name == "java" else None
 
     with (
         patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
-        patch("arch_indexer.toolchain.check_host_runtimes", return_value=mock_runtimes_no_java),
-        patch("urllib.request.urlopen", return_value=mock_resp.__enter__.return_value),
+        patch("arch_indexer.toolchain.check_host_runtimes", return_value=_runtimes()),
+        patch("subprocess.run", side_effect=_fake_java_subprocess_run),
+        patch("shutil.which", side_effect=which),
+        patch("urllib.request.urlopen", return_value=io.BytesIO(coursier_bytes)),
     ):
-        # When --fetch-runtime is False, warns about fallback and never attempts JDK download
-        res1 = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=False)
-        assert any("Host java (>=17) or mvn is absent" in w for w in res1["warnings"])
+        res = ensure_toolchain(repo, cache_dir=cache)
 
-        # When --fetch-runtime is True, acknowledges gating
-        res2 = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
-        assert any("--fetch-runtime passed" in w for w in res2["warnings"])
+    assert any("npm or node not found" in warning for warning in res["warnings"])
+    assert res["installed"] == ["scip-java"]
+    assert not (cache / "tools" / "node" / "node_modules" / ".bin" / "scip-python").exists()
+    assert (cache / "tools" / "java" / "scip-java").is_file()
+
+
+def test_toolchain_ensure_skips_scip_java_when_java_absent(tmp_path):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+    manifest_mock = {"tools": _java_tools(b"coursier-launcher-jar")}
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest_mock),
+        patch(
+            "arch_indexer.toolchain.check_host_runtimes",
+            return_value=_runtimes(java=False, mvn=False),
+        ),
+        patch("urllib.request.urlopen") as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache)
+
+    assert res["installed"] == []
+    assert any("Host java >= 17 is absent" in warning for warning in res["warnings"])
+    urlopen.assert_not_called()
+    assert not (cache / "tools" / "java").exists()
+
+
+def test_download_verified_removes_partial_file_on_failure(tmp_path):
+    dest = tmp_path / "coursier.jar"
+
+    def failing_urlopen(req, timeout):
+        assert timeout is not None
+        raise OSError("connection stalled")
+
+    with patch("arch_indexer.toolchain.urllib.request.urlopen", side_effect=failing_urlopen):
+        with pytest.raises(OSError, match="connection stalled"):
+            _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
+
+    assert not dest.exists()
+
+
+def test_download_verified_removes_file_on_checksum_mismatch(tmp_path):
+    dest = tmp_path / "coursier.jar"
+
+    with patch(
+        "arch_indexer.toolchain.urllib.request.urlopen",
+        return_value=io.BytesIO(b"tampered"),
+    ):
+        with pytest.raises(ValueError, match="Checksum mismatch"):
+            _download_verified("https://example.com/coursier.jar", "0" * 64, dest)
+
+    assert not dest.exists()
+
+
+def test_fetch_runtime_is_rejected(tmp_path):
+    with pytest.raises(RuntimeError, match="not supported yet"):
+        ensure_toolchain(
+            FIXTURES_DIR / "java_maven",
+            cache_dir=tmp_path / "cache",
+            fetch_runtime=True,
+        )

@@ -23,7 +23,6 @@ from arch_indexer.config import (
     get_node_tools_dir,
     get_repo_cache_id,
     get_tools_dir,
-    get_unit_timeout_sec,
 )
 
 
@@ -92,7 +91,6 @@ def test_repo_cache_paths(tmp_path):
 def test_memory_and_timeout_defaults(monkeypatch):
     monkeypatch.delenv("ARCH_INDEXER_NODE_HEAP_MB", raising=False)
     monkeypatch.delenv("ARCH_INDEXER_JVM_HEAP_MB", raising=False)
-    monkeypatch.delenv("ARCH_INDEXER_UNIT_TIMEOUT_SEC", raising=False)
 
     assert DEFAULT_NODE_MAX_HEAP_MB == 2048
     assert DEFAULT_JVM_MAX_HEAP_MB == 2048
@@ -108,17 +106,13 @@ def test_memory_and_timeout_defaults(monkeypatch):
 
     assert get_node_heap_mb() == 2048
     assert get_jvm_heap_mb() == 2048
-    assert get_unit_timeout_sec() == 300
 
     # Overrides
     assert get_node_heap_mb(4096) == 4096
     assert get_jvm_heap_mb(1024) == 1024
-    assert get_unit_timeout_sec(60) == 60
 
     # Env overrides
     monkeypatch.setenv("ARCH_INDEXER_NODE_HEAP_MB", "1536")
     monkeypatch.setenv("ARCH_INDEXER_JVM_HEAP_MB", "3072")
-    monkeypatch.setenv("ARCH_INDEXER_UNIT_TIMEOUT_SEC", "120")
     assert get_node_heap_mb() == 1536
     assert get_jvm_heap_mb() == 3072
-    assert get_unit_timeout_sec() == 120

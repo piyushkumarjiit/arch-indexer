@@ -26,8 +26,8 @@ A thin Firstmate skill invokes `arch-indexer` and instructs the Firstmate orches
 ```text
 arch-indexer/
 ├── pyproject.toml                   # Python >=3.10 package, CLI entry point `arch-indexer`
-├── toolchain.toml                   # Pinned external indexer versions & SHA-256 checksums
 ├── src/arch_indexer/
+│   ├── toolchain.toml               # Pinned external indexer versions & SHA-256 checksums (package data)
 │   ├── cli.py                       # CLI commands and exit codes
 │   ├── config.py                    # Cache paths, memory limits, worker budgets
 │   ├── toolchain.py                 # Language detection & pinned tool installation

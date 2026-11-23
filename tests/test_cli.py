@@ -114,13 +114,30 @@ def test_cli_toolchain_ensure(tmp_path, capsys):
                 str(repo),
                 "--cache-dir",
                 str(cache),
-                "--fetch-runtime",
             ]
         )
         assert code == EXIT_OK
         captured = capsys.readouterr()
         assert "Toolchain ensure completed" in captured.out
         assert "scip-python" in captured.out
+
+
+def test_cli_fetch_runtime_is_rejected(tmp_path, capsys):
+    code = main(
+        [
+            "toolchain",
+            "ensure",
+            "--repo",
+            str(FIXTURES_DIR / "java_maven"),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--fetch-runtime",
+        ]
+    )
+    assert code == EXIT_ERROR
+    captured = capsys.readouterr()
+    assert "--fetch-runtime is not supported yet" in captured.err
+    assert "java >= 17" in captured.err
 
 
 @pytest.mark.parametrize(

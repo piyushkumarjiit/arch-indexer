@@ -98,19 +98,6 @@ def get_jvm_heap_mb(override: int | None = None) -> int:
     return DEFAULT_JVM_MAX_HEAP_MB
 
 
-def get_unit_timeout_sec(override: int | None = None) -> int:
-    """Resolve unit timeout in seconds (flag override or ARCH_INDEXER_UNIT_TIMEOUT_SEC)."""
-    if override is not None:
-        return int(override)
-    env_val = os.environ.get("ARCH_INDEXER_UNIT_TIMEOUT_SEC")
-    if env_val:
-        try:
-            return int(env_val)
-        except ValueError:
-            pass
-    return DEFAULT_UNIT_TIMEOUT_SEC
-
-
 @dataclass
 class RepoCachePaths:
     """Cache paths specific to a target repository."""
