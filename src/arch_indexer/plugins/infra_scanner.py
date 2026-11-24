@@ -33,6 +33,20 @@ class _ComposeLoader(yaml.SafeLoader):
         return "tag:yaml.org,2002:str" if tag == "tag:yaml.org,2002:int" else tag
 
 
+def is_infra_file(rel_path: str) -> bool:
+    """Return True if a repository-relative path matches infrastructure artifact patterns."""
+    basename = os.path.basename(rel_path)
+    return (
+        fnmatch.fnmatch(basename, "Dockerfile*")
+        or fnmatch.fnmatch(basename, "*.dockerfile")
+        or fnmatch.fnmatch(basename, "*compose*.yml")
+        or fnmatch.fnmatch(basename, "*compose*.yaml")
+        or rel_path.endswith((".sh", ".tf", ".hcl"))
+        or fnmatch.fnmatch(rel_path, ".github/workflows/*.yml")
+        or fnmatch.fnmatch(rel_path, ".github/workflows/*.yaml")
+    )
+
+
 class InfraScanner(LanguagePlugin):
     """Scanner for repository infrastructure artifacts per spec section 4.5."""
 
@@ -51,16 +65,7 @@ class InfraScanner(LanguagePlugin):
         infra_files: list[Path] = []
 
         for rel in files:
-            basename = os.path.basename(rel)
-            if (
-                fnmatch.fnmatch(basename, "Dockerfile*")
-                or fnmatch.fnmatch(basename, "*.dockerfile")
-                or fnmatch.fnmatch(basename, "*compose*.yml")
-                or fnmatch.fnmatch(basename, "*compose*.yaml")
-                or rel.endswith((".sh", ".tf", ".hcl"))
-                or fnmatch.fnmatch(rel, ".github/workflows/*.yml")
-                or fnmatch.fnmatch(rel, ".github/workflows/*.yaml")
-            ):
+            if is_infra_file(rel):
                 infra_files.append(repo_path / rel)
 
         if not infra_files:

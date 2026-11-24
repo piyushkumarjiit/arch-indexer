@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 
 from arch_indexer.config import (
@@ -19,13 +19,21 @@ from arch_indexer.config import (
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
     RepoCachePaths,
 )
-from arch_indexer.graph import _build_modules, git_head
+from arch_indexer.graph import (
+    _REVERSE_DOMAIN_TLDS,
+    _SOURCE_ROOTS,
+    _build_modules,
+    git_head,
+    module_key,
+)
 from arch_indexer.mermaid_gen import (
     MODULE_OVERVIEW_ID,
     _entrypoints_by_domain,
     _module_names,
     diagram_ids,
 )
+from arch_indexer.plugins.base import module_with_parents
+from arch_indexer.plugins.infra_scanner import is_infra_file
 from arch_indexer.storage.state import read_json, write_json
 from arch_indexer.store import IndexStore
 
@@ -217,11 +225,157 @@ def build_master_index(
     }
 
 
+def _specific_module_paths(module_paths: Mapping[str, str]) -> dict[str, str]:
+    """Return module -> path for paths that exclusively belong to one non-root module."""
+    all_paths = [p for p in module_paths.values() if p and p != "."]
+    counts: dict[str, int] = {}
+    for p in all_paths:
+        counts[p] = counts.get(p, 0) + 1
+    result: dict[str, str] = {}
+    for mod, path in module_paths.items():
+        if not path or path == "." or path in _SOURCE_ROOTS or counts.get(path, 0) != 1:
+            continue
+        if any(other != path and other.startswith(f"{path}/") for other in all_paths):
+            continue
+        result[mod] = path
+    return result
+
+
+def _file_belongs_to_module(
+    file_path: str,
+    mod: str,
+    specific_paths: Mapping[str, str],
+) -> bool:
+    """Match a file path against a canonical module by path boundary."""
+    mod_path = specific_paths.get(mod, "")
+    if mod_path and (file_path == mod_path or file_path.startswith(f"{mod_path}/")):
+        return True
+    if mod == "infra" and is_infra_file(file_path):
+        return True
+    parts = PurePosixPath(file_path).parts
+    if not parts:
+        return False
+    dir_parts = parts[:-1]
+    if mod == "root":
+        return not dir_parts
+    if mod in dir_parts:
+        return True
+    if (not dir_parts or all(part in _SOURCE_ROOTS for part in dir_parts)) and (
+        PurePosixPath(file_path).stem == mod
+    ):
+        return True
+    return False
+
+
+def _build_raw_module_map(
+    state: Mapping[str, Any],
+    file_to_canonical: Mapping[str, str],
+) -> dict[str, set[str]]:
+    """Map raw dotted module names from state.json onto canonical master-index names."""
+    raw_to_canonical: dict[str, set[str]] = {}
+    parent_candidates: dict[str, set[str]] = {}
+    state_files = state.get("files")
+    if isinstance(state_files, Mapping):
+        for file_path, record in state_files.items():
+            if not isinstance(record, Mapping):
+                continue
+            canon = file_to_canonical.get(str(file_path))
+            raw = record.get("module")
+            if not canon or not raw:
+                continue
+            raw_str = str(raw)
+            raw_to_canonical.setdefault(raw_str, set()).add(canon)
+            for parent in module_with_parents(raw_str):
+                if parent != raw_str:
+                    parent_candidates.setdefault(parent, set()).add(canon)
+    for parent, canons in parent_candidates.items():
+        if (
+            len(canons) == 1
+            and parent not in raw_to_canonical
+            and parent not in _SOURCE_ROOTS
+            and parent not in _REVERSE_DOMAIN_TLDS
+        ):
+            raw_to_canonical[parent] = canons
+    return raw_to_canonical
+
+
+def _resolve_raw_module(
+    raw_mod: str,
+    canonical_names: set[str],
+    raw_to_canonical: Mapping[str, set[str]],
+    specific_paths: Mapping[str, str],
+    file_stem_to_canonical: Mapping[str, set[str]],
+    module_languages: Mapping[str, str],
+) -> set[str]:
+    """Resolve an impacted-sections module identifier onto canonical master-index names."""
+    cleaned = raw_mod.strip()
+    if not cleaned:
+        return set()
+    if cleaned in canonical_names:
+        return {cleaned}
+    unprefixed = cleaned.removeprefix("mod:")
+    if unprefixed in canonical_names:
+        return {unprefixed}
+    if cleaned in raw_to_canonical:
+        return set(raw_to_canonical[cleaned])
+
+    as_path = cleaned.replace(".", "/")
+    if as_path in file_stem_to_canonical:
+        return set(file_stem_to_canonical[as_path])
+    path_matches = {
+        mod
+        for mod, mpath in specific_paths.items()
+        if as_path == mpath or as_path.startswith(f"{mpath}/")
+    }
+    if path_matches:
+        return path_matches
+
+    languages = sorted({lang for lang in module_languages.values() if lang}) or [
+        "python",
+        "typescript",
+        "java",
+    ]
+    key_matches: set[str] = set()
+    for lang in languages:
+        candidate = module_key(cleaned, lang)
+        if candidate in canonical_names and (
+            not module_languages.get(candidate) or module_languages[candidate] == lang
+        ):
+            key_matches.add(candidate)
+    return key_matches
+
+
+def _partition_cited_files(
+    cited_files: Sequence[str],
+    modules: Sequence[str],
+    file_to_canonical: Mapping[str, str],
+    specific_paths: Mapping[str, str],
+) -> dict[str, list[str]]:
+    """Assign each cited file to the module slice(s) that own it."""
+    by_module: dict[str, list[str]] = {m: [] for m in modules}
+    if not modules:
+        return by_module
+    for f in cited_files:
+        owner = file_to_canonical.get(f)
+        if owner is not None:
+            if owner in by_module:
+                by_module[owner].append(f)
+            continue
+        matched = [m for m in modules if _file_belongs_to_module(f, m, specific_paths)]
+        if matched:
+            for m in matched:
+                by_module[m].append(f)
+        else:
+            by_module[modules[0]].append(f)
+    return by_module
+
+
 def extract_delta_slice(
     delta: dict[str, Any],
     assigned_modules: Sequence[str],
     module_files: Mapping[str, Sequence[str]],
     cited_files: Sequence[str],
+    module_paths: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Extract the subset of index-delta.json relevant to a packet."""
     is_first_run = bool(delta.get("is_first_run", False))
@@ -241,13 +395,16 @@ def extract_delta_slice(
             "moved_symbols": [],
         }
 
+    specific_paths = _specific_module_paths(module_paths or {})
     added_files = sorted(f for f in delta.get("added_files", []) if f in target_files)
     modified_files = sorted(f for f in delta.get("modified_files", []) if f in target_files)
     deleted_files = sorted(
         f
         for f in delta.get("deleted_files", [])
-        if f in target_files or any(mod in f for mod in assigned_modules)
+        if f in target_files
+        or any(_file_belongs_to_module(f, mod, specific_paths) for mod in assigned_modules)
     )
+    deleted_target_files = target_files | set(deleted_files)
 
     added_symbols = sorted(
         [s for s in delta.get("added_symbols", []) if s.get("file_path") in target_files],
@@ -262,7 +419,7 @@ def extract_delta_slice(
         key=lambda s: (s.get("file_path", ""), s.get("start_line", 0), s.get("fqname", "")),
     )
     deleted_symbols = sorted(
-        [s for s in delta.get("deleted_symbols", []) if s.get("file_path") in target_files],
+        [s for s in delta.get("deleted_symbols", []) if s.get("file_path") in deleted_target_files],
         key=lambda s: (s.get("file_path", ""), s.get("start_line", 0), s.get("fqname", "")),
     )
 
@@ -302,18 +459,7 @@ def resolve_packet_diagram_ids(
     for diag_id, node_ids in domain_groups.items():
         if diag_id not in available_diagrams:
             continue
-        if "design-sec3" in section_ids:
-            if assigned_modules:
-                diag_modules = {
-                    node_by_id[nid].get("module_id", "").removeprefix("mod:")
-                    for nid in node_ids
-                    if nid in node_by_id
-                }
-                if any(m in diag_modules for m in assigned_modules):
-                    result.add(diag_id)
-            else:
-                result.add(diag_id)
-        elif assigned_modules:
+        if assigned_modules:
             diag_modules = {
                 node_by_id[nid].get("module_id", "").removeprefix("mod:")
                 for nid in node_ids
@@ -321,6 +467,8 @@ def resolve_packet_diagram_ids(
             }
             if any(m in diag_modules for m in assigned_modules):
                 result.add(diag_id)
+        elif "design-sec3" in section_ids:
+            result.add(diag_id)
 
     return sorted(result)
 
@@ -329,7 +477,10 @@ def _build_packet_for_sections(
     sections: list[SectionItem],
     docs_dir: str,
     delta: dict[str, Any],
-    module_files: dict[str, list[str]],
+    module_files: Mapping[str, Sequence[str]],
+    module_lines: Mapping[str, int],
+    module_symbols: Mapping[str, int],
+    module_paths: Mapping[str, str],
     graph: dict[str, Any],
 ) -> Packet:
     target_doc = sections[0].target_doc
@@ -337,8 +488,8 @@ def _build_packet_for_sections(
     assigned_modules = sorted(set(m for s in sections for m in s.modules))
     cited_files = sorted(set(f for s in sections for f in s.cited_files))
     sec_diagram_ids = sorted(set(d for s in sections for d in s.diagram_ids))
-    total_lines = sum(s.lines for s in sections)
-    total_symbols = sum(s.symbols for s in sections)
+    total_lines = sum(module_lines.get(m, 0) for m in assigned_modules)
+    total_symbols = sum(module_symbols.get(m, 0) for m in assigned_modules)
 
     if len(section_ids) == 1:
         packet_id = section_ids[0]
@@ -355,7 +506,13 @@ def _build_packet_for_sections(
             packet_id = "-".join(section_ids)
 
     draft_path = f"{docs_dir}/.drafts/{packet_id}.md"
-    d_slice = extract_delta_slice(delta, assigned_modules, module_files, cited_files)
+    d_slice = extract_delta_slice(
+        delta,
+        assigned_modules,
+        module_files,
+        cited_files,
+        module_paths=module_paths,
+    )
     d_diagrams = resolve_packet_diagram_ids(section_ids, assigned_modules, sec_diagram_ids, graph)
 
     return Packet(
@@ -452,29 +609,37 @@ def run_plan(
         stderr.write(f"Error: Could not read JSON from '{graph_file}'.\n")
         return EXIT_ERROR
 
-    # Read delta if present
+    # Read delta and state if present
     delta = read_json(cache_paths.index_delta_json) or {}
+    state = read_json(cache_paths.state_json) or {}
 
-    # Extract module metadata
+    # Extract canonical module metadata
+    canonical_names: set[str] = set()
     module_lines: dict[str, int] = {}
     module_symbols: dict[str, int] = {}
     module_files: dict[str, list[str]] = {}
-    all_modules: list[str] = []
+    module_paths: dict[str, str] = {}
+    module_languages: dict[str, str] = {}
+    file_to_canonical: dict[str, str] = {}
+    file_stem_to_canonical: dict[str, set[str]] = {}
     for mod in master_index.get("modules", []):
         name = str(mod.get("name") or mod.get("id", "").removeprefix("mod:"))
-        all_modules.append(name)
+        canonical_names.add(name)
         lines = int(mod.get("line_count", 0))
         syms = int(mod.get("symbol_count", 0))
         files = list(mod.get("files", []))
         module_lines[name] = lines
         module_symbols[name] = syms
         module_files[name] = files
-        mod_id = mod.get("id")
-        if mod_id:
-            module_lines[mod_id] = lines
-            module_symbols[mod_id] = syms
-            module_files[mod_id] = files
-    all_modules = sorted(set(all_modules))
+        module_paths[name] = str(mod.get("path") or "")
+        module_languages[name] = str(mod.get("language") or "")
+        for f in files:
+            file_to_canonical[f] = name
+            stem_path = str(PurePosixPath(f).with_suffix(""))
+            file_stem_to_canonical.setdefault(stem_path, set()).add(name)
+    all_modules = sorted(canonical_names)
+    specific_paths = _specific_module_paths(module_paths)
+    raw_to_canonical = _build_raw_module_map(state, file_to_canonical)
 
     # Collect section items by target doc
     sections_by_doc: dict[str, list[SectionItem]] = {}
@@ -486,8 +651,32 @@ def run_plan(
         sec_id = normalize_section_id(raw_sec_id, heading, target_doc)
         if sec_id in REFERENCES_SECTION_IDS:
             continue
-        modules = sorted(set(str(m) for m in entry.get("modules", [])))
-        if not modules and target_doc == "DESIGN.md" and sec_id == "design-sec2":
+        raw_modules = [str(m) for m in entry.get("modules", [])]
+        cited_files = sorted(set(str(f) for f in entry.get("cited_files", [])))
+        resolved_modules: set[str] = set()
+        for raw_mod in raw_modules:
+            resolved_modules.update(
+                _resolve_raw_module(
+                    raw_mod,
+                    canonical_names,
+                    raw_to_canonical,
+                    specific_paths,
+                    file_stem_to_canonical,
+                    module_languages,
+                )
+            )
+        for cited_file in cited_files:
+            canon = file_to_canonical.get(cited_file)
+            if canon:
+                resolved_modules.add(canon)
+        modules = sorted(resolved_modules)
+        if (
+            not modules
+            and not raw_modules
+            and not cited_files
+            and target_doc == "DESIGN.md"
+            and sec_id == "design-sec2"
+        ):
             modules = all_modules[:]
         sec_lines = sum(module_lines.get(m, 0) for m in modules)
         sec_symbols = sum(module_symbols.get(m, 0) for m in modules)
@@ -498,7 +687,7 @@ def run_plan(
                 heading=heading,
                 modules=modules,
                 diagram_ids=sorted(set(entry.get("diagram_ids", []))),
-                cited_files=sorted(set(entry.get("cited_files", []))),
+                cited_files=cited_files,
                 lines=sec_lines,
                 symbols=sec_symbols,
                 is_missing_section=False,
@@ -508,9 +697,17 @@ def run_plan(
     for entry in impacted_sections.get("missing_sections", []):
         raw_doc = str(entry.get("doc", f"{effective_docs_dir}/DESIGN.md"))
         target_doc = Path(raw_doc).name
-        mod = str(entry.get("module") or "")
+        raw_mod = str(entry.get("module") or "")
         sec_id = "design-sec2"
-        modules = [mod] if mod else []
+        resolved = _resolve_raw_module(
+            raw_mod,
+            canonical_names,
+            raw_to_canonical,
+            specific_paths,
+            file_stem_to_canonical,
+            module_languages,
+        )
+        modules = sorted(resolved) if resolved else ([raw_mod] if raw_mod else [])
         sec_lines = sum(module_lines.get(m, 0) for m in modules)
         sec_symbols = sum(module_symbols.get(m, 0) for m in modules)
         sections_by_doc.setdefault(target_doc, []).append(
@@ -538,30 +735,39 @@ def run_plan(
 
         for sec in doc_sections:
             if sec.is_missing_section:
-                mod = sec.modules[0] if sec.modules else ""
-                slice_key = (target_doc, sec.sec_id, mod)
-                if slice_key in handled_module_slices:
-                    continue
-                handled_module_slices.add(slice_key)
+                for mod in sec.modules or [""]:
+                    slice_key = (target_doc, sec.sec_id, mod)
+                    if slice_key in handled_module_slices:
+                        continue
+                    handled_module_slices.add(slice_key)
 
-                pkt_id = f"{sec.sec_id}-mod-{mod}" if mod else sec.sec_id
-                draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
-                d_slice = extract_delta_slice(delta, sec.modules, module_files, [])
-                d_diagrams = resolve_packet_diagram_ids(
-                    [sec.sec_id], sec.modules, sec.diagram_ids, graph
-                )
-                pkt = Packet(
-                    packet_id=pkt_id,
-                    target_doc=target_doc,
-                    section_ids=[sec.sec_id],
-                    draft_output_path=draft_path,
-                    assigned_modules=sec.modules,
-                    delta_slice=d_slice,
-                    diagram_ids=d_diagrams,
-                    line_count=sec.lines,
-                    symbol_count=sec.symbols,
-                )
-                packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
+                    slice_mods = [mod] if mod else []
+                    pkt_id = f"{sec.sec_id}-mod-{mod}" if mod else sec.sec_id
+                    draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
+                    d_slice = extract_delta_slice(
+                        delta,
+                        slice_mods,
+                        module_files,
+                        [],
+                        module_paths=module_paths,
+                    )
+                    d_diagrams = resolve_packet_diagram_ids(
+                        [sec.sec_id], slice_mods, sec.diagram_ids, graph
+                    )
+                    pkt = Packet(
+                        packet_id=pkt_id,
+                        target_doc=target_doc,
+                        section_ids=[sec.sec_id],
+                        draft_output_path=draft_path,
+                        assigned_modules=slice_mods,
+                        delta_slice=d_slice,
+                        diagram_ids=d_diagrams,
+                        line_count=module_lines.get(mod, 0) if mod else 0,
+                        symbol_count=module_symbols.get(mod, 0) if mod else 0,
+                    )
+                    packets.append(
+                        _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
+                    )
                 continue
 
             # Oversized check per SPEC 9.2: split into module slices
@@ -570,6 +776,9 @@ def run_plan(
             )
 
             if is_oversized:
+                cited_by_mod = _partition_cited_files(
+                    sec.cited_files, sec.modules, file_to_canonical, specific_paths
+                )
                 for m in sec.modules:
                     slice_key = (target_doc, sec.sec_id, m)
                     if slice_key in handled_module_slices:
@@ -579,7 +788,13 @@ def run_plan(
                     pkt_id = f"{sec.sec_id}-mod-{m}"
                     m_lines = module_lines.get(m, 0)
                     m_symbols = module_symbols.get(m, 0)
-                    d_slice = extract_delta_slice(delta, [m], module_files, [])
+                    d_slice = extract_delta_slice(
+                        delta,
+                        [m],
+                        module_files,
+                        cited_by_mod.get(m, []),
+                        module_paths=module_paths,
+                    )
                     d_diagrams = resolve_packet_diagram_ids(
                         [sec.sec_id], [m], sec.diagram_ids, graph
                     )
@@ -603,30 +818,44 @@ def run_plan(
 
         # Greedily pack non-oversized sections respecting all three budgets
         cur_sections: list[SectionItem] = []
-        cur_lines = 0
-        cur_symbols = 0
+        cur_modules: set[str] = set()
 
         for sec in non_oversized:
+            candidate_modules = cur_modules | set(sec.modules)
+            candidate_lines = sum(module_lines.get(m, 0) for m in candidate_modules)
+            candidate_symbols = sum(module_symbols.get(m, 0) for m in candidate_modules)
             if cur_sections and (
                 len(cur_sections) + 1 > max_sections_per_worker
-                or cur_lines + sec.lines > max_lines_per_worker
-                or cur_symbols + sec.symbols > max_symbols_per_worker
+                or candidate_lines > max_lines_per_worker
+                or candidate_symbols > max_symbols_per_worker
             ):
                 pkt = _build_packet_for_sections(
-                    cur_sections, effective_docs_dir, delta, module_files, graph
+                    cur_sections,
+                    effective_docs_dir,
+                    delta,
+                    module_files,
+                    module_lines,
+                    module_symbols,
+                    module_paths,
+                    graph,
                 )
                 packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
                 cur_sections = [sec]
-                cur_lines = sec.lines
-                cur_symbols = sec.symbols
+                cur_modules = set(sec.modules)
             else:
                 cur_sections.append(sec)
-                cur_lines += sec.lines
-                cur_symbols += sec.symbols
+                cur_modules = candidate_modules
 
         if cur_sections:
             pkt = _build_packet_for_sections(
-                cur_sections, effective_docs_dir, delta, module_files, graph
+                cur_sections,
+                effective_docs_dir,
+                delta,
+                module_files,
+                module_lines,
+                module_symbols,
+                module_paths,
+                graph,
             )
             packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
 

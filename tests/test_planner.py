@@ -547,3 +547,334 @@ def test_round_trip_draft_and_assemble(tmp_path: Path):
     design_content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
     assert "The main app component exposes hello[^1]." in design_content
     assert "[^1]: `src/app.py:1` — `hello`" in design_content
+
+
+def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
+    """Incremental runs map dotted impacted modules onto canonical master-index names."""
+    repo = tmp_path / "repo"
+    (repo / "src" / "billing").mkdir(parents=True)
+    (repo / "src" / "orders").mkdir(parents=True)
+    (repo / "docs").mkdir(parents=True)
+
+    (repo / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "src" / "billing" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "src" / "billing" / "invoices.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n\n"
+        "@app.post('/billing/pay')\n"
+        "def pay_invoice():\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    return a + b\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "orders" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "src" / "orders" / "cart.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n\n"
+        "@app.post('/orders/create')\n"
+        "def create_order():\n"
+        "    x = 1\n"
+        "    y = 2\n"
+        "    return x + y\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "DESIGN.md").write_text(
+        "# Technical Design\n\n"
+        "<!-- SECTION:2-components-modules:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Billing[^1] and orders[^2].\n"
+        "<!-- SECTION:2-components-modules:END -->\n\n"
+        "<!-- SECTION:3-control-data-flows:START -->\n"
+        "## 3. Control & Data Flows\n\n"
+        "Billing flow[^1].\n"
+        "<!-- SECTION:3-control-data-flows:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/billing/invoices.py:7` — `pay_invoice`\n"
+        "[^2]: `src/orders/cart.py:7` — `create_order`\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "USER_GUIDE.md").write_text(
+        "# User Guide\n\n"
+        "<!-- SECTION:1-system-overview:START -->\n"
+        "## 1. System Overview\n\n"
+        "Uses pay[^1].\n"
+        "<!-- SECTION:1-system-overview:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/billing/invoices.py:7` — `pay_invoice`\n",
+        encoding="utf-8",
+    )
+
+    cache = tmp_path / "cache"
+    assert main(["index", str(repo), "--offline", "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
+
+    # Modify billing, and add a new module with two submodules under src/payments
+    (repo / "src" / "billing" / "invoices.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n\n"
+        "@app.post('/billing/pay')\n"
+        "def pay_invoice():\n"
+        "    a = 10\n"
+        "    b = 20\n"
+        "    return a + b\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "payments").mkdir(parents=True)
+    (repo / "src" / "payments" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "src" / "payments" / "gateway.py").write_text(
+        "def charge():\n    return True\n", encoding="utf-8"
+    )
+    (repo / "src" / "payments" / "refund.py").write_text(
+        "def refund():\n    return True\n", encoding="utf-8"
+    )
+
+    assert main(["index", str(repo), "--offline", "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
+
+    cache_paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache)
+    master_index = json.loads(cache_paths.master_index_json.read_text(encoding="utf-8"))
+    by_name = {m["name"]: m for m in master_index["modules"]}
+    assert {"billing", "orders", "payments"} <= set(by_name)
+
+    # Line budget 6 forces oversized design-sec2 (billing + orders = 10 lines) to shard
+    assert (
+        main(
+            [
+                "plan",
+                str(repo),
+                "--max-lines-per-worker",
+                "6",
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+        == EXIT_OK
+    )
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packets = {p["packet_id"]: p for p in plan["packets"]}
+
+    # Oversized section sharded using canonical module counts & diagram IDs
+    assert "design-sec2-mod-billing" in packets
+    assert "design-sec2-mod-orders" in packets
+    billing_pkt = packets["design-sec2-mod-billing"]
+    assert billing_pkt["assigned_modules"] == ["billing"]
+    assert billing_pkt["line_count"] == by_name["billing"]["line_count"]
+    assert billing_pkt["symbol_count"] == by_name["billing"]["symbol_count"]
+    assert billing_pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
+    assert "flow-billing" in billing_pkt["pre_rendered_diagram_ids"]
+
+    orders_pkt = packets["design-sec2-mod-orders"]
+    assert orders_pkt["assigned_modules"] == ["orders"]
+    assert orders_pkt["line_count"] == by_name["orders"]["line_count"]
+    assert "flow-orders" in orders_pkt["pre_rendered_diagram_ids"]
+
+    # Missing sections from multiple submodules in payments collapse to one canonical packet
+    assert "design-sec2-mod-payments" in packets
+    pay_pkt = packets["design-sec2-mod-payments"]
+    assert pay_pkt["assigned_modules"] == ["payments"]
+    assert pay_pkt["line_count"] == by_name["payments"]["line_count"]
+    assert pay_pkt["symbol_count"] == by_name["payments"]["symbol_count"]
+    assert sorted(pay_pkt["delta_slice"]["added_files"]) == [
+        "src/payments/__init__.py",
+        "src/payments/gateway.py",
+        "src/payments/refund.py",
+    ]
+    assert {s["name"] for s in pay_pkt["delta_slice"]["added_symbols"]} == {"charge", "refund"}
+
+
+def test_deleted_files_and_symbols_on_sharded_and_boundary_modules(tmp_path: Path):
+    """Deleted files match by module boundary (never substring) and keep deleted_symbols."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {
+            "name": "app",
+            "path": "src/app",
+            "line_count": 50,
+            "symbol_count": 5,
+            "files": ["src/app/main.py"],
+        },
+        {
+            "name": "billing",
+            "path": "src/billing",
+            "line_count": 100,
+            "symbol_count": 10,
+            "files": ["src/billing/invoices.py"],
+        },
+        {
+            "name": "orders",
+            "path": "src/orders",
+            "line_count": 100,
+            "symbol_count": 10,
+            "files": ["src/orders/cart.py"],
+        },
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec1",
+            "heading": "1. Architecture Overview",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app/main.py"],
+            "reasons": ["modified_file"],
+        },
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["billing", "orders"],
+            "diagram_ids": [],
+            "cited_files": ["src/billing/removed.py", "src/orders/cart.py"],
+            "reasons": ["deleted_file"],
+        },
+    ]
+    delta = {
+        "added_files": [],
+        "added_symbols": [],
+        "deleted_files": [
+            "src/wrapper/utils.py",
+            "src/my_app/helper.py",
+            "src/billing/removed.py",
+            "src/billing/uncited_old.py",
+        ],
+        "deleted_symbols": [
+            {
+                "file_path": "src/wrapper/utils.py",
+                "fqname": "wrapper.utils.wrap",
+                "kind": "function",
+                "name": "wrap",
+                "start_line": 1,
+                "end_line": 3,
+            },
+            {
+                "file_path": "src/billing/removed.py",
+                "fqname": "billing.removed.legacy_pay",
+                "kind": "function",
+                "name": "legacy_pay",
+                "start_line": 1,
+                "end_line": 4,
+            },
+            {
+                "file_path": "src/billing/uncited_old.py",
+                "fqname": "billing.uncited_old.cleanup",
+                "kind": "function",
+                "name": "cleanup",
+                "start_line": 1,
+                "end_line": 2,
+            },
+        ],
+        "is_first_run": False,
+        "modified_files": ["src/app/main.py"],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=delta
+    )
+    assert run_plan(repo, max_lines_per_worker=120, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packets = {p["packet_id"]: p for p in plan["packets"]}
+
+    # 'app' must not claim 'src/wrapper/utils.py' or 'src/my_app/helper.py'
+    sec1_pkt = packets["design-sec1"]
+    assert sec1_pkt["delta_slice"]["deleted_files"] == []
+    assert sec1_pkt["delta_slice"]["deleted_symbols"] == []
+
+    # Sharded billing slice gets both cited and boundary-matched deleted files and their symbols
+    billing_pkt = packets["design-sec2-mod-billing"]
+    assert billing_pkt["delta_slice"]["deleted_files"] == [
+        "src/billing/removed.py",
+        "src/billing/uncited_old.py",
+    ]
+    assert {s["name"] for s in billing_pkt["delta_slice"]["deleted_symbols"]} == {
+        "cleanup",
+        "legacy_pay",
+    }
+
+    orders_pkt = packets["design-sec2-mod-orders"]
+    assert orders_pkt["delta_slice"]["deleted_files"] == []
+    assert orders_pkt["delta_slice"]["deleted_symbols"] == []
+
+
+def test_shared_modules_not_double_counted_in_greedy_packing(tmp_path: Path):
+    """Sections sharing modules do not double-count lines/symbols in packing or payloads."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {"name": "app", "line_count": 10000, "symbol_count": 500, "files": ["src/app.py"]},
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["modified_file"],
+        },
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec3",
+            "heading": "3. Control & Data Flows",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["modified_file"],
+        },
+    ]
+
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections
+    )
+    assert (
+        run_plan(
+            repo,
+            max_lines_per_worker=15000,
+            max_symbols_per_worker=800,
+            max_sections_per_worker=3,
+            cache_dir=cache,
+        )
+        == EXIT_OK
+    )
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert plan["total_packets"] == 1
+    pkt = plan["packets"][0]
+    assert pkt["packet_id"] == "design-sec2-sec3"
+    assert pkt["assigned_modules"] == ["app"]
+    assert pkt["line_count"] == 10000
+    assert pkt["symbol_count"] == 500
+
+    # Three sections sharing one 100-line / 10-symbol module report 100 / 10, not 300 / 30
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+    cache2 = tmp_path / "cache2"
+    modules2 = [{"name": "app", "line_count": 100, "symbol_count": 10, "files": ["src/app.py"]}]
+    sections2 = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": f"design-sec{i}",
+            "heading": f"{i}. Section",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["modified_file"],
+        }
+        for i in (1, 2, 3)
+    ]
+    cache_paths2 = _setup_synthetic_cache(
+        repo2, cache2, modules=modules2, impacted_sections=sections2
+    )
+    assert run_plan(repo2, max_sections_per_worker=3, cache_dir=cache2) == EXIT_OK
+    plan2 = json.loads(cache_paths2.work_plan_json.read_text(encoding="utf-8"))
+    assert plan2["total_packets"] == 1
+    assert plan2["packets"][0]["line_count"] == 100
+    assert plan2["packets"][0]["symbol_count"] == 10
+
