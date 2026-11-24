@@ -1081,6 +1081,7 @@
       label: node.label || node.id,
       kind: node.kind,
       level: node.level,
+      isLeaf: leafScoped,
       tier,
       citation,
       file: node.file,

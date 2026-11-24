@@ -673,6 +673,12 @@ function runTests() {
     "A directory inspector must derive its tier from descendant files"
   );
   assert(dirDetails.uses.length > 0, "A directory inspector must show outgoing edges");
+  assert.strictEqual(ordersDetails.isLeaf, false, "A module detail must not be reported as a leaf");
+  assert.strictEqual(
+    getNodeDetails(state.hierarchy, "ep:POST:/api/orders").isLeaf,
+    true,
+    "An entrypoint detail must be reported as a leaf"
+  );
 
   // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
   console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
@@ -1046,6 +1052,10 @@ function testBrowserController(graphJsonText) {
     "Module inspector usedBy must include the calling module"
   );
   assert(inspectorContent.innerHTML.includes(">scip<"), "Module inspector must show its derived tier");
+  assert(
+    !inspectorContent.innerHTML.includes('id="btn-inspector-trace"'),
+    "A container inspector must not offer trace flow"
+  );
 
   // Node inspector must show the fixture node's own symbol, file:line and tier
   const inspectorNodeId = "ep:POST:/api/orders";
@@ -1065,6 +1075,10 @@ function testBrowserController(graphJsonText) {
   assert(
     inspectorContent.innerHTML.includes(`>${inspectorNodeFixture.tier}<`),
     "Node inspector must show the fixture indexing tier"
+  );
+  assert(
+    inspectorContent.innerHTML.includes('id="btn-inspector-trace"'),
+    "A leaf inspector must offer trace flow"
   );
   assert(inspectorContent.innerHTML.includes("Uses ("), "Node inspector must show outgoing edges");
   assert(inspectorContent.innerHTML.includes("Used By ("), "Node inspector must show incoming edges");

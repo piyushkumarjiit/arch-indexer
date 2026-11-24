@@ -432,7 +432,7 @@
           : ""
       }
       ${
-        details.kind === "entrypoint" || details.uses.length > 0
+        details.isLeaf
           ? `<div class="detail-row">
               <button class="btn" id="btn-inspector-trace" style="width:100%">🔍 Trace Flow From Here</button>
             </div>`
