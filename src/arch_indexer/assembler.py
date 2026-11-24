@@ -304,7 +304,7 @@ def patch_section_in_doc(
     """
     # If a draft body itself contains SECTION markers for this id, strip them
     start_pat = re.compile(
-        rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>]+|\s+[^>]+)?\s*-->", re.IGNORECASE
+        rf"<!--\s*SECTION:{re.escape(sec_id)}:START(?::[^>\s]+)?\s*-->", re.IGNORECASE
     )
     end_pat = re.compile(rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->", re.IGNORECASE)
     drafted = {
@@ -454,7 +454,7 @@ def renumber_footnotes_in_doc(doc_text: str, definitions: dict[str, str]) -> str
 
     # Inject definitions into References section
     ref_marker_start = re.search(
-        r"<!--\s*SECTION:(?P<id>[^:]*references):START(?::(?P<flag>[^>\s]+)|\s+(?P<attrs>[^>]+))?\s*-->",
+        r"<!--\s*SECTION:(?P<id>[^:]*references):START(?::(?P<flag>[^>\s]+))?\s*-->",
         doc_rewritten,
         re.IGNORECASE,
     )

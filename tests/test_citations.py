@@ -636,29 +636,6 @@ def test_exempt_section_not_flagged_for_uncited_section(tmp_path):
     assert errors == []
 
 
-def test_exempt_space_syntax_not_flagged(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    docs = repo / "docs"
-    docs.mkdir()
-
-    design = docs / "DESIGN.md"
-    design.write_text(
-        "# Design\n\n"
-        "<!-- SECTION:design-sec1:START exempt -->\n"
-        "## 1. Architecture Overview\n\n"
-        "Overview text without citations.\n"
-        "<!-- SECTION:design-sec1:END -->\n\n"
-        "<!-- SECTION:design-references:START exempt -->\n"
-        "## References\n\n"
-        "<!-- SECTION:design-references:END -->\n",
-        encoding="utf-8",
-    )
-
-    errors, _ = check_citations(repo)
-    assert errors == []
-
-
 def test_empty_or_heading_only_technical_section_not_flagged(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

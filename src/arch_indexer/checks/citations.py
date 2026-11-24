@@ -37,7 +37,7 @@ FOOTNOTE_REF_RE = re.compile(r"\[\^(?P<id>[^\]]+)\]")
 
 # Stable section markers used by the canonical documents and the assembly contract (spec 9.2)
 SECTION_START_RE = re.compile(
-    r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):START(?::(?P<flag>[^>\s]+)|\s+(?P<attrs>[^>]+))?\s*-->",
+    r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):START(?::(?P<flag>[^>\s]+))?\s*-->",
     re.IGNORECASE,
 )
 
@@ -387,8 +387,7 @@ def check_document_citations(
         for m in SECTION_START_RE.finditer(content):
             sec_id = m.group("id")
             flag = m.group("flag")
-            attrs = m.group("attrs")
-            is_exempt = "exempt" in (flag or "").lower() or "exempt" in (attrs or "").lower()
+            is_exempt = "exempt" in (flag or "").lower()
             if is_exempt:
                 continue
 

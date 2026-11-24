@@ -15,7 +15,7 @@ from arch_indexer.assembler import (
     renumber_footnotes_in_doc,
 )
 from arch_indexer.cli import main
-from arch_indexer.skeletons import get_skeleton_path, load_skeleton
+from arch_indexer.skeletons import load_skeleton
 
 
 def test_skeleton_loading_and_content():
@@ -42,9 +42,6 @@ def test_skeleton_loading_and_content():
     assert "<!-- SECTION:guide-references:START:exempt -->" in guide_skel
     assert "### How to Task Template" in guide_skel
     assert "[HUMAN INTENT NEEDED]" in guide_skel
-
-    assert get_skeleton_path("DESIGN.md").is_file()
-    assert get_skeleton_path("USER_GUIDE.md").is_file()
 
 
 def test_parse_draft_file(tmp_path):
