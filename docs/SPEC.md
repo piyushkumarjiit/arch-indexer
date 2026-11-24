@@ -39,6 +39,7 @@ arch-indexer/
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
 │   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
+│   ├── indexer.py                   # Two-tier indexing orchestration & fallback recording
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
@@ -299,7 +300,7 @@ Generated as a **single self-contained HTML file** with inline CSS and vanilla J
 
 ### 7.1 Commands
 ```bash
-# 1. Toolchain management (ONLY command allowed network access)
+# 1. Toolchain management (network-capable; installs the pinned indexers)
 arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>] [--fetch-runtime]
 arch-indexer toolchain status --repo <path>
 
