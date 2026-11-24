@@ -979,7 +979,9 @@ class PythonPlugin(LanguagePlugin):
         self.language = Language(tspython.language())
         self.parser = Parser(self.language)
         self._root_cache: dict[tuple[str, ...], bool] = {}
-        self._mount_cache: dict[tuple[str, tuple[str, ...]], dict[_Target, list[_MountRecord]]] = {}
+        self._mount_cache: dict[
+            tuple[str, tuple[tuple[str, str], ...]], dict[_Target, list[_MountRecord]]
+        ] = {}
 
     @property
     def name(self) -> str:
@@ -1242,8 +1244,11 @@ class PythonPlugin(LanguagePlugin):
         another package or chunk), so the scan covers the whole repository and its
         result is cached across the units of a single index run.
         """
-        records = {r["path"]: r for r in [*file_records, *all_file_records]}
-        key = (str(repo_root), tuple(sorted(records)))
+        records = {r["path"]: r for r in [*all_file_records, *file_records]}
+        key = (
+            str(repo_root),
+            tuple((p, records[p].get("sha256", "")) for p in sorted(records)),
+        )
         cached = self._mount_cache.get(key)
         if cached is not None:
             resolver.mounts = {target: list(entries) for target, entries in cached.items()}

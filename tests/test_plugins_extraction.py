@@ -2255,3 +2255,76 @@ def test_python_argparse_resolves_aliases_scopes_and_non_argparse(tmp_path: Path
     res = PythonPlugin().index_unit_tier2(unit)
     cli_files = {e["file_path"] for e in res.entrypoints if e["kind"] == "cli"}
     assert cli_files == {"tool/aliased_cli.py", "tool/attr_cli.py"}
+
+
+def test_python_reused_plugin_invalidates_mount_cache_on_content_change(tmp_path: Path):
+    """Reusing a PythonPlugin after editing a mount file emits updated route and auth."""
+    (tmp_path / "routes").mkdir()
+    (tmp_path / "routes" / "__init__.py").write_text("")
+    (tmp_path / "routes" / "items.py").write_text(
+        "from fastapi import APIRouter\n\n"
+        "items_router = APIRouter(prefix='/items')\n\n"
+        "@items_router.get('/{id}')\n"
+        "def get_item(id: int): pass\n"
+    )
+    (tmp_path / "security.py").write_text(
+        "from fastapi import Depends\n"
+        "from fastapi.security import HTTPBearer\n\n"
+        "scheme = HTTPBearer()\n\n"
+        "def require_user(t=Depends(scheme)): return t\n"
+        "def require_admin(t=Depends(scheme)): return t\n"
+    )
+    main_py = tmp_path / "main.py"
+    main_py.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "from routes.items import items_router\n"
+        "from security import require_user\n\n"
+        "app = FastAPI()\n"
+        "app.include_router(items_router, prefix='/v1', dependencies=[Depends(require_user)])\n"
+    )
+    plugin = PythonPlugin()
+    all_files = [
+        tmp_path / "main.py",
+        tmp_path / "security.py",
+        tmp_path / "routes" / "__init__.py",
+        tmp_path / "routes" / "items.py",
+    ]
+    all_unit = IndexUnit(
+        unit_id="python:all",
+        name="all",
+        language="python",
+        root_dir=tmp_path,
+        files=all_files,
+    )
+    routes_unit = IndexUnit(
+        unit_id="python:routes",
+        name="routes",
+        language="python",
+        root_dir=tmp_path,
+        files=[tmp_path / "routes" / "__init__.py", tmp_path / "routes" / "items.py"],
+    )
+
+    first_records, _ = plugin.extract_definitions(all_unit)
+    first_res = plugin.index_unit_tier2(
+        routes_unit, symbol_context={"file_records": {"python": first_records}}
+    )
+    first_eps = [e for e in first_res.entrypoints if e["kind"] == "http"]
+    assert len(first_eps) == 1
+    assert first_eps[0]["route_or_trigger"] == "/v1/items/{id}"
+    assert json.loads(first_eps[0]["auth_symbols_json"]) == ["require_user"]
+
+    main_py.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "from routes.items import items_router\n"
+        "from security import require_admin\n\n"
+        "app = FastAPI()\n"
+        "app.include_router(items_router, prefix='/v2', dependencies=[Depends(require_admin)])\n"
+    )
+    second_records, _ = plugin.extract_definitions(all_unit)
+    second_res = plugin.index_unit_tier2(
+        routes_unit, symbol_context={"file_records": {"python": second_records}}
+    )
+    second_eps = [e for e in second_res.entrypoints if e["kind"] == "http"]
+    assert len(second_eps) == 1
+    assert second_eps[0]["route_or_trigger"] == "/v2/items/{id}"
+    assert json.loads(second_eps[0]["auth_symbols_json"]) == ["require_admin"]
