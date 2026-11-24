@@ -979,6 +979,7 @@ class PythonPlugin(LanguagePlugin):
         self.language = Language(tspython.language())
         self.parser = Parser(self.language)
         self._root_cache: dict[tuple[str, ...], bool] = {}
+        self._mount_cache: dict[tuple[str, tuple[str, ...]], dict[_Target, list[_MountRecord]]] = {}
 
     @property
     def name(self) -> str:
@@ -1227,6 +1228,53 @@ class PythonPlugin(LanguagePlugin):
                 elif child.type in ("decorated_definition", "block", "module"):
                     stack.append((child, scope, in_class))
 
+    def _collect_router_mounts(
+        self,
+        repo_root: Path,
+        file_records: list[dict[str, Any]],
+        all_file_records: list[dict[str, Any]],
+        parsed_by_path: dict[str, tuple[str, bytes, Node]],
+        resolver: _Resolver,
+    ) -> None:
+        """Record mounts from every non-test Python file, once per repository layout.
+
+        A mount may live in a different unit (e.g. ``main.py`` mounting a router from
+        another package or chunk), so the scan covers the whole repository and its
+        result is cached across the units of a single index run.
+        """
+        records = {r["path"]: r for r in [*file_records, *all_file_records]}
+        key = (str(repo_root), tuple(sorted(records)))
+        cached = self._mount_cache.get(key)
+        if cached is not None:
+            resolver.mounts = {target: list(entries) for target, entries in cached.items()}
+            return
+
+        for rel_path in sorted(records):
+            if _is_test_path(rel_path):
+                continue
+            if rel_path in parsed_by_path:
+                m_name, src_bytes, root_node = parsed_by_path[rel_path]
+            else:
+                try:
+                    src_bytes = (repo_root / rel_path).read_bytes()
+                except OSError:
+                    continue
+                if b"include_router" not in src_bytes and b"register_blueprint" not in src_bytes:
+                    continue
+                m_name, importable, is_package, project = _module_info(
+                    repo_root, rel_path, self._root_cache
+                )
+                root_node = self.parser.parse(src_bytes).root_node
+                if m_name not in resolver.cache:
+                    resolver.cache[m_name] = _gather_module_facts(
+                        root_node, src_bytes, m_name, importable, is_package, project
+                    )
+            self._scan_router_mounts(root_node, src_bytes, rel_path, m_name, resolver)
+
+        self._mount_cache[key] = {
+            target: list(entries) for target, entries in resolver.mounts.items()
+        }
+
     def _scan_router_mounts(
         self,
         root: Node,
@@ -1330,35 +1378,9 @@ class PythonPlugin(LanguagePlugin):
             rel_path: (module_name, source_bytes, root_node)
             for _, rel_path, module_name, _, _, _, source_bytes, root_node in parsed_files
         }
-        # A mount may live in a different unit (e.g. ``main.py`` mounting a router from
-        # another package or chunk), so scan every non-test Python file. Test code must
-        # never contribute production routes or auth.
-        scan_records = sorted(
-            {r["path"]: r for r in [*file_records, *all_file_records]}.values(),
-            key=lambda r: r["path"],
+        self._collect_router_mounts(
+            repo_root, file_records, all_file_records, parsed_by_path, resolver
         )
-        for record in scan_records:
-            rel_path = record["path"]
-            if _is_test_path(rel_path):
-                continue
-            if rel_path in parsed_by_path:
-                m_name, src_bytes, root_node = parsed_by_path[rel_path]
-            else:
-                try:
-                    src_bytes = (repo_root / rel_path).read_bytes()
-                except OSError:
-                    continue
-                if b"include_router" not in src_bytes and b"register_blueprint" not in src_bytes:
-                    continue
-                m_name, importable, is_package, project = _module_info(
-                    repo_root, rel_path, self._root_cache
-                )
-                root_node = self.parser.parse(src_bytes).root_node
-                if m_name not in resolver.cache:
-                    resolver.cache[m_name] = _gather_module_facts(
-                        root_node, src_bytes, m_name, importable, is_package, project
-                    )
-            self._scan_router_mounts(root_node, src_bytes, rel_path, m_name, resolver)
 
         for (
             _,
@@ -1580,7 +1602,7 @@ class PythonPlugin(LanguagePlugin):
                                 "ref_kind": "call",
                             }
                         )
-        if record_mount and not _is_test_path(rel_path):
+        if record_mount:
             resolver.record_mount(parent_target, target, attr, prefix, mount_deps)
 
     def _analyze_file(
@@ -1790,7 +1812,7 @@ class PythonPlugin(LanguagePlugin):
                         module_name,
                         resolver,
                         references,
-                        record_mount=not is_test,
+                        record_mount=False,
                     )
 
             # 3. Entrypoint detection

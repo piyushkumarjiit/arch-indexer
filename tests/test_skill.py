@@ -138,9 +138,20 @@ def test_skill_commands_exist_in_cli_parser() -> None:
         "flow-trace",
     }.issubset(parsed_query_actions)
 
-    # Negative controls for the documented templates: the same extraction pipeline must
-    # reject a misspelled option and a missing required option.
-    with pytest.raises(SystemExit):
-        parser.parse_args(["assemble", "placeholder", "--draft-dir", "docs/.drafts"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["toolchain", "ensure"])
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "```bash\narch-indexer assemble placeholder --draft-dir docs/.drafts\n```\n",
+        "```bash\narch-indexer toolchain ensure\n```\n",
+    ],
+)
+def test_extraction_pipeline_rejects_invalid_documented_commands(markdown: str) -> None:
+    """A documented command with a misspelled or missing option must fail the CLI grammar."""
+    invocations = _extract_cli_invocations(markdown)
+    assert invocations, f"Sample yielded no CLI invocation: {markdown!r}"
+
+    parser = build_parser()
+    for argv in invocations:
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
