@@ -513,6 +513,56 @@ def inject_diagrams(doc_text: str, diagrams: dict[str, str] | None) -> str:
     return AUTO_DIAGRAM_SLOT_RE.sub(replace_slot, doc_text)
 
 
+# Sections that own generated diagram slots in the packaged DESIGN.md skeleton.
+_DIAGRAM_SECTION_IDS = {"module-overview": "design-sec1"}
+_DEFAULT_DIAGRAM_SECTION = "design-sec3"
+
+
+def _insert_diagram_block(doc_text: str, section_id: str, block: str) -> str:
+    """Insert an AUTO-DIAGRAM block at the end of a document section."""
+    start_re = re.compile(
+        rf"<!--\s*SECTION:{re.escape(section_id)}:START(?::[^>\s]+)?\s*-->", re.IGNORECASE
+    )
+    start_match = start_re.search(doc_text)
+    if start_match is None:
+        return f"{doc_text.rstrip(chr(10))}\n\n{block}\n"
+    end_re = re.compile(rf"<!--\s*SECTION:{re.escape(section_id)}:END\s*-->", re.IGNORECASE)
+    end_match = end_re.search(doc_text, start_match.end())
+    if end_match is None:
+        return doc_text
+    before = doc_text[: end_match.start()].rstrip("\n")
+    return f"{before}\n\n{block}\n\n{doc_text[end_match.start() :]}"
+
+
+def sync_auto_diagrams(doc_text: str, diagrams: dict[str, str]) -> str:
+    """Rewrite a document's AUTO-DIAGRAM slots to exactly the generated diagrams.
+
+    ``diagrams`` is the deterministic output for ``docs/graph.json``. Slots the graph
+    does not produce (skeleton placeholders) are removed, and slots for missing diagram
+    ids are inserted in the section that owns them, so a freshly assembled document
+    always passes the ``check-mermaid`` AUTO-DIAGRAM gate.
+    """
+    from arch_indexer.mermaid_gen import render_auto_diagram_block
+
+    doc_text = AUTO_DIAGRAM_SLOT_RE.sub(
+        lambda m: m.group(0) if m.group("id").strip() in diagrams else "", doc_text
+    )
+    doc_text = re.sub(r"\n{3,}", "\n\n", doc_text)
+    for diagram_id in sorted(diagrams):
+        block = render_auto_diagram_block(diagram_id, diagrams[diagram_id])
+        slot_re = re.compile(
+            rf"<!--\s*AUTO-DIAGRAM:{re.escape(diagram_id)}:START\s*-->"
+            rf".*?<!--\s*AUTO-DIAGRAM:{re.escape(diagram_id)}:END\s*-->",
+            re.DOTALL,
+        )
+        if slot_re.search(doc_text):
+            doc_text = slot_re.sub(lambda _match, replacement=block: replacement, doc_text)
+            continue
+        section_id = _DIAGRAM_SECTION_IDS.get(diagram_id, _DEFAULT_DIAGRAM_SECTION)
+        doc_text = _insert_diagram_block(doc_text, section_id, block)
+    return doc_text
+
+
 def remove_slices_from_doc(doc_text: str, packet_ids: Sequence[str]) -> str:
     """Delete the SLICE blocks belonging to the named packets from a document."""
     for packet_id in packet_ids:
@@ -589,6 +639,20 @@ def assemble(
             stderr.write(
                 f"Error: Diagrams file '{diag_path}' must be a JSON object of id -> mermaid text\n"
             )
+            return 1
+
+    # ``docs/graph.json`` is authoritative for diagram slots: derive its diagrams so a
+    # freshly assembled document satisfies the AUTO-DIAGRAM gate without --diagrams.
+    graph_diagrams: dict[str, str] | None = None
+    graph_path = target_docs_dir / "graph.json"
+    if graph_path.is_file():
+        from arch_indexer.graph import load_graph
+        from arch_indexer.mermaid_gen import generate_diagrams
+
+        try:
+            graph_diagrams = generate_diagrams(load_graph(graph_path))
+        except (OSError, ValueError) as exc:
+            stderr.write(f"Error reading '{graph_path}': {exc}\n")
             return 1
 
     # Find draft files
@@ -675,7 +739,10 @@ def assemble(
 
         # Globally renumber and deduplicate footnotes, then inject diagrams
         doc_text = renumber_footnotes_in_doc(doc_text, doc_definitions)
-        rendered[doc_name] = inject_diagrams(doc_text, diagrams_map)
+        doc_text = inject_diagrams(doc_text, diagrams_map)
+        if graph_diagrams is not None and doc_name == "DESIGN.md":
+            doc_text = sync_auto_diagrams(doc_text, graph_diagrams)
+        rendered[doc_name] = doc_text
 
     target_docs_dir.mkdir(parents=True, exist_ok=True)
     for doc_name, doc_text in rendered.items():

@@ -5,7 +5,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from arch_indexer.config import DEFAULT_DOCS_DIR
 
@@ -19,6 +19,7 @@ CODE_UNBALANCED_DELIMITERS: str = "UNBALANCED_DELIMITERS"
 CODE_INVALID_NODE_ID: str = "INVALID_NODE_ID"
 CODE_INVALID_ARROW: str = "INVALID_ARROW"
 CODE_AUTO_DIAGRAM_MISMATCH: str = "AUTO_DIAGRAM_MISMATCH"
+CODE_AUTO_DIAGRAM_MISSING: str = "AUTO_DIAGRAM_MISSING"
 CODE_AUTO_DIAGRAM_ERROR: str = "AUTO_DIAGRAM_ERROR"
 
 # Canonical documents checked in target repo (spec section 8.1 & 8.3)
@@ -67,19 +68,83 @@ def _split_lines(text: str) -> list[str]:
     return text.split("\n")
 
 
+def _load_graph(graph_path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Load docs/graph.json once for all AUTO-DIAGRAM checks in a run."""
+    from arch_indexer.graph import load_graph
+
+    if not graph_path.is_file():
+        return None, None
+    try:
+        return load_graph(graph_path), None
+    except (OSError, ValueError) as exc:
+        return None, f"cannot read {graph_path.name} to check AUTO-DIAGRAM blocks: {exc}"
+
+
 def verify_auto_diagram(
     diagram_id: str,
     mermaid_code: str,
-    repo_path: Path,
-    graph_path: Path | None = None,
+    graph: dict[str, Any] | None,
 ) -> tuple[bool, str | None]:
-    """Hook function to verify an AUTO-DIAGRAM block against graph.json.
+    """Verify an AUTO-DIAGRAM block against the deterministic output for the graph.
 
-    Graph export and graph.json are out of scope for this task and do not
-    exist yet. This function serves as the clearly named hook extension point
-    that the graph task will fill. Does not fail on AUTO-DIAGRAM markers.
+    When ``docs/graph.json`` is absent there is nothing to compare against, so
+    the block is left to the syntax validator and no mismatch is reported.
     """
-    return True, None
+    from arch_indexer.mermaid_gen import generate_diagram
+
+    if graph is None:
+        return True, None
+
+    expected = generate_diagram(graph, diagram_id)
+    if expected is None:
+        return (
+            False,
+            f"AUTO-DIAGRAM '{diagram_id}' has no deterministic diagram in graph.json",
+        )
+    found_lines = mermaid_code.rstrip("\n").split("\n")
+    expected_lines = expected.rstrip("\n").split("\n")
+    if found_lines == expected_lines:
+        return True, None
+    for index, expected_line in enumerate(expected_lines):
+        found_line = found_lines[index] if index < len(found_lines) else "<missing>"
+        if found_line != expected_line:
+            return (
+                False,
+                (
+                    f"AUTO-DIAGRAM '{diagram_id}' differs from graph.json at diagram line "
+                    f"{index + 1}: expected {expected_line.strip()!r}, "
+                    f"found {found_line.strip()!r}"
+                ),
+            )
+    return (
+        False,
+        (
+            f"AUTO-DIAGRAM '{diagram_id}' differs from graph.json: expected "
+            f"{len(expected_lines)} lines, found {len(found_lines)}"
+        ),
+    )
+
+
+def missing_auto_diagrams(
+    required_ids: list[str], doc_text: str, doc_rel: str
+) -> list[MermaidError]:
+    """Report deterministic diagrams from graph.json that have no document block."""
+    present = set(
+        match.strip() for match in re.findall(r"<!--\s*AUTO-DIAGRAM:([^:]+):START\s*-->", doc_text)
+    )
+    return [
+        MermaidError(
+            code=CODE_AUTO_DIAGRAM_MISSING,
+            document=doc_rel,
+            line=1,
+            message=(
+                f"Missing AUTO-DIAGRAM '{diagram_id}' block required by docs/graph.json; "
+                "regenerate the document diagrams from the graph"
+            ),
+        )
+        for diagram_id in required_ids
+        if diagram_id not in present
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -980,10 +1045,9 @@ def validate_mermaid_block(
 
 
 def check_document_mermaid(
-    repo_path: Path,
     doc_path: Path,
     doc_rel: str,
-    graph_path: Path | None = None,
+    graph: dict[str, Any] | None,
 ) -> list[MermaidError]:
     """Parse and validate all fenced mermaid blocks in a markdown document."""
     errors: list[MermaidError] = []
@@ -1092,8 +1156,7 @@ def check_document_mermaid(
                     ok, msg = verify_auto_diagram(
                         diagram_id=active_auto_diagram_id,
                         mermaid_code="\n".join(current_block),
-                        repo_path=repo_path,
-                        graph_path=graph_path,
+                        graph=graph,
                     )
                     if not ok:
                         errors.append(
@@ -1163,6 +1226,17 @@ def check_mermaid(
     notes: list[str] = []
     errors: list[MermaidError] = []
 
+    graph, graph_error = _load_graph(graph_path)
+    if graph_error is not None:
+        errors.append(
+            MermaidError(
+                code=CODE_AUTO_DIAGRAM_ERROR,
+                document=f"{docs_dir}/DESIGN.md",
+                line=1,
+                message=graph_error,
+            )
+        )
+
     for doc_name in CANONICAL_DOCS:
         doc_path = target_docs_dir / doc_name
         doc_rel = f"{docs_dir}/{doc_name}"
@@ -1171,12 +1245,25 @@ def check_mermaid(
             continue
 
         doc_errors = check_document_mermaid(
-            repo_path=repo_path,
             doc_path=doc_path,
             doc_rel=doc_rel,
-            graph_path=graph_path,
+            graph=graph,
         )
         errors.extend(doc_errors)
+
+    # Spec 8.3: every deterministic diagram from graph.json must be present in DESIGN.md.
+    design_path = target_docs_dir / "DESIGN.md"
+    if graph is not None and design_path.is_file():
+        from arch_indexer.mermaid_gen import diagram_ids
+
+        try:
+            design_text = design_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            notes.append(f"Note: cannot read {docs_dir}/DESIGN.md for AUTO-DIAGRAM checks: {exc}")
+        else:
+            errors.extend(
+                missing_auto_diagrams(diagram_ids(graph), design_text, f"{docs_dir}/DESIGN.md")
+            )
 
     # Deterministic sorting: by document, line number, error code
     errors.sort(key=lambda e: (e.document, e.line, e.code))

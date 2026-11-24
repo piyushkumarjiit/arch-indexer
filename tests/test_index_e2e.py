@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -11,9 +12,16 @@ from arch_indexer.cli import (
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+def copy_fixture(name: str, tmp_path: Path) -> Path:
+    """Copy a fixture repo so `index` writes its docs artifacts outside the source tree."""
+    target = tmp_path / "fixture" / name
+    shutil.copytree(FIXTURES_DIR / name, target)
+    return target
+
+
 def test_index_command_e2e_python(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = copy_fixture("python", tmp_path)
 
     code = main(["index", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
@@ -47,7 +55,7 @@ def test_index_command_e2e_python(tmp_path: Path, capsys):
 
 def test_index_command_e2e_mixed(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "mixed"
+    repo = copy_fixture("mixed", tmp_path)
 
     code = main(["index", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
@@ -62,7 +70,7 @@ def test_index_command_e2e_mixed(tmp_path: Path, capsys):
 
 def test_index_strict_tier1_exits_toolchain_missing(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = copy_fixture("python", tmp_path)
 
     code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
@@ -82,7 +90,7 @@ def test_index_unreadable_repo_exits_error(tmp_path: Path, capsys):
 
 def test_chunk_files_must_be_positive(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = copy_fixture("python", tmp_path)
 
     code = main(["index", str(repo), "--chunk-files", "-5", "--cache-dir", str(cache)])
     assert code == EXIT_ERROR
@@ -366,7 +374,9 @@ def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
 
 def test_index_offline_without_strict_tier1_falls_back(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    code = main(["index", str(FIXTURES_DIR / "python"), "--offline", "--cache-dir", str(cache)])
+    code = main(
+        ["index", str(copy_fixture("python", tmp_path)), "--offline", "--cache-dir", str(cache)]
+    )
     assert code == EXIT_DELTA_DETECTED
 
 
@@ -475,7 +485,7 @@ def test_offline_strict_tier1_infra_only_repo_succeeds(tmp_path: Path, capsys):
     code = main(
         [
             "index",
-            str(FIXTURES_DIR / "infra"),
+            str(copy_fixture("infra", tmp_path)),
             "--offline",
             "--strict-tier1",
             "--cache-dir",
@@ -488,7 +498,7 @@ def test_offline_strict_tier1_infra_only_repo_succeeds(tmp_path: Path, capsys):
 
 def test_offline_strict_tier1_failure_keeps_existing_index(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = copy_fixture("python", tmp_path)
 
     assert main(["index", str(repo), "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
     db_path = next((cache / "repos").glob("*/index.db"))

@@ -10,6 +10,7 @@ from arch_indexer.checks.citations import (
     relocate_citations,
 )
 from arch_indexer.config import DEFAULT_CHUNK_FILES, RepoCachePaths
+from arch_indexer.graph import build_graph, export_graph_artifacts
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexUnit,
@@ -177,6 +178,10 @@ def run_index(
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
             )
+
+        # Spec 6.1/6.3/7.1: deterministic graph.json plus the self-contained viewer.
+        graph = build_graph(store, target_repo)
+        export_graph_artifacts(target_repo, graph, docs_dir)
 
         # Print one-line summary to stdout
         print(store.format_summary())

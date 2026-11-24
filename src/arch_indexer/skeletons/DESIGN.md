@@ -20,12 +20,12 @@ flowchart LR
 <!-- SECTION:design-sec3:START -->
 ## 3. Control & Data Flows
 
-<!-- AUTO-DIAGRAM:flow-overview:START -->
+<!-- AUTO-DIAGRAM:flow-main:START -->
 ```mermaid
 flowchart TD
     Flow["Control & Data Flow"]
 ```
-<!-- AUTO-DIAGRAM:flow-overview:END -->
+<!-- AUTO-DIAGRAM:flow-main:END -->
 
 <!-- SECTION:design-sec3:END -->
 

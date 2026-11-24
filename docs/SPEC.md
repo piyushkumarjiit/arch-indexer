@@ -29,7 +29,7 @@ arch-indexer/
 ├── src/arch_indexer/
 │   ├── toolchain.toml               # Pinned external indexer versions & SHA-256 checksums (package data)
 │   ├── cli.py                       # CLI commands and exit codes
-│   ├── config.py                    # Cache paths, memory limits, worker budgets
+│   ├── config.py                    # Cache paths, memory limits, worker and diagram budgets
 │   ├── toolchain.py                 # Language detection & pinned tool installation
 │   ├── plugins/
 │   │   ├── base.py                  # LanguagePlugin interface & IndexingTier enum
@@ -40,9 +40,9 @@ arch-indexer/
 │   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
-│   ├── graph/
-│   │   ├── builder.py               # Deterministic graph.json builder
-│   │   └── mermaid.py               # Deterministic Mermaid diagram generator
+│   ├── graph.py                     # Deterministic graph.json builder
+│   ├── graph_rules.py               # Deterministic data-store/sink classification rules
+│   ├── mermaid_gen.py               # Deterministic Mermaid diagram generator
 │   ├── viewer/
 │   │   ├── renderer.py              # Single-file static HTML viewer renderer
 │   │   └── assets/                  # Offline HTML/CSS/JS viewer assets (package data)
@@ -53,8 +53,8 @@ arch-indexer/
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
 │   ├── checks/
-│   │   ├── citations.py             # Citation parser, verifier, drift repair & relocation
-│   │   └── mermaid.py               # Lightweight static Mermaid syntax checker
+│   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
+│   │   └── mermaid.py               # Static Mermaid validator & AUTO-DIAGRAM verifier
 │   ├── planner.py                   # Bounded worker packet generator
 │   ├── assembler.py                 # Deterministic section merger & diagram injector
 │   ├── skeletons/
@@ -233,7 +233,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "nodes": [
     {
       "id": "ep:POST:/api/orders",
-      "kind": "entrypoint | service | module | datastore | external_sink | frontend_caller",
+      "kind": "entrypoint | service | frontend_caller",
       "label": "POST /api/orders",
       "module_id": "mod:orders",
       "file": "src/orders/routes.py",
@@ -247,28 +247,28 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
     {
       "source": "ep:POST:/api/orders",
       "target": "sym:OrderService.create",
-      "kind": "calls | http_request | reads | writes | publishes | depends_on",
+      "kind": "calls | http_request | reads | writes | publishes",
       "file": "src/orders/routes.py",
       "line": 49,
       "tier": "scip"
     }
   ],
   "data_stores": [
-    { "id": "ds:postgres:orders", "kind": "sql | nosql | cache | queue | filesystem", "label": "orders (SQL)", "evidence": ["src/orders/models.py:15"] }
+    { "id": "ds:postgres", "kind": "sql | nosql | cache | queue | filesystem", "label": "PostgreSQL", "evidence": ["src/orders/models.py:15"] }
   ],
   "external_sinks": [
-    { "id": "ext:stripe", "kind": "http_api | webhook | smtp | object_store", "label": "Stripe API", "evidence": ["src/billing/client.py:28"] }
+    { "id": "ext:stripe", "kind": "http_api | webhook | smtp", "label": "Stripe API", "evidence": ["src/billing/client.py:28"] }
   ],
   "unresolved_refs_count": 14
 }
 ```
-Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/known_symbols.py`.
+`nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
-- **Module Dependency Diagram** (`diagram:module-overview`): `flowchart LR` of modules, data stores, and external sinks.
-- **Per-Entrypoint / Per-Domain Flow Diagrams** (`diagram:flow-<domain>`): `flowchart TD` tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`.
-- **Readability budgets** (essential for ~1,000-file repos): configurable `--max-diagram-nodes` (default `35`) and `--max-diagram-edges` (default `60`). When a graph exceeds the budget, the generator deterministically collapses internal helper nodes to module-level aggregates and adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
+- **Module Dependency Diagram** (`module-overview`): `flowchart LR` of modules, data stores, and external sinks.
+- **Per-Entrypoint / Per-Domain Flow Diagrams** (`flow-<domain>`): one `flowchart TD` per entrypoint domain, tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`. Diagram ids are the exact `AUTO-DIAGRAM:<id>` slot ids (no `diagram:` prefix).
+- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates; if the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
   <!-- AUTO-DIAGRAM:module-overview:START -->
@@ -330,7 +330,7 @@ arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 ```
 
 > [!NOTE] Amendment: `assemble --diagrams`, `assemble --remove-slice` and path resolution
-> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text, produced by the graph step. Keys match slot ids exactly (no alias spellings); slots with no matching key, or every slot when the flag is absent, are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory.
+> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text. When `docs/graph.json` exists, `assemble` derives the diagrams itself with `arch_indexer.mermaid_gen.generate_diagrams` and rewrites every slot in `docs/DESIGN.md` to that graph's deterministic output: slots the graph does not produce are removed and missing `flow-<domain>` slots are inserted in the section that owns them, so a freshly assembled document passes the `check-mermaid` AUTO-DIAGRAM gate. An explicit `--diagrams` mapping is applied first and the graph-derived diagrams then take precedence, so keys must match slot ids exactly (no alias spellings). Without `docs/graph.json`, slots are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory.
 
 ### 7.2 Exit Codes
 All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle exit code `2` as a **non-error signal**:
@@ -340,7 +340,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer is not present in the local cache. |
 
 ---
@@ -386,7 +386,7 @@ Every footnote reference uses a strict machine-parseable format:
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
 - Verifies valid diagram declaration header (`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram-v2`).
 - Verifies non-empty body, balanced `subgraph`/`end` blocks, balanced quotes and bracket delimiters (`[...]`, `(...)`, `{...}`), valid node ID characters, and well-formed edge arrows (`-->`, `-.->`, `==>`, `-- text -->`).
-- Verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of `graph.json` (detecting accidental manual or LLM edits to generated diagrams).
+- When `docs/graph.json` exists, verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of that graph, and that every diagram the graph produces has a block in `docs/DESIGN.md` (detecting accidental manual or LLM edits to generated diagrams, and missing generated diagrams).
 - Exits **`3`** on any violation.
 
 ---
@@ -420,7 +420,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 >   - design-sec2
 > ---
 > ```
-> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the skeleton: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` preserves and refills them in every document it rewrites.
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the canonical document: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` alone rewrites them from `docs/graph.json` where it exists (§7.1). The packaged skeleton ships a `module-overview` slot and a `flow-main` placeholder slot; when `docs/graph.json` exists, `assemble` replaces them with the graph's deterministic `module-overview` and `flow-<domain>` diagrams (§7.1).
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:
@@ -447,12 +447,12 @@ The thin skill instructs Firstmate to run the following 4 steps:
      2. Runs `arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs`, which deterministically:
         - Creates `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton when the document does not exist yet.
         - Patches only the updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (preserving untouched sections on incremental runs).
-        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots (from a `--diagrams <json>` mapping, when supplied).
+        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots from `docs/graph.json`, with `--diagrams <json>` applied first as an optional fallback (graph output wins; see §7.1).
         - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
-        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to its own slice; `assemble` does not write them yet.
+        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates.
         - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
-     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus `docs/graph.json` and `docs/flow-viewer.html` once graph export is implemented).
+     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json` and `docs/flow-viewer.html` artifacts written by `arch-indexer index`).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
 
 4. **Step 4 — Summary Report**
@@ -476,8 +476,8 @@ Built against small, committed fixture repositories under `tests/fixtures/` (run
   - Symbol body modification (exit `2`, only citing sections impacted).
   - File deletion (purged from `index.db` and `graph.json`, listed in `deleted_files`, citing sections invalidated).
 - **`test_graph_and_mermaid.py`**:
-  - Graph JSON schema validation (`modules`, `entrypoints`, `edges`, `data_stores`, `external_sinks`).
-  - Deterministic Mermaid generation, node/edge budget collapsing, and `check-mermaid` pass/fail cases.
+  - Graph JSON schema validation (`modules`, `nodes`, `edges`, `data_stores`, `external_sinks`).
+  - Deterministic Mermaid generation, node/edge budget collapsing and truncation, and `check-mermaid` pass/fail cases including AUTO-DIAGRAM match, edited-block and missing-block failures.
   - `flow-viewer.html` generation check (valid embedded JSON, zero external URLs).
 - **`test_query.py`**:
   - `def`, `refs`, `file-symbols`, `entrypoints`, `module-summary`, `flow-trace` accuracy and performance.
@@ -512,5 +512,5 @@ Execute sequentially against real repositories, gating each stage on passing `ch
    - *Reason*: SQLite files are opaque binaries that bloat git history on every doc update and produce unresolvable merge conflicts across branches. If cross-machine incremental delta detection is later desired in git, only a small, deterministically sorted JSON state file (`state.json` containing file and symbol signatures) should ever be considered for opt-in commit, never `index.db`.
 
 3. **Unconstrained code-generated Mermaid diagrams on ~1,000-file repos (Owner Goal 2)**:
-   - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`--max-diagram-nodes 35`, `--max-diagram-edges 60`) are enforced.
+   - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`35` nodes, `60` edges) are enforced.
    - *Reason*: Rendering a raw unaggregated call graph for a 1,000-file multi-module Java + TS repo into Mermaid produces unreadable diagrams that fail to communicate architecture. Code-generated Mermaid should show bounded module-level and focused entrypoint-to-sink slices, deferring full-graph exploration to `docs/flow-viewer.html`.

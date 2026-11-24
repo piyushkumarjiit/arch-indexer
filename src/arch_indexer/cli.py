@@ -261,7 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     cite_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 7. check-mermaid
-    mermaid_parser = subparsers.add_parser("check-mermaid", help="Validate Mermaid diagram syntax")
+    mermaid_parser = subparsers.add_parser(
+        "check-mermaid", help="Validate Mermaid syntax and AUTO-DIAGRAM blocks"
+    )
     mermaid_parser.add_argument("repo", help="Target repository path")
     mermaid_parser.add_argument(
         "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
