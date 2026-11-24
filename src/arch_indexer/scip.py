@@ -581,6 +581,7 @@ def _parse_scip_payload(
 
     tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     tier2_by_line: dict[tuple[str, int], dict[str, Any]] = {}
+    tier2_by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
     tier2_line_counts: dict[tuple[str, int], int] = {}
     for sym in tier2_symbols:
         if "visibility" not in sym:
@@ -588,6 +589,7 @@ def _parse_scip_payload(
         line_key = (sym["file_path"], sym["start_line"])
         tier2_by_key.setdefault((sym["file_path"], sym["start_line"], sym["name"]), sym)
         tier2_by_line.setdefault(line_key, sym)
+        tier2_by_name.setdefault((sym["file_path"], sym["name"]), []).append(sym)
         tier2_line_counts[line_key] = tier2_line_counts.get(line_key, 0) + 1
     tier2_by_line = {k: v for k, v in tier2_by_line.items() if tier2_line_counts[k] == 1}
 
@@ -679,6 +681,14 @@ def _parse_scip_payload(
                     tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
                     if tier2_meta is None:
                         tier2_meta = tier2_by_line.get((rel_path, start_line))
+                    if tier2_meta is None:
+                        containing = [
+                            candidate
+                            for candidate in tier2_by_name.get((rel_path, display_name), ())
+                            if candidate["start_line"] <= start_line <= candidate["end_line"]
+                        ]
+                        if containing:
+                            tier2_meta = max(containing, key=lambda c: c["start_line"])
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind

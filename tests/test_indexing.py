@@ -1365,6 +1365,94 @@ def test_tier1_symbols_inherit_tier2_visibility(tmp_path: Path):
     assert sym_map["_secret"]["visibility"] == "private"
 
 
+def test_tier1_annotated_java_symbols_inherit_tier2_metadata(tmp_path: Path):
+    """Annotated Java declarations keep the visibility and annotations Tier 2 extracted."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java" / "com" / "example"
+    java_dir.mkdir(parents=True)
+    controller = java_dir / "UserController.java"
+    controller.write_text(
+        "package com.example;\n"
+        "\n"
+        "@RestController\n"
+        '@RequestMapping("/api/v1")\n'
+        "public class UserController {\n"
+        '    @GetMapping("/users")\n'
+        "    @PreAuthorize(\"hasRole('USER')\")\n"
+        "    @Deprecated\n"
+        '    @SuppressWarnings("unused")\n'
+        "    @Override\n"
+        "    @SafeVarargs\n"
+        "    private String listUsers() {\n"
+        '        return "users";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    unit = IndexUnit("java:root", "root", "java", repo, files=[controller])
+    tier2 = JavaPlugin().index_unit_tier2(unit)
+    tier2_method = next(s for s in tier2.symbols if s["name"] == "listUsers")
+    assert tier2_method["start_line"] == 6
+    assert tier2_method["visibility"] == "private"
+
+    class_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/UserController#"
+    method_sym = (
+        "semanticdb maven maven/com.example/demo 1.0.0 com/example/UserController#listUsers()."
+    )
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/UserController.java",
+                language="Java",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=class_sym,
+                        display_name="UserController",
+                        kind=scip_pb2.SymbolInformation.Kind.Class,
+                    ),
+                    scip_pb2.SymbolInformation(
+                        symbol=method_sym,
+                        display_name="listUsers",
+                        kind=scip_pb2.SymbolInformation.Kind.Method,
+                    ),
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=class_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 13, 27],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=method_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[11, 19, 28],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "annotated.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert sym_map["listUsers"]["visibility"] == "private"
+    assert json.loads(sym_map["listUsers"]["decorators_json"]) == [
+        '@GetMapping("/users")',
+        "@PreAuthorize(\"hasRole('USER')\")",
+        "@Deprecated",
+        '@SuppressWarnings("unused")',
+        "@Override",
+        "@SafeVarargs",
+    ]
+    assert sym_map["UserController"]["visibility"] == "public"
+    assert json.loads(sym_map["UserController"]["decorators_json"]) == [
+        "@RestController",
+        '@RequestMapping("/api/v1")',
+    ]
+
+
 def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):
     """Module rows keep public visibility instead of borrowing a sibling's metadata."""
     repo = tmp_path / "repo"
