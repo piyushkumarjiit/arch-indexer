@@ -2799,6 +2799,88 @@ def test_scip_python_local_imports_resolve_to_stored_modules(tmp_path: Path):
     assert not any(fqname.startswith("auth.models") for _, fqname in ref_fqnames)
 
 
+def test_scip_python_relative_import_module_resolves_to_stored_module(tmp_path: Path):
+    """A relative import's module occurrence is qualified and is not external (Spec 4.3).
+
+    scip-python 0.6.8 reports ``from .services import ...`` with the module symbol
+    ``services/__init__:`` (the package prefix is dropped), so the module reference
+    must be resolved against the importing module just like its local bindings.
+    """
+    repo = tmp_path / "repo"
+    pkg = repo / "src" / "pyapp"
+    pkg.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[project]\nname = "pyapp"\nversion = "0.1.0"\n')
+    init = pkg / "__init__.py"
+    init.write_text("")
+    services = pkg / "services.py"
+    services.write_text("class Registry:\n    pass\n\n\ndef helper(value):\n    return value\n")
+    client = pkg / "client.py"
+    client.write_text("from .services import Registry\nfrom .services import helper as h\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[init, services, client],
+    )
+    symbol_context = {
+        "fqnames": {"python": {"pyapp.services.Registry", "pyapp.services.helper"}},
+        "modules": {"python": {"pyapp", "pyapp.services", "pyapp.client"}},
+    }
+    module_sym = "scip-python python pyapp 0.1.0 pyapp/client/__init__:"
+    relative_services = "scip-python python pyapp 0.1.0 services/__init__:"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/pyapp/client.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_services,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 14],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 22, 30],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_services,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[1, 5, 14],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 1",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[1, 32, 33],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "relative_import.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    ref_map = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_map[(1, "pyapp.services")] == "import"
+    assert ref_map[(2, "pyapp.services")] == "import"
+    assert ref_map[(1, "pyapp.services.Registry")] == "import"
+    assert ref_map[(2, "pyapp.services.helper")] == "import"
+    assert (1, "services") not in ref_map
+    unresolved_symbols = {u["raw_symbol"] for u in res.unresolved_refs}
+    assert "services" not in unresolved_symbols
+    assert "pyapp.services" not in unresolved_symbols
+
+
 def test_scip_python_local_symbol_without_scip_module_symbol(tmp_path: Path):
     """When scip-python omits external module symbol, source line derives import."""
     repo = tmp_path / "repo"

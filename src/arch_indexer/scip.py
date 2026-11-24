@@ -398,6 +398,31 @@ def _bound_module_name(source_name: str, target_module: str) -> str:
     return source_parts[0]
 
 
+def _relative_import_module(
+    file_lines: list[str],
+    info: _ImportInfo,
+    start_line: int,
+    module: str,
+    rel_path: str,
+    fqname: str,
+    last_suffix: str,
+) -> str:
+    """Qualify a module occurrence from a Python relative import statement."""
+    if last_suffix not in ("/", ":"):
+        return ""
+    statement = info.lines.get(start_line)
+    if statement is None:
+        return ""
+    text = _import_statement_text(file_lines, info, statement)
+    match = re.match(r"from\s+(\.[.\w]*)\s+import\b", text)
+    if not match:
+        return ""
+    token = match.group(1)
+    level = len(token) - len(token.lstrip("."))
+    base = _resolve_relative_module("." * level, module, rel_path)
+    return ".".join(part for part in (base, fqname) if part)
+
+
 def _preceding_statement_module(
     modules: list[tuple[int, int, str]], start_line: int, col: int
 ) -> str:
@@ -1049,6 +1074,12 @@ def _parse_scip_payload(
                 last_suffix = ""
             else:
                 simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
+                if is_import_occ and unit.language == "python":
+                    relative_fqname = _relative_import_module(
+                        file_lines, import_info, start_line, module, rel_path, fqname, last_suffix
+                    )
+                    if relative_fqname:
+                        fqname = relative_fqname
             if simple_name == "<clinit>" or last_suffix in ("()", "[]"):
                 continue
             if (
