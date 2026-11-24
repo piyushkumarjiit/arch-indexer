@@ -15,7 +15,7 @@ Every technical claim in the generated documents is traceable to the code throug
 4. **Write (AI workers, bounded).** Writers read the index through a local query tool, draft only the sections affected by a change, and cite the code for every claim.
 5. **Assemble and verify (no AI).** Merges the drafts, embeds the diagrams, and runs the citation and diagram checks.
 
-Indexing, querying, graphing, assembly and validation run offline; only toolchain installation uses the network.
+Indexing, querying, planning, graphing, assembly and validation run offline; only toolchain installation uses the network.
 
 ## Install and usage
 
@@ -55,7 +55,7 @@ arch-indexer assemble /path/to/repo --drafts-dir docs/.drafts [--docs-dir docs] 
 
 `index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary and, when any section is impacted, an impacted-section count. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
 
-Each run also snapshots the indexed tree to `<cache>/repos/<id>/state.json` (file and symbol signatures, the module-to-section map and the hashes of generated diagram blocks; see [section 5.1 of the spec](docs/SPEC.md)) and diffs the snapshot against the previous run into `index-delta.json` and `impacted-sections.json` next to `index.db`:
+Each run also writes `<cache>/repos/<id>/master-index.json`, the compact module, file, symbol, entrypoint and unresolved-reference summary that `plan` and the workers read. It then snapshots the indexed tree to `<cache>/repos/<id>/state.json` (file and symbol signatures, the module-to-section map and the hashes of generated diagram blocks; see [section 5.1 of the spec](docs/SPEC.md)) and diffs the snapshot against the previous run into `index-delta.json` and `impacted-sections.json` next to `index.db`:
 
 - **First run** (no `state.json`, or `--force-full`): every file is reported as added, every existing section is impacted (a canonical document with no sections contributes its full canonical outline), and `index` exits `2` (`DELTA_DETECTED`).
 - **Unchanged repository with up-to-date documents**: the delta is empty and `index` exits `0` (`NO_CHANGES`), so no workers are needed.
@@ -71,6 +71,10 @@ Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing is not implem
 ```bash
 arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 ```
+
+### Planning
+
+`arch-indexer plan <repo> [--max-lines-per-worker 15000] [--max-symbols-per-worker 800] [--max-sections-per-worker 3]` partitions the impacted documentation sections and oversized modules reported by the last `index` run into bounded, disjoint work packets written to `<cache>/repos/<id>/work-plan.json`. It reads `impacted-sections.json`, `master-index.json` and the `docs/graph.json` graph, and exits `1` when one of them is missing. Each packet defines a target document, canonical section identifiers, assigned modules, a delta slice, pre-rendered diagram identifiers, and a unique draft path under the run's docs directory (`docs/.drafts/<packet_id>.md` by default).
 
 ### Assembly
 
@@ -94,8 +98,6 @@ The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-co
 - `entrypoints [--module <mod>]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
 - `module-summary <mod>` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints.
 - `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root.
-
-The `plan` command (`arch-indexer plan <repo> [--max-lines-per-worker 15000] [--max-symbols-per-worker 800] [--max-sections-per-worker 3]`) partitions impacted documentation sections and oversized modules into bounded, disjoint work packets written to `<cache>/repos/<id>/work-plan.json`. Each packet defines a target document, canonical section identifiers, assigned modules, a delta slice, pre-rendered diagram identifiers, and a unique draft path (`docs/.drafts/<packet_id>.md`).
 
 ## Firstmate Integration
 

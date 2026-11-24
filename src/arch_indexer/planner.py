@@ -801,9 +801,7 @@ def run_plan(
                     line_count=module_lines.get(mod, 0) if mod else 0,
                     symbol_count=module_symbols.get(mod, 0) if mod else 0,
                 )
-                packets.append(
-                    _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
-                )
+                packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
 
         # Greedily pack non-oversized sections respecting all three budgets
         cur_sections: list[SectionItem] = []

@@ -830,9 +830,7 @@ def test_shared_modules_not_double_counted_in_greedy_packing(tmp_path: Path):
         },
     ]
 
-    cache_paths = _setup_synthetic_cache(
-        repo, cache, modules=modules, impacted_sections=sections
-    )
+    cache_paths = _setup_synthetic_cache(repo, cache, modules=modules, impacted_sections=sections)
     assert (
         run_plan(
             repo,
@@ -979,13 +977,13 @@ def test_deleted_file_exclusive_path_and_root_key_no_misattribution(tmp_path: Pa
     assert packets["design-sec2-mod-orders"]["delta_slice"]["deleted_files"] == [
         "src/orders/billing/old_adapter.py"
     ]
-    assert {s["name"] for s in packets["design-sec2-mod-orders"]["delta_slice"]["deleted_symbols"]} == {
-        "adapt"
-    }
+    assert {
+        s["name"] for s in packets["design-sec2-mod-orders"]["delta_slice"]["deleted_symbols"]
+    } == {"adapt"}
 
 
 def test_polyglot_shared_canonical_module_no_duplicate_packet(tmp_path: Path):
-    """Non-oversized section and missing_section mapping to same canonical module emit one packet."""
+    """Non-oversized section and missing_section for one canonical module emit one packet."""
     repo = tmp_path / "repo"
     repo.mkdir()
     cache = tmp_path / "cache"
@@ -1179,7 +1177,7 @@ def test_plan_docs_dir_strict_from_impacted_sections_and_no_cli_flag(tmp_path: P
 
 
 def test_normalize_section_id_narrowed_to_canonical_outline():
-    """normalize_section_id maps CANONICAL_SECTION_OUTLINE slugs/headings without unnumbered aliases."""
+    """normalize_section_id maps CANONICAL_SECTION_OUTLINE slugs/headings only."""
     assert normalize_section_id("1-architecture-overview", "", "DESIGN.md") == "design-sec1"
     assert normalize_section_id("", "2. Components & Modules", "DESIGN.md") == "design-sec2"
     assert normalize_section_id("references", "References", "DESIGN.md") == "design-references"
@@ -1187,4 +1185,3 @@ def test_normalize_section_id_narrowed_to_canonical_outline():
     assert normalize_section_id("references", "References", "USER_GUIDE.md") == "guide-references"
     assert normalize_section_id("architecture-overview", "", "DESIGN.md") == "architecture-overview"
     assert normalize_section_id("design-sec4", "", "DESIGN.md") == "design-sec4"
-
