@@ -132,7 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max files per indexing chunk",
     )
     index_parser.add_argument(
-        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+        "--docs-dir",
+        default=DEFAULT_DOCS_DIR,
+        help="Docs directory to read sections from and relocate citations in",
     )
     index_parser.add_argument(
         "--auto-relocate-citations",

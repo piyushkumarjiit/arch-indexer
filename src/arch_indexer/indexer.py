@@ -64,7 +64,7 @@ def run_index(
     auto_relocate_citations: bool = False,
     cache_dir: str | Path | None = None,
 ) -> int:
-    """Run full (non-delta) indexing over target repository per spec section 4 & 7."""
+    """Index the target repository, diff it against the previous snapshot (spec 4, 5 and 7)."""
     target_repo = Path(repo_path).resolve()
     if not target_repo.is_dir():
         sys.stderr.write(
