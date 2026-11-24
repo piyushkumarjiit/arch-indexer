@@ -92,15 +92,9 @@ def _group_symbols(symbols: Iterable[dict[str, Any]]) -> dict[str, tuple[dict[st
     return {key: tuple(records) for key, records in grouped.items()}
 
 
-def _file_skeleton_sha256(text: str, spans: Sequence[tuple[int, int]]) -> str:
-    """Hash the non-blank content outside every symbol span, ignoring line positions."""
-    lines = text.splitlines()
-    covered: set[int] = set()
-    for start, end in spans:
-        covered.update(range(max(start - 1, 0), min(end, len(lines))))
-    content = "\n".join(
-        line for index, line in enumerate(lines) if index not in covered and line.strip()
-    )
+def _file_content_sha256(text: str) -> str:
+    """Hash the non-blank content of a file, ignoring line positions."""
+    content = "\n".join(line for line in text.splitlines() if line.strip())
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -117,24 +111,18 @@ class RepoSnapshot:
         files = {record["path"]: record for record in store.get_file_records()}
         snapshot = cls(files=files, symbols=_group_symbols(store.get_symbol_records()))
         if repo_path is not None:
-            snapshot.record_skeletons(repo_path)
+            snapshot.record_content_hashes(repo_path)
         return snapshot
 
-    def record_skeletons(self, repo_path: str | Path) -> None:
-        """Record a content signature for lines outside every symbol span of each file."""
-        spans_by_file: dict[str, list[tuple[int, int]]] = {}
-        for records in self.symbols.values():
-            for record in records:
-                spans_by_file.setdefault(record["file_path"], []).append(
-                    (int(record["start_line"]), int(record["end_line"]))
-                )
+    def record_content_hashes(self, repo_path: str | Path) -> None:
+        """Record a non-blank content signature for each indexed file."""
         root = Path(repo_path)
         for path, record in self.files.items():
             try:
                 text = (root / path).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            record["skeleton_sha256"] = _file_skeleton_sha256(text, spans_by_file.get(path, ()))
+            record["content_sha256"] = _file_content_sha256(text)
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any] | None) -> RepoSnapshot | None:
@@ -334,9 +322,9 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
         path
         for path in delta.modified_files
         if path in moved_paths
-        and previous.files[path].get("skeleton_sha256")
-        and previous.files[path].get("skeleton_sha256")
-        == current.files[path].get("skeleton_sha256")
+        and previous.files[path].get("content_sha256")
+        and previous.files[path].get("content_sha256")
+        == current.files[path].get("content_sha256")
     )
 
     return delta

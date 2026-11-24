@@ -276,6 +276,33 @@ def test_top_level_code_edit_blocks_move_only_relocation(tmp_path: Path, capsys)
     assert reasons["1-architecture-overview"] == ["modified_file"]
 
 
+def test_signature_edit_with_line_shift_blocks_move_only_relocation(tmp_path: Path, capsys):
+    """A declaration signature edit must not be swallowed as a pure symbol line shift."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (repo / "src" / "app.py").write_text(
+        "\n" + APP_SOURCE.replace("def stop():", "def stop(force=False):"),
+        encoding="utf-8",
+    )
+    _commit(repo, "add a parameter to stop")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    delta = _load(cache, "index-delta.json")
+    assert delta["modified_files"] == ["src/app.py"]
+    assert {symbol["name"] for symbol in delta["moved_symbols"]} == {"start", "stop"}
+    assert delta["modified_symbols"] == []
+
+    design = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:1` — `start`" in design
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["1-architecture-overview"] == ["modified_file"]
+
+
 def test_added_and_deleted_files_purge_index_and_impact_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"

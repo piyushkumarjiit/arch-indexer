@@ -185,7 +185,7 @@ Core tables:
 
 ### 5.1 Snapshot & Delta Calculation
 On each `arch-indexer index <repo>` run:
-1. Compute current `sha256` for all tracked source/infra files and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
+1. Compute current `sha256` for all tracked source/infra files, a `content_sha256` per file over its non-blank content (ignoring line positions), and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
 2. Compare against `<cache>/repos/<id>/state.json`.
 3. Produce `index-delta.json` containing:
    - `is_first_run`: boolean
@@ -206,7 +206,7 @@ On each `arch-indexer index <repo>` run:
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
 
 ### 5.4 Zero-Token Line-Shift Repair
-If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file accounted for by a moved symbol), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
+If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file's `content_sha256` unchanged), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
 
 ### 5.5 File-to-Section Impact Mapping (`impacted-sections.json`)
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
