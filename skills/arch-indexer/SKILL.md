@@ -145,7 +145,7 @@ Merges are conflict-free because each worker wrote exclusively to its unique `do
 #### 3c. Execute Assembly
 Run deterministic assembly:
 ```bash
-arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs [--diagrams <json>]
+arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs
 ```
 
 The assembly command automatically:
