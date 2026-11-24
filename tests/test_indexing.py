@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -94,7 +96,7 @@ def test_python_scip_fixture_ingest_exact_lines(tmp_path: Path):
     # Verify exact symbols and line
     sym_map = {s["name"]: s for s in res.symbols}
     assert "hello" in sym_map
-    assert sym_map["hello"]["fqname"] == "src.app.hello"
+    assert sym_map["hello"]["fqname"] == "app.hello"
     assert sym_map["hello"]["start_line"] == 1
     assert sym_map["hello"]["kind"] == "function"
     assert len(sym_map["hello"]["body_sha256"]) == 64
@@ -137,7 +139,7 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
 
     # Symbols defined by the index are resolved, not recorded as unresolved.
     unresolved_symbols = {u["raw_symbol"] for u in res.unresolved_refs}
-    assert "src.pyimp.client.fetch.url" not in unresolved_symbols
+    assert "pyimp.client.fetch.url" not in unresolved_symbols
 
 
 def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
@@ -253,7 +255,7 @@ def test_scip_keeps_references_to_indexed_modules(tmp_path: Path):
     )
 
     res = ingest_scip(test_scip, unit)
-    assert "src.b.ts" in {r["symbol_fqname"] for r in res.references}
+    assert "src.b" in {r["symbol_fqname"] for r in res.references}
     assert res.unresolved_refs == []
 
 
@@ -656,7 +658,7 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
         assert ep["file_path"] == "service.py"
         assert ep["line"] == 13
         assert ep["name"] == "read_item"
-        assert ep["symbol_fqname"] == "src.service.read_item"
+        assert ep["symbol_fqname"] == "service.read_item"
         assert json.loads(ep["auth_symbols_json"]) == ["get_token"]
 
         main_eps = [ep for ep in res.entrypoints if ep["kind"] == "main"]
@@ -724,10 +726,9 @@ def test_tier1_entrypoint_alignment_uses_tier2_handler_line(tmp_path: Path):
     res = ingest_scip(
         test_scip,
         unit,
-        entrypoints=tier2.entrypoints,
-        tier2_symbols=tier2.symbols,
+        tier2_result=tier2,
     )
-    assert res.entrypoints[0]["symbol_fqname"] == "src.routes.ts.listUsers"
+    assert res.entrypoints[0]["symbol_fqname"] == "src.routes.listUsers"
     assert {s["name"]: s["kind"] for s in res.symbols}["listUsers"] == "function"
 
 
@@ -795,6 +796,124 @@ def test_tier1_symbols_inherit_tier2_visibility(tmp_path: Path):
     assert sym_map["_secret"]["visibility"] == "private"
 
 
+def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):
+    """Module rows keep public visibility instead of borrowing a sibling's metadata."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    secret = repo / "src" / "secret.py"
+    secret.write_text("def _secret():\n    return 1\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[secret],
+    )
+    tier2 = PythonPlugin().index_unit_tier2(unit)
+    module_sym = "scip-python python pkg 0.1.0 `src.secret`/__init__:"
+    secret_sym = "scip-python python pkg 0.1.0 `src.secret`/_secret()."
+    scip_index = scip_pb2.Index(
+        metadata=scip_pb2.Metadata(project_root=repo.resolve().as_uri()),
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/secret.py",
+                language="Python",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=module_sym,
+                        kind=scip_pb2.SymbolInformation.Kind.Module,
+                    ),
+                    scip_pb2.SymbolInformation(
+                        symbol=secret_sym,
+                        display_name="_secret",
+                        kind=scip_pb2.SymbolInformation.Kind.Function,
+                    ),
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=secret_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 4, 1],
+                        enclosing_range=[0, 0, 2, 0],
+                    ),
+                ],
+            )
+        ],
+    )
+    test_scip = tmp_path / "secret.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert sym_map["__init__"]["kind"] == "module"
+    assert sym_map["__init__"]["visibility"] == "public"
+    assert sym_map["__init__"]["decorators_json"] == "[]"
+    assert sym_map["_secret"]["visibility"] == "private"
+
+
+def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Path):
+    """Unit files the SCIP index omitted are still indexed, at Tier 2."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    a_file = repo / "src" / "a.py"
+    b_file = repo / "src" / "b.py"
+    a_file.write_text("def a():\n    return 1\n")
+    b_file.write_text("def b():\n    return 2\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[a_file, b_file],
+    )
+    tier2 = PythonPlugin().index_unit_tier2(unit)
+    sym_a = "scip-python python pkg 0.1.0 `src.a`/a()."
+    scip_index = scip_pb2.Index(
+        metadata=scip_pb2.Metadata(project_root=repo.resolve().as_uri()),
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/a.py",
+                language="Python",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=sym_a,
+                        display_name="a",
+                        kind=scip_pb2.SymbolInformation.Kind.Function,
+                    )
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=sym_a,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 4, 1],
+                        enclosing_range=[0, 0, 2, 0],
+                    )
+                ],
+            )
+        ],
+    )
+    test_scip = tmp_path / "partial.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+    files_by_path = {f["path"]: f for f in res.files}
+    assert files_by_path["src/a.py"]["tier"] == "scip"
+    assert files_by_path["src/a.py"]["fallback_reason"] is None
+    assert files_by_path["src/b.py"]["tier"] == "tree-sitter"
+    assert files_by_path["src/b.py"]["fallback_reason"] == "partial_scip_coverage"
+
+    symbol_fqnames = {s["fqname"] for s in res.symbols}
+    assert {"a.a", "b.b"} <= symbol_fqnames
+    assert all(sym["fqname"] in symbol_fqnames for sym in tier2.symbols)
+
+
 # 7. Strict/offline exit 4 CLI tests
 def test_strict_tier1_offline_exit_4_when_tier1_fails(tmp_path: Path, capsys):
     """Verify --offline --strict-tier1 exits 4 when Tier 1 tool is unavailable."""
@@ -817,6 +936,20 @@ def test_strict_tier1_without_offline_falls_back(tmp_path: Path):
 
 
 # 8. Regression tests for SCIP edge cases and unit scoping
+def test_scip_module_import_order_independent():
+    """Importing arch_indexer.scip first works without the plugin package cycle."""
+    src_dir = Path(__file__).resolve().parent.parent / "src"
+    env = {**os.environ, "PYTHONPATH": str(src_dir)}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import arch_indexer.scip"],
+        cwd=src_dir.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_scip_output_path_sanitizes_slashes_and_avoids_collisions(tmp_path: Path):
     """Nested unit IDs produce flat, non-colliding filenames directly inside scip_tmp_dir."""
     unit_slash = IndexUnit("java:services/orders", "orders", "java", tmp_path)

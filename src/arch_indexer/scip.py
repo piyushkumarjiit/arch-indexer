@@ -339,6 +339,79 @@ def _defined_fqname_prefixes(defined_symbols: set[str]) -> set[str]:
     return prefixes
 
 
+def _doc_fqnames(doc: Document) -> list[str]:
+    fqnames: list[str] = []
+    for occ in doc.occurrences:
+        if occ.symbol_roles & SymbolRole.Definition and not occ.symbol.startswith("local "):
+            fqnames.append(parse_scip_symbol(occ.symbol)[1])
+    for sym_info in doc.symbols:
+        if not sym_info.symbol.startswith("local "):
+            fqnames.append(parse_scip_symbol(sym_info.symbol)[1])
+    return [fqname for fqname in fqnames if fqname]
+
+
+def _common_fqname_prefix(fqnames: list[str]) -> str:
+    parts_list = [fqname.split(".") for fqname in fqnames if "." in fqname]
+    if not parts_list:
+        return ""
+    common_len = 0
+    for segments in zip(*parts_list, strict=False):
+        if len(set(segments)) != 1:
+            break
+        common_len += 1
+    common_len = min(common_len, min(len(parts) for parts in parts_list) - 1)
+    return ".".join(parts_list[0][:common_len])
+
+
+def _doc_module_prefix(doc: Document) -> str:
+    """Return the SCIP module fqname shared by the document's defined symbols."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(symbol: str) -> None:
+        if not symbol or symbol.startswith("local "):
+            return
+        simple_name, fqname, _, suffix = parse_scip_symbol(symbol)
+        if suffix not in ("/", ":"):
+            return
+        if suffix == ":" and simple_name == "__init__":
+            fqname = fqname.removesuffix(".__init__")
+        if fqname and fqname not in seen:
+            seen.add(fqname)
+            candidates.append(fqname)
+
+    for occ in doc.occurrences:
+        add(occ.symbol)
+    for sym_info in doc.symbols:
+        add(sym_info.symbol)
+
+    defined = _doc_fqnames(doc)
+    matching = [
+        candidate
+        for candidate in candidates
+        if any(fqname == candidate or fqname.startswith(candidate + ".") for fqname in defined)
+    ]
+    if matching:
+        return max(matching, key=lambda candidate: (len(candidate), candidate))
+
+    common = _common_fqname_prefix(defined)
+    if common:
+        return common
+    if candidates:
+        return max(candidates, key=lambda candidate: (len(candidate), candidate))
+    return ""
+
+
+def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
+    """Replace the longest matching SCIP module prefix with the plugin module name."""
+    for prefix, module in renames:
+        if fqname == prefix:
+            return module
+        if fqname.startswith(prefix + "."):
+            return module + fqname[len(prefix) :]
+    return fqname
+
+
 def _module_for_file(
     unit: IndexUnit,
     rel_path: str,
@@ -367,21 +440,17 @@ def _module_for_file(
 def ingest_scip(
     scip_path: Path,
     unit: IndexUnit,
-    entrypoints: list[dict[str, Any]] | None = None,
     *,
     work_dir: Path | None = None,
-    module_by_path: dict[str, str] | None = None,
-    tier2_symbols: list[dict[str, Any]] | None = None,
+    tier2_result: IndexResult | None = None,
 ) -> IndexResult:
     """Ingest SCIP protobuf file into unit result and delete temporary .scip file."""
     try:
         return _parse_scip_payload(
             scip_path,
             unit,
-            entrypoints=entrypoints,
             work_dir=work_dir,
-            module_by_path=module_by_path,
-            tier2_symbols=tier2_symbols,
+            tier2_result=tier2_result,
         )
     finally:
         scip_path.unlink(missing_ok=True)
@@ -390,11 +459,9 @@ def ingest_scip(
 def _parse_scip_payload(
     scip_path: Path,
     unit: IndexUnit,
-    entrypoints: list[dict[str, Any]] | None = None,
     *,
     work_dir: Path | None = None,
-    module_by_path: dict[str, str] | None = None,
-    tier2_symbols: list[dict[str, Any]] | None = None,
+    tier2_result: IndexResult | None = None,
 ) -> IndexResult:
     if scip_path.stat().st_size == 0:
         raise ValueError(f"SCIP index file is empty: {scip_path}")
@@ -444,11 +511,14 @@ def _parse_scip_payload(
 
     allowed_paths = {f.resolve() for f in unit.files} if unit.files else None
     namespace_prefixes = _defined_fqname_prefixes(defined_symbols)
+    module_by_path = {f["path"]: f["module"] for f in tier2_result.files} if tier2_result else None
+    tier2_symbols = tier2_result.symbols if tier2_result else []
+    module_prefixes: list[tuple[str, str]] = []
 
     tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     tier2_by_line: dict[tuple[str, int], dict[str, Any]] = {}
     tier2_line_counts: dict[tuple[str, int], int] = {}
-    for sym in tier2_symbols or ():
+    for sym in tier2_symbols:
         if "visibility" not in sym:
             continue
         line_key = (sym["file_path"], sym["start_line"])
@@ -486,6 +556,9 @@ def _parse_scip_payload(
             line_count = 0
 
         module = _module_for_file(unit, rel_path, content_bytes, module_by_path)
+        doc_prefix = _doc_module_prefix(doc)
+        if doc_prefix and module and doc_prefix != module:
+            module_prefixes.append((doc_prefix, module))
         files.append(
             {
                 "path": rel_path,
@@ -532,9 +605,11 @@ def _parse_scip_payload(
                 else:
                     body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
 
-                tier2_meta = tier2_by_key.get(
-                    (rel_path, start_line, display_name)
-                ) or tier2_by_line.get((rel_path, start_line))
+                tier2_meta = None
+                if kind != "module":
+                    tier2_meta = tier2_by_key.get(
+                        (rel_path, start_line, display_name)
+                    ) or tier2_by_line.get((rel_path, start_line))
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind
@@ -588,7 +663,36 @@ def _parse_scip_payload(
     if unit.files and not files:
         raise ValueError(f"SCIP index yielded no matching documents for unit {unit.unit_id}")
 
+    if module_prefixes:
+        renames = sorted(module_prefixes, key=lambda item: -len(item[0]))
+        for sym in symbols:
+            sym["fqname"] = _align_fqname(sym["fqname"], renames)
+        for ref in references:
+            ref["symbol_fqname"] = _align_fqname(ref["symbol_fqname"], renames)
+        for unresolved in unresolved_refs:
+            unresolved["raw_symbol"] = _align_fqname(unresolved["raw_symbol"], renames)
+
+    uncovered_paths: set[str] = set()
+    if tier2_result is not None:
+        covered_paths = {f["path"] for f in files}
+        for file_rec in tier2_result.files:
+            if file_rec["path"] in covered_paths:
+                continue
+            partial = dict(file_rec)
+            partial["tier"] = IndexingTier.TIER2.value
+            partial["fallback_reason"] = "partial_scip_coverage"
+            files.append(partial)
+            uncovered_paths.add(partial["path"])
+        if uncovered_paths:
+            symbols.extend(
+                sym for sym in tier2_result.symbols if sym["file_path"] in uncovered_paths
+            )
+            references.extend(
+                ref for ref in tier2_result.references if ref["file_path"] in uncovered_paths
+            )
+
     aligned_entrypoints: list[dict[str, Any]] = []
+    entrypoints = tier2_result.entrypoints if tier2_result else []
     if entrypoints:
         sym_by_exact: dict[tuple[str, int, str], str] = {}
         sym_by_line: dict[tuple[str, int], str] = {}
@@ -600,7 +704,7 @@ def _parse_scip_payload(
                 sym_by_name_in_file.setdefault((s["file_path"], s["name"]), []).append(s)
 
         tier2_start_by_name: dict[tuple[str, str], int] = {}
-        for sym in tier2_symbols or ():
+        for sym in tier2_symbols:
             tier2_start_by_name.setdefault((sym["file_path"], sym["name"]), sym["start_line"])
 
         for ep in entrypoints:

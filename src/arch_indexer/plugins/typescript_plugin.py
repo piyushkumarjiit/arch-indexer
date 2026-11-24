@@ -26,7 +26,6 @@ from arch_indexer.plugins.base import (
     LanguagePlugin,
     build_name_table,
 )
-from arch_indexer.scip import ingest_scip, scip_output_path
 from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, check_tool_status, get_repo_files
 
 TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
@@ -297,6 +296,8 @@ class TypeScriptPlugin(LanguagePlugin):
         definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult | FallbackSignal:
         """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
+        from arch_indexer.scip import scip_output_path
+
         cache_dir = get_cache_dir(limits.get("cache_dir"))
         tool_status = check_tool_status("scip-typescript", cache_dir=cache_dir)
         if not tool_status.installed or not tool_status.install_path:
@@ -377,16 +378,13 @@ class TypeScriptPlugin(LanguagePlugin):
             symbol_context=symbol_context,
             definitions=definitions,
         )
-        entrypoints = tier2_result.entrypoints
-        module_by_path = {f["path"]: f["module"] for f in tier2_result.files}
-
         try:
+            from arch_indexer.scip import ingest_scip
+
             return ingest_scip(
                 scip_file,
                 unit,
-                entrypoints=entrypoints,
-                module_by_path=module_by_path,
-                tier2_symbols=tier2_result.symbols,
+                tier2_result=tier2_result,
             )
         except Exception as e:
             scip_file.unlink(missing_ok=True)
