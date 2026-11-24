@@ -268,7 +268,7 @@ Data stores and external sinks are detected deterministically from known ORM/DB/
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
 - **Module Dependency Diagram** (`diagram:module-overview`): `flowchart LR` of modules, data stores, and external sinks.
 - **Per-Entrypoint / Per-Domain Flow Diagrams** (`diagram:flow-<domain>`): `flowchart TD` tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`.
-- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a graph exceeds a budget, the generator deterministically collapses internal helper nodes to module-level aggregates and adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
+- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a graph exceeds a budget, the generator deterministically collapses service nodes to their module-level aggregates and, if still over budget, truncates to the budget; either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
   <!-- AUTO-DIAGRAM:module-overview:START -->
@@ -476,8 +476,8 @@ Built against small, committed fixture repositories under `tests/fixtures/` (run
   - Symbol body modification (exit `2`, only citing sections impacted).
   - File deletion (purged from `index.db` and `graph.json`, listed in `deleted_files`, citing sections invalidated).
 - **`test_graph_and_mermaid.py`**:
-  - Graph JSON schema validation (`modules`, `entrypoints`, `edges`, `data_stores`, `external_sinks`).
-  - Deterministic Mermaid generation, node/edge budget collapsing, and `check-mermaid` pass/fail cases.
+  - Graph JSON schema validation (`modules`, `nodes`, `edges`, `data_stores`, `external_sinks`).
+  - Deterministic Mermaid generation, node/edge budget collapsing and truncation, and `check-mermaid` pass/fail cases including AUTO-DIAGRAM match, edited-block and missing-block failures.
   - `flow-viewer.html` generation check (valid embedded JSON, zero external URLs).
 - **`test_query.py`**:
   - `def`, `refs`, `file-symbols`, `entrypoints`, `module-summary`, `flow-trace` accuracy and performance.
