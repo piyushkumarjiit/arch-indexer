@@ -14,7 +14,6 @@ from tree_sitter import Language, Node, Parser
 from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
     DEFAULT_UNIT_TIMEOUT_SEC,
-    RepoCachePaths,
     get_cache_dir,
     get_jvm_heap_mb,
 )
@@ -27,7 +26,7 @@ from arch_indexer.plugins.base import (
     build_fqname_prefixes,
     build_name_table,
 )
-from arch_indexer.scip import ingest_scip
+from arch_indexer.scip import ingest_scip, scip_output_path
 from arch_indexer.toolchain import (
     EXCLUDED_DIR_NAMES,
     _effective_runtimes,
@@ -114,11 +113,28 @@ def _get_modifiers_and_annotations(node: Node, source_bytes: bytes) -> tuple[str
     return visibility, annotations
 
 
+_JAVA_LANGUAGE = Language(tsjava.language())
+
+
+def _extract_package_from_root(root: Node, source_bytes: bytes) -> str:
+    for child in root.children:
+        if child.type == "package_declaration":
+            for sub in child.children:
+                if sub.type in ("scoped_identifier", "identifier"):
+                    return _get_node_text(sub, source_bytes).strip()
+    return ""
+
+
+def _extract_package_from_source(source_bytes: bytes) -> str:
+    tree = Parser(_JAVA_LANGUAGE).parse(source_bytes)
+    return _extract_package_from_root(tree.root_node, source_bytes)
+
+
 class JavaPlugin(LanguagePlugin):
     """Tier 2 tree-sitter plugin for Java / Maven per spec section 4."""
 
     def __init__(self) -> None:
-        self.language = Language(tsjava.language())
+        self.language = _JAVA_LANGUAGE
         self.parser = Parser(self.language)
 
     @property
@@ -202,7 +218,11 @@ class JavaPlugin(LanguagePlugin):
         return sorted(units, key=lambda u: u.unit_id)
 
     def index_unit_tier1(
-        self, unit: IndexUnit, limits: dict[str, Any]
+        self,
+        unit: IndexUnit,
+        limits: dict[str, Any],
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult | FallbackSignal:
         """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
         cache_dir = get_cache_dir(limits.get("cache_dir"))
@@ -226,14 +246,7 @@ class JavaPlugin(LanguagePlugin):
                 message="scip-java launcher is not installed in the cache",
             )
 
-        scip_tmp_dir = limits.get("scip_tmp_dir")
-        if scip_tmp_dir is None:
-            scip_tmp_dir = RepoCachePaths.from_repo(
-                unit.root_dir, cache_dir_override=cache_dir
-            ).scip_tmp_dir
-        scip_tmp_dir = Path(scip_tmp_dir)
-        scip_tmp_dir.mkdir(parents=True, exist_ok=True)
-        scip_file = scip_tmp_dir / f"{unit.unit_id.replace(':', '_')}.scip"
+        scip_file = scip_output_path(limits.get("scip_tmp_dir"), unit, cache_dir)
         scip_file.unlink(missing_ok=True)
 
         jvm_heap_mb = get_jvm_heap_mb(limits.get("jvm_max_heap_mb"))
@@ -307,11 +320,22 @@ class JavaPlugin(LanguagePlugin):
                 message=f"scip-java exited 0 but did not produce {scip_file}",
             )
 
-        tier2_result = self.index_unit_tier2(unit)
+        tier2_result = self.index_unit_tier2(
+            unit,
+            symbol_context=symbol_context,
+            definitions=definitions,
+        )
         entrypoints = tier2_result.entrypoints
+        module_by_path = {f["path"]: f["module"] for f in tier2_result.files}
 
         try:
-            return ingest_scip(scip_file, unit, entrypoints=entrypoints)
+            return ingest_scip(
+                scip_file,
+                unit,
+                entrypoints=entrypoints,
+                work_dir=work_dir,
+                module_by_path=module_by_path,
+            )
         except Exception as e:
             scip_file.unlink(missing_ok=True)
             return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")
@@ -362,12 +386,7 @@ class JavaPlugin(LanguagePlugin):
         return file_records, symbol_records
 
     def _extract_package(self, root: Node, source_bytes: bytes) -> str:
-        for child in root.children:
-            if child.type == "package_declaration":
-                for sub in child.children:
-                    if sub.type in ("scoped_identifier", "identifier"):
-                        return _get_node_text(sub, source_bytes).strip()
-        return ""
+        return _extract_package_from_root(root, source_bytes)
 
     def _collect_definitions(
         self,

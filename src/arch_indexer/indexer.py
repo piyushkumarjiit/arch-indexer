@@ -142,7 +142,15 @@ def run_index(
 
     # Phase 2a: Resolve Tier 1 for every unit before the store is touched, so a
     # strict-tier1 failure leaves any existing index.db intact.
-    tier1_results = [plugin.index_unit_tier1(unit, limits) for plugin, unit in all_units]
+    tier1_results = [
+        plugin.index_unit_tier1(
+            unit,
+            limits,
+            symbol_context=symbol_context,
+            definitions=definitions_by_unit[idx],
+        )
+        for idx, (plugin, unit) in enumerate(all_units)
+    ]
 
     # Spec 7.2: exit 4 only for --offline with --strict-tier1, and only when a
     # required Tier 1 indexer is missing (plugins without one, e.g. infra, never fail).

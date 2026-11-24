@@ -15,7 +15,6 @@ from tree_sitter import Language, Node, Parser
 from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
     DEFAULT_UNIT_TIMEOUT_SEC,
-    RepoCachePaths,
     get_cache_dir,
     get_node_heap_mb,
 )
@@ -27,7 +26,7 @@ from arch_indexer.plugins.base import (
     LanguagePlugin,
     build_name_table,
 )
-from arch_indexer.scip import ingest_scip
+from arch_indexer.scip import ingest_scip, scip_output_path
 from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, check_tool_status, get_repo_files
 
 TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
@@ -180,6 +179,33 @@ def _imported_local_names(node: Node, source_bytes: bytes) -> list[str]:
     return names
 
 
+def _has_node_modules(unit: IndexUnit) -> bool:
+    tsconfig_rel = unit.metadata.get("tsconfig")
+    start_dirs = [(unit.root_dir / tsconfig_rel).parent if tsconfig_rel else unit.root_dir]
+    start_dirs.extend(f.parent for f in unit.files)
+    root_resolved = unit.root_dir.resolve()
+    checked: set[Path] = set()
+    for d in start_dirs:
+        cur = d.resolve()
+        while True:
+            if cur in checked:
+                break
+            checked.add(cur)
+            if (cur / "node_modules").is_dir():
+                return True
+            if cur == root_resolved or not cur.is_relative_to(root_resolved):
+                break
+            cur = cur.parent
+    return False
+
+
+def _is_ts_config_or_syntax_error(out: str) -> bool:
+    lowered = out.lower()
+    if "tsconfig" in lowered or "syntaxerror" in lowered:
+        return True
+    return bool(re.search(r"\berror TS(?:1\d{3}|5\d{3}|18003)\b", out))
+
+
 class TypeScriptPlugin(LanguagePlugin):
     """Tier 2 tree-sitter plugin for TypeScript / JavaScript per spec section 4."""
 
@@ -264,7 +290,11 @@ class TypeScriptPlugin(LanguagePlugin):
         return sorted(units, key=lambda u: u.unit_id)
 
     def index_unit_tier1(
-        self, unit: IndexUnit, limits: dict[str, Any]
+        self,
+        unit: IndexUnit,
+        limits: dict[str, Any],
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult | FallbackSignal:
         """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
         cache_dir = get_cache_dir(limits.get("cache_dir"))
@@ -281,14 +311,7 @@ class TypeScriptPlugin(LanguagePlugin):
                 message="node executable not found in PATH",
             )
 
-        scip_tmp_dir = limits.get("scip_tmp_dir")
-        if scip_tmp_dir is None:
-            scip_tmp_dir = RepoCachePaths.from_repo(
-                unit.root_dir, cache_dir_override=cache_dir
-            ).scip_tmp_dir
-        scip_tmp_dir = Path(scip_tmp_dir)
-        scip_tmp_dir.mkdir(parents=True, exist_ok=True)
-        scip_file = scip_tmp_dir / f"{unit.unit_id.replace(':', '_')}.scip"
+        scip_file = scip_output_path(limits.get("scip_tmp_dir"), unit, cache_dir)
         scip_file.unlink(missing_ok=True)
 
         node_heap_mb = get_node_heap_mb(limits.get("node_max_heap_mb"))
@@ -331,10 +354,15 @@ class TypeScriptPlugin(LanguagePlugin):
             if proc.returncode in (137, -9) or "JavaScript heap out of memory" in out:
                 return FallbackSignal(reason="oom_limit", message=out)
 
-            has_node_modules = (unit.root_dir / "node_modules").is_dir() or any(
-                (f.parent / "node_modules").is_dir() for f in unit.files
+            missing_dep_output = (
+                "Cannot find module" in out
+                or "Cannot find type definition" in out
+                or "Could not find a declaration file" in out
+                or "node_modules" in out
             )
-            if not has_node_modules or "node_modules" in out or "Cannot find module" in out:
+            if missing_dep_output or (
+                not _has_node_modules(unit) and not _is_ts_config_or_syntax_error(out)
+            ):
                 return FallbackSignal(reason="missing_node_modules", message=out)
 
             return FallbackSignal(reason="build_failure", message=out)
@@ -345,11 +373,21 @@ class TypeScriptPlugin(LanguagePlugin):
                 message=f"scip-typescript exited 0 but did not produce {scip_file}",
             )
 
-        tier2_result = self.index_unit_tier2(unit)
+        tier2_result = self.index_unit_tier2(
+            unit,
+            symbol_context=symbol_context,
+            definitions=definitions,
+        )
         entrypoints = tier2_result.entrypoints
+        module_by_path = {f["path"]: f["module"] for f in tier2_result.files}
 
         try:
-            return ingest_scip(scip_file, unit, entrypoints=entrypoints)
+            return ingest_scip(
+                scip_file,
+                unit,
+                entrypoints=entrypoints,
+                module_by_path=module_by_path,
+            )
         except Exception as e:
             scip_file.unlink(missing_ok=True)
             return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")

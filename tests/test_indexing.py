@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -8,13 +9,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from arch_indexer import scip_pb2
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_TOOLCHAIN_MISSING, main
 from arch_indexer.indexer import run_index
-from arch_indexer.plugins.base import FallbackSignal, IndexingTier, IndexUnit
+from arch_indexer.plugins.base import FallbackSignal, IndexingTier, IndexResult, IndexUnit
 from arch_indexer.plugins.java_plugin import JavaPlugin
 from arch_indexer.plugins.python_plugin import PythonPlugin
 from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
-from arch_indexer.scip import ingest_scip, parse_scip_symbol
+from arch_indexer.scip import (
+    derive_ref_kind,
+    ingest_scip,
+    iter_scip_file,
+    parse_scip_symbol,
+    scip_output_path,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -109,8 +117,14 @@ def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     sym_map = {s["name"]: s for s in res.symbols}
     assert "greeting" in sym_map
     assert sym_map["greeting"]["start_line"] == 1
+    assert sym_map["greeting"]["end_line"] == 1
     assert "Component" in sym_map
     assert sym_map["Component"]["start_line"] == 1
+    assert sym_map["Component"]["end_line"] == 1
+    assert "index.ts" in sym_map
+    assert sym_map["index.ts"]["end_line"] == 1
+    assert "component.tsx" in sym_map
+    assert sym_map["component.tsx"]["end_line"] == 1
 
 
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
@@ -443,7 +457,7 @@ def test_run_index_records_fallback_reason_in_files_table(tmp_path: Path):
 
 # 6. Preserve entrypoints from Tier 2 for Tier 1 units
 def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
-    """Verify that entrypoint detection from Tier 2 is retained in Tier 1 results."""
+    """Verify Tier 1 returns a real IndexResult with preserved and aligned entrypoints."""
     repo = FIXTURES_DIR / "entrypoints"
     unit = IndexUnit(
         unit_id="python:root",
@@ -453,14 +467,35 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
         files=[repo / "service.py"],
     )
 
+    scip_index = scip_pb2.Index(
+        metadata=scip_pb2.Metadata(
+            tool_info=scip_pb2.ToolInfo(name="scip-python", version="0.6.8"),
+            project_root=repo.resolve().as_uri(),
+        ),
+        documents=[
+            scip_pb2.Document(
+                relative_path="service.py",
+                language="Python",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol="scip-python python pkg 0.1.0 `src.service`/read_item().",
+                        display_name="read_item",
+                        kind=scip_pb2.SymbolInformation.Kind.Function,
+                    ),
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 `src.service`/read_item().",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[12, 4, 13],
+                        enclosing_range=[12, 0, 15, 0],
+                    ),
+                ],
+            )
+        ],
+    )
+
     plugin = PythonPlugin()
-    t2 = plugin.index_unit_tier2(unit)
-    assert len(t2.entrypoints) > 0, "Tier 2 should detect FastAPI routes in service.py"
-
-    # Now simulate Tier 1 producing a scip result
-    fake_scip = tmp_path / "unit.scip"
-    shutil.copy(FIXTURES_DIR / "python" / "index.scip", fake_scip)
-
     fake_bin = tmp_path / "scip-python"
     fake_bin.touch()
 
@@ -468,30 +503,35 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
         patch("arch_indexer.plugins.python_plugin.check_tool_status") as mock_status,
         patch("shutil.which", return_value="/usr/bin/node"),
         patch("subprocess.run") as mock_run,
-        patch("arch_indexer.plugins.python_plugin.ingest_scip") as mock_ingest,
     ):
         mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
 
-        def make_scip(*args, **kwargs):
-            fake_scip_file = mock_run.call_args[0][0][5]
-            shutil.copy(FIXTURES_DIR / "python" / "index.scip", fake_scip_file)
+        def write_scip(cmd, *args, **kwargs):
+            out_path = Path(cmd[cmd.index("--output") + 1])
+            out_path.write_bytes(scip_index.SerializeToString())
             return MagicMock(returncode=0)
 
-        mock_run.side_effect = make_scip
-        mock_ingest.return_value = MagicMock(
-            success=True,
-            tier=IndexingTier.TIER1,
-            entrypoints=t2.entrypoints,
-            files=[],
-            symbols=[],
-            references=[],
-            unresolved_refs=[],
-        )
+        mock_run.side_effect = write_scip
 
         res = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
-        assert isinstance(res, MagicMock)
+        assert isinstance(res, IndexResult)
         assert res.tier == IndexingTier.TIER1
-        assert len(res.entrypoints) > 0
+
+        http_eps = [ep for ep in res.entrypoints if ep["kind"] == "http"]
+        assert len(http_eps) == 1
+        ep = http_eps[0]
+        assert ep["method"] == "GET"
+        assert ep["route_or_trigger"] == "/items/{item_id}"
+        assert ep["file_path"] == "service.py"
+        assert ep["line"] == 13
+        assert ep["name"] == "read_item"
+        assert ep["symbol_fqname"] == "src.service.read_item"
+        assert json.loads(ep["auth_symbols_json"]) == ["get_token"]
+
+        main_eps = [ep for ep in res.entrypoints if ep["kind"] == "main"]
+        assert len(main_eps) == 1
+        assert main_eps[0]["name"] == "__main__"
+        assert main_eps[0]["line"] == 18
 
 
 # 7. Strict/offline exit 4 CLI tests
@@ -513,3 +553,219 @@ def test_strict_tier1_without_offline_falls_back(tmp_path: Path):
 
     code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
+
+
+# 8. Regression tests for SCIP edge cases and unit scoping
+def test_scip_output_path_sanitizes_slashes_and_avoids_collisions(tmp_path: Path):
+    """Nested unit IDs produce flat, non-colliding filenames directly inside scip_tmp_dir."""
+    unit_slash = IndexUnit("java:services/orders", "orders", "java", tmp_path)
+    unit_under = IndexUnit("java:services_orders", "orders", "java", tmp_path)
+
+    p_slash = scip_output_path(tmp_path, unit_slash, tmp_path)
+    p_under = scip_output_path(tmp_path, unit_under, tmp_path)
+
+    assert p_slash.parent == tmp_path
+    assert p_under.parent == tmp_path
+    assert "/" not in p_slash.name
+    assert p_slash != p_under
+
+
+def test_scip_symbol_parsing_params_type_params_and_spaces():
+    """Parse SCIP parameter, type-parameter, double-space header, and space-in-ident symbols."""
+    simple, fq, kind, suffix = parse_scip_symbol(
+        "semanticdb maven maven/com.example/demo 1.0.0 com/example/App#main().(args)"
+    )
+    assert (simple, fq, kind, suffix) == ("args", "com.example.App.main.args", "variable", "()")
+    assert derive_ref_kind(scip_pb2.Occurrence(), suffix) == "read"
+    assert derive_ref_kind(scip_pb2.Occurrence(), "().") == "call"
+
+    simple, fq, kind, suffix = parse_scip_symbol(
+        "semanticdb maven maven/com.example/demo 1.0.0 com/example/Box#[T]"
+    )
+    assert (simple, fq, kind, suffix) == ("T", "com.example.Box.T", "variable", "[]")
+
+    simple, fq, kind, suffix = parse_scip_symbol(
+        "scip-typescript npm pkg  name 1.0.0 src/`my file.ts`/foo."
+    )
+    assert (simple, fq, kind, suffix) == ("foo", "src.my file.ts.foo", "variable", ".")
+
+
+def test_scip_multimodule_path_resolution_and_traversal_guard(tmp_path: Path):
+    """Resolve SCIP paths relative to work_dir/project_root and drop .. traversal escapes."""
+    mod_a = tmp_path / "module-a"
+    src_a = mod_a / "src" / "main" / "java" / "com" / "example"
+    src_a.mkdir(parents=True)
+    foo_file = src_a / "Foo.java"
+    foo_file.write_text("package com.example;\npublic class Foo {}\n")
+    (tmp_path / "pom.xml").write_text("<project/>")
+    (mod_a / "pom.xml").write_text("<project/>")
+    outside_file = tmp_path.parent / "secret.java"
+    outside_file.write_text("class Secret {}\n")
+
+    scip_index = scip_pb2.Index(
+        metadata=scip_pb2.Metadata(project_root=mod_a.resolve().as_uri()),
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/Foo.java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="semanticdb maven . 1.0.0 com/example/Foo#",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[1, 13, 16],
+                    )
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="../../secret.java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="semanticdb maven . 1.0.0 Secret#",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 6, 12],
+                    )
+                ],
+            ),
+        ],
+    )
+    scip_file = tmp_path / "mod_a.scip"
+    scip_file.write_bytes(scip_index.SerializeToString())
+
+    unit = IndexUnit(
+        unit_id="java:module-a",
+        name="module-a",
+        language="java",
+        root_dir=tmp_path,
+        files=[foo_file],
+        metadata={"pom": "module-a/pom.xml"},
+    )
+    res = ingest_scip(scip_file, unit, work_dir=mod_a)
+    assert [f["path"] for f in res.files] == ["module-a/src/main/java/com/example/Foo.java"]
+    assert res.files[0]["line_count"] == 2
+    assert len(res.files[0]["sha256"]) == 64
+    assert [s["name"] for s in res.symbols] == ["Foo"]
+
+
+def test_python_target_only_and_scip_unit_file_filtering(tmp_path: Path):
+    """Python --target-only uses common package root and SCIP filters docs to unit.files."""
+    pkg = tmp_path / "pkg"
+    (pkg / "a").mkdir(parents=True)
+    (pkg / "b").mkdir(parents=True)
+    f_a = pkg / "a" / "foo.py"
+    f_b = pkg / "b" / "bar.py"
+    f_m = pkg / "main.py"
+    for f in (f_a, f_b, f_m):
+        f.write_text("def fn():\n    return 1\n")
+
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(relative_path="pkg/a/foo.py"),
+            scip_pb2.Document(relative_path="pkg/b/bar.py"),
+            scip_pb2.Document(relative_path="pkg/main.py"),
+        ]
+    )
+
+    plugin = PythonPlugin()
+    fake_bin = tmp_path / "scip-python"
+    fake_bin.touch()
+    unit_chunk0 = IndexUnit(
+        unit_id="python:pkg:chunk0",
+        name="pkg:chunk0",
+        language="python",
+        root_dir=tmp_path,
+        files=[f_a, f_b],
+    )
+
+    with (
+        patch("arch_indexer.plugins.python_plugin.check_tool_status") as mock_status,
+        patch("shutil.which", return_value="/usr/bin/node"),
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
+
+        def write_scip(cmd, *args, **kwargs):
+            out_path = Path(cmd[cmd.index("--output") + 1])
+            out_path.write_bytes(scip_index.SerializeToString())
+            return MagicMock(returncode=0)
+
+        mock_run.side_effect = write_scip
+        res = plugin.index_unit_tier1(unit_chunk0, {"cache_dir": tmp_path})
+
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[cmd_args.index("--target-only") + 1] == "pkg"
+        assert isinstance(res, IndexResult)
+        assert [f["path"] for f in res.files] == ["pkg/a/foo.py", "pkg/b/bar.py"]
+
+
+def test_corrupt_and_empty_scip_files_rejected(tmp_path: Path):
+    """Empty and truncated/corrupt SCIP files raise ValueError and trigger fallback."""
+    empty_scip = tmp_path / "empty.scip"
+    empty_scip.write_bytes(b"")
+    unit = IndexUnit("python:root", "root", "python", tmp_path, files=[tmp_path / "a.py"])
+    with pytest.raises(ValueError, match="empty"):
+        ingest_scip(empty_scip, unit)
+
+    trunc_scip = tmp_path / "trunc.scip"
+    trunc_scip.write_bytes(b"\x12\x64")
+    with pytest.raises(ValueError, match="Truncated"):
+        list(iter_scip_file(trunc_scip))
+
+
+def test_ts_monorepo_node_modules_and_tsconfig_error_classification(tmp_path: Path):
+    """Distinguish monorepo node_modules and invalid tsconfig errors from missing_node_modules."""
+    web_dir = tmp_path / "packages" / "web"
+    src_dir = web_dir / "src"
+    src_dir.mkdir(parents=True)
+    (web_dir / "node_modules").mkdir()
+    (web_dir / "tsconfig.json").write_text("{bad json")
+    ts_file = src_dir / "index.ts"
+    ts_file.write_text("export const x = 1;\n")
+
+    plugin = TypeScriptPlugin()
+    fake_bin = tmp_path / "scip-typescript"
+    fake_bin.touch()
+
+    unit = IndexUnit(
+        unit_id="typescript:packages/web",
+        name="packages/web",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[ts_file],
+        metadata={"tsconfig": "packages/web/tsconfig.json"},
+    )
+    with (
+        patch("arch_indexer.plugins.typescript_plugin.check_tool_status") as mock_status,
+        patch("shutil.which", return_value="/usr/bin/node"),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=1, stderr="error TS2322: bad type", stdout=""),
+        ),
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
+        res = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
+        assert isinstance(res, FallbackSignal)
+        assert res.reason == "build_failure"
+
+    unit_no_nm = IndexUnit(
+        unit_id="typescript:other",
+        name="other",
+        language="typescript",
+        root_dir=tmp_path,
+        files=[],
+        metadata={"tsconfig": "other/tsconfig.json"},
+    )
+    with (
+        patch("arch_indexer.plugins.typescript_plugin.check_tool_status") as mock_status,
+        patch("shutil.which", return_value="/usr/bin/node"),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=1,
+                stderr="error TS5058: Cannot read file 'other/tsconfig.json'",
+                stdout="",
+            ),
+        ),
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
+        res = plugin.index_unit_tier1(unit_no_nm, {"cache_dir": tmp_path})
+        assert isinstance(res, FallbackSignal)
+        assert res.reason == "build_failure"
