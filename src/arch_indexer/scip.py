@@ -138,10 +138,40 @@ def parse_scip_symbol(symbol_str: str) -> tuple[str, str, str, str]:
     return simple_name, fqname, kind, last_suffix
 
 
-def derive_ref_kind(occ: Occurrence, last_suffix: str = "") -> str:
+def _starts_import(stripped: str, language: str) -> bool:
+    if language == "python":
+        if re.match(r"import\b", stripped):
+            return True
+        return stripped.startswith("from ") and re.search(r"\bimport\b", stripped) is not None
+    if language == "typescript":
+        return re.match(r"import(?![\w.(])", stripped) is not None
+    if language == "java":
+        return re.match(r"import\b", stripped) is not None
+    return False
+
+
+def _import_line_numbers(file_lines: list[str], language: str) -> set[int]:
+    """Return the 1-based lines occupied by import statements."""
+    lines: set[int] = set()
+    depth = 0
+    continued = False
+    for line_no, raw in enumerate(file_lines, start=1):
+        stripped = raw.strip()
+        if depth == 0 and not continued and not _starts_import(stripped, language):
+            continue
+        lines.add(line_no)
+        depth += sum(stripped.count(ch) for ch in "([{")
+        depth -= sum(stripped.count(ch) for ch in ")]}")
+        continued = stripped.endswith("\\")
+        if depth <= 0:
+            depth = 0
+    return lines
+
+
+def derive_ref_kind(occ: Occurrence, last_suffix: str = "", *, is_import: bool = False) -> str:
     """Derive reference kind (call/import/type/read/write) from an occurrence."""
     roles = occ.symbol_roles
-    if roles & SymbolRole.Import:
+    if roles & SymbolRole.Import or is_import:
         return "import"
     if roles & SymbolRole.WriteAccess:
         return "write"
@@ -395,6 +425,17 @@ def _scip_module_prefix(language: str, rel_path: str) -> str:
     return ""
 
 
+def _emitter_module_prefix(
+    unit: IndexUnit, rel_path: str, root_cache: dict[tuple[str, ...], bool] | None = None
+) -> str:
+    """Return the module namespace the language's SCIP emitter uses for a file."""
+    if unit.language == "python":
+        from arch_indexer.plugins.python_plugin import _module_info
+
+        return _module_info(unit.root_dir, rel_path, root_cache)[1]
+    return _scip_module_prefix(unit.language, rel_path)
+
+
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
     """Replace the longest matching SCIP module prefix with the plugin module name."""
     for prefix, module in renames:
@@ -522,9 +563,10 @@ def _parse_scip_payload(
     repo_fqnames: set[str] = set()
     repo_modules: set[str] = set()
     if symbol_context:
+        root_cache: dict[tuple[str, ...], bool] = {}
         for file_rec in symbol_context.get("file_records", {}).get(unit.language, []):
             module = file_rec.get("module", "")
-            prefix = _scip_module_prefix(unit.language, file_rec.get("path", ""))
+            prefix = _emitter_module_prefix(unit, file_rec.get("path", ""), root_cache)
             if prefix and module and prefix != module:
                 renames.setdefault(prefix, module)
         repo_fqnames.update(symbol_context.get("fqnames", {}).get(unit.language, set()))
@@ -586,6 +628,7 @@ def _parse_scip_payload(
             }
         )
 
+        import_lines = _import_line_numbers(file_lines, unit.language)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
         for occ in doc.occurrences:
@@ -595,7 +638,7 @@ def _parse_scip_payload(
 
             start_line, col, end_line = _get_occ_range(occ)
             simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
-            if simple_name == "<clinit>":
+            if simple_name == "<clinit>" or last_suffix in ("()", "[]"):
                 continue
             is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
             if (
@@ -627,7 +670,7 @@ def _parse_scip_payload(
                 tier2_meta = None
                 if kind != "module":
                     tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
-                    if tier2_meta is None and last_suffix not in ("()", "[]"):
+                    if tier2_meta is None:
                         tier2_meta = tier2_by_line.get((rel_path, start_line))
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
@@ -647,7 +690,7 @@ def _parse_scip_payload(
                     }
                 )
             else:
-                ref_kind = derive_ref_kind(occ, last_suffix)
+                ref_kind = derive_ref_kind(occ, last_suffix, is_import=start_line in import_lines)
                 ref_key = (rel_path, start_line, col, fqname, ref_kind)
                 if ref_key not in seen_refs:
                     seen_refs.add(ref_key)
@@ -691,12 +734,14 @@ def _parse_scip_payload(
             unresolved["raw_symbol"] = _align_fqname(unresolved["raw_symbol"], ordered_renames)
 
     if repo_fqnames or repo_modules:
-        unresolved_refs = [
-            unresolved
-            for unresolved in unresolved_refs
-            if unresolved["raw_symbol"] not in repo_fqnames
-            and unresolved["raw_symbol"] not in repo_modules
-        ]
+
+        def is_repo_internal(raw_symbol: str) -> bool:
+            if raw_symbol in repo_fqnames or raw_symbol in repo_modules:
+                return True
+            parent = raw_symbol.rsplit(".", 1)[0]
+            return parent != raw_symbol and (parent in repo_fqnames or parent in repo_modules)
+
+        unresolved_refs = [u for u in unresolved_refs if not is_repo_internal(u["raw_symbol"])]
 
     uncovered_paths: set[str] = set()
     if tier2_result is not None:

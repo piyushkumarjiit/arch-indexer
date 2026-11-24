@@ -142,6 +142,9 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     }
     assert all(u["language"] == "python" for u in res.unresolved_refs)
 
+    line_ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references if r["line"] <= 2}
+    assert line_ref_kinds == {(1, "import"), (2, "import")}
+
     # Symbols defined by the index are resolved, not recorded as unresolved.
     unresolved_symbols = {u["raw_symbol"] for u in res.unresolved_refs}
     assert "pyimp.client.fetch.url" not in unresolved_symbols
@@ -286,6 +289,7 @@ def test_scip_keeps_references_to_indexed_modules(tmp_path: Path):
 
     res = ingest_scip(test_scip, unit)
     assert "src.b" in {r["symbol_fqname"] for r in res.references}
+    assert {(r["line"], r["ref_kind"]) for r in res.references} == {(1, "import")}
     assert res.unresolved_refs == []
 
 
@@ -305,9 +309,9 @@ def test_tier1_cross_unit_references_align_to_repo_module_namespace(tmp_path: Pa
         root_dir=repo,
         files=[orders],
     )
-    order_module = "scip-python python pkg 0.1.0 `src.orders.main`/"
-    user_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#"
-    save_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#save()."
+    order_module = "scip-python python pkg 0.1.0 `orders.main`/"
+    user_sym = "scip-python python pkg 0.1.0 `auth.models`/User#"
+    save_sym = "scip-python python pkg 0.1.0 `auth.models`/User#save()."
     requests_sym = "scip-python python pkg 0.1.0 requests/__init__:"
     scip_index = scip_pb2.Index(
         documents=[
@@ -442,14 +446,186 @@ def test_tier1_external_symbol_sharing_repo_parent_stays_unresolved(tmp_path: Pa
 
     res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
 
+    assert {(r["line"], r["ref_kind"]) for r in res.references} == {(3, "import")}
     assert {u["raw_symbol"] for u in res.unresolved_refs} == {"com.google.common.collect.Lists"}
     symbol_fqnames = {s["fqname"] for s in res.symbols}
     assert "com.example.Order.Order" in symbol_fqnames
     assert not any(s["name"] in ("<init>", "<clinit>") for s in res.symbols)
 
 
-def test_tier1_parameter_symbols_do_not_inherit_function_metadata(tmp_path: Path):
-    """Parameter definitions keep their own kind and empty decorators."""
+def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
+    """References align to stored modules when the target project root is a subdirectory."""
+    repo = tmp_path / "repo"
+    backend = repo / "backend"
+    (backend / "auth").mkdir(parents=True)
+    (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
+    (backend / "auth" / "models.py").write_text("class User:\n    pass\n")
+    manage = repo / "manage.py"
+    manage.write_text("from auth.models import User\n\nUser()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[manage],
+    )
+    root_module = "scip-python python pkg 0.1.0 `manage`/"
+    user_sym = "scip-python python pkg 0.1.0 `auth.models`/User#"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="manage.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=root_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 19, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 0, 0],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "nested_root.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    symbol_context = {
+        "file_records": {
+            "python": [
+                {"path": "backend/auth/models.py", "module": "backend.auth.models"},
+                {"path": "manage.py", "module": "manage"},
+            ]
+        },
+        "fqnames": {"python": {"backend.auth.models.User"}},
+        "modules": {"python": {"backend.auth.models", "manage"}},
+    }
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    assert {r["symbol_fqname"] for r in res.references} == {"backend.auth.models.User"}
+    assert res.unresolved_refs == []
+
+
+def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
+    """Repo field references stay internal even though Phase 1 records only types."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java" / "com" / "example"
+    java_dir.mkdir(parents=True)
+    (java_dir / "Constants.java").write_text(
+        "package com.example;\n\npublic class Constants { public static int TIMEOUT = 5; }\n"
+    )
+    app = java_dir / "App.java"
+    app.write_text("package com.example;\n\nclass App { int t = Constants.TIMEOUT; }\n")
+
+    unit = IndexUnit("java:root", "root", "java", repo, files=[app])
+    app_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/App#"
+    field_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Constants#TIMEOUT."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/App.java",
+                language="Java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=app_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[2, 6, 2],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=field_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 32, 2],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "java_field.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    symbol_context = {
+        "file_records": {
+            "java": [
+                {"path": "src/main/java/com/example/Constants.java", "module": "com.example"},
+                {"path": "src/main/java/com/example/App.java", "module": "com.example"},
+            ]
+        },
+        "fqnames": {"java": {"com.example.App", "com.example.Constants"}},
+        "modules": {"java": {"com.example"}},
+    }
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    assert {r["symbol_fqname"] for r in res.references} == {"com.example.Constants.TIMEOUT"}
+    assert res.unresolved_refs == []
+
+
+def test_tier1_repo_internal_module_constant_references_are_not_unresolved(tmp_path: Path):
+    """References to repo module-level constants are internal, not external."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "settings.py").write_text("DEBUG = True\n")
+    views = repo / "app" / "views.py"
+    views.write_text("from app.settings import DEBUG\n\nprint(DEBUG)\n")
+
+    unit = IndexUnit(
+        unit_id="python:views",
+        name="views",
+        language="python",
+        root_dir=repo,
+        files=[views],
+    )
+    debug_sym = "scip-python python pkg 0.1.0 `app.settings`/DEBUG."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app/views.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=debug_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 22, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=debug_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 6, 2],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "python_constant.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    symbol_context = {
+        "file_records": {
+            "python": [
+                {"path": "app/settings.py", "module": "app.settings"},
+                {"path": "app/views.py", "module": "app.views"},
+            ]
+        },
+        "fqnames": {"python": {"app.views"}},
+        "modules": {"python": {"app", "app.settings", "app.views"}},
+    }
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    assert {r["symbol_fqname"] for r in res.references} == {"app.settings.DEBUG"}
+    assert res.unresolved_refs == []
+
+
+def test_tier1_parameter_definitions_are_not_recorded_as_symbols(tmp_path: Path):
+    """Tier 1 symbol rows match Tier 2: parameters are not symbols."""
     repo_dir = FIXTURES_DIR / "python_imports"
     client = repo_dir / "src" / "pyimp" / "client.py"
     unit = IndexUnit(
@@ -506,10 +682,7 @@ def test_tier1_parameter_symbols_do_not_inherit_function_metadata(tmp_path: Path
 
     sym_map = {s["name"]: s for s in res.symbols}
     assert sym_map["fetch"]["decorators_json"] == '["@app.get(\\"/f\\")"]'
-    for parameter in ("url", "text"):
-        assert sym_map[parameter]["kind"] == "variable"
-        assert sym_map[parameter]["visibility"] == "public"
-        assert sym_map[parameter]["decorators_json"] == "[]"
+    assert set(sym_map) == {"__init__", "fetch", "parse"}
 
 
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
