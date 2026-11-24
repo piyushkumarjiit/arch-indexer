@@ -53,7 +53,7 @@ arch-indexer assemble /path/to/repo --drafts-dir docs/.drafts [--docs-dir docs] 
 
 ### Indexing
 
-`index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
+`index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary and, when any section is impacted, an impacted-section count. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
 
 Each run also snapshots the indexed tree to `<cache>/repos/<id>/state.json` (file and symbol signatures, the module-to-section map and the hashes of generated diagram blocks; see [section 5.1 of the spec](docs/SPEC.md)) and diffs the snapshot against the previous run into `index-delta.json` and `impacted-sections.json` next to `index.db`:
 
@@ -62,7 +62,7 @@ Each run also snapshots the indexed tree to `<cache>/repos/<id>/state.json` (fil
 - **Changes**: added/modified/deleted files and added/modified/moved/deleted symbols are reported. Deleted files are purged from every `index.db` table and every section citing them is impacted. Sections covering a module with new files or symbols are impacted through the stored module-to-section map, newly added modules without a covering section are listed under `missing_sections`, and a changed `AUTO-DIAGRAM` block marks its section impacted even when the source tree is unchanged.
 - **Line-shift-only changes**: when the only difference is moved symbols (same body, visibility and decorators, unchanged file content signature, new line numbers; see [section 5.4 of the spec](docs/SPEC.md)), `index --auto-relocate-citations` rewrites the shifted `file:line` footnotes in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, re-runs `check-citations` and updates `state.json`. It exits `0` when no section remains impacted, `2` when a relocated document still has an impacted section (a changed `AUTO-DIAGRAM` block or a missing canonical section), and `3` (`VALIDATION_FAILED`) when citations still fail.
 
-Sections are read from existing documents through `<!-- SECTION:<id>:START -->`/`<!-- SECTION:<id>:END -->` markers, or from every `##` heading when a document has no markers.
+Sections are read from existing documents through `<!-- SECTION:<id>:START -->`/`<!-- SECTION:<id>:END -->` markers, or from every `##` heading when a document has no markers; a start marker may carry the `:exempt` flag defined in [section 9.2 of the spec](docs/SPEC.md).
 
 Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing and graph export are not implemented yet, so `--docs-dir` only selects where documents are read from and citations relocated. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
 
@@ -109,4 +109,4 @@ For multi-worker automated execution, see the Firstmate skill definition at [`sk
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), the delta engine (`state.json`, `index-delta.json`, `impacted-sections.json`, `--force-full`, `--auto-relocate-citations`), the assembly slice (`assemble`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands and generated artifacts it specifies beyond these slices (SCIP Tier 1, graph, `query`, `plan`) are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), the delta engine (`state.json`, `index-delta.json`, `impacted-sections.json`, `--force-full`, `--auto-relocate-citations`), the assembly slice (`assemble`), the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) and the read-only index queries (`query`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands and generated artifacts it specifies beyond these slices (SCIP Tier 1, graph, `plan`) are not implemented yet.

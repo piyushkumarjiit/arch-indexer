@@ -53,7 +53,7 @@ arch-indexer/
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
 │   ├── checks/
-│   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
+│   │   ├── citations.py             # Citation parser, verifier, drift repair & relocation
 │   │   └── mermaid.py               # Lightweight static Mermaid syntax checker
 │   ├── planner.py                   # Bounded worker packet generator
 │   ├── assembler.py                 # Deterministic section merger & diagram injector

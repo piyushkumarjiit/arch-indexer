@@ -1118,9 +1118,7 @@ def test_exempt_and_case_insensitive_section_markers_preserve_overview_and_diagr
     _commit(repo, "update overview diagram")
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
-    reasons = {
-        (e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]
-    }
+    reasons = {(e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]}
     assert reasons[("docs/DESIGN.md", "design-sec1")] == ["diagram_changed"]
 
     (repo / "src" / "app.py").write_text(
@@ -1130,9 +1128,7 @@ def test_exempt_and_case_insensitive_section_markers_preserve_overview_and_diagr
     _commit(repo, "modify app.start")
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
-    reasons = {
-        (e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]
-    }
+    reasons = {(e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]}
     assert reasons[("docs/DESIGN.md", "design-sec1")] == ["modified_file"]
     assert reasons[("docs/USER_GUIDE.md", "guide-sec1")] == ["modified_file"]
     assert ("docs/DESIGN.md", "design-references") not in reasons
