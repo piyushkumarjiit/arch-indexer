@@ -145,14 +145,14 @@ Merges are conflict-free because each worker wrote exclusively to its unique `do
 #### 3c. Execute Assembly
 Run deterministic assembly:
 ```bash
-arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs
+arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs [--diagrams <json>]
 ```
 
 The assembly command automatically:
 1. Starts a missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton.
 2. Patches updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (untouched sections and sibling slices preserved).
 3. Renumbers footnotes globally across each document into sequential `[^1]..[^N]` entries in `## References`.
-4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping when one is supplied. With `docs/graph.json` present, the mapping must cover every diagram id the graph generates, because `check-mermaid` rejects stale slots and slots the graph does not produce (spec §7.1).
+4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping generated from `docs/graph.json`. With `docs/graph.json` present, the mapping is required and must cover every diagram id the graph generates, because `check-mermaid` rejects stale slots and slots the graph does not produce (spec §7.1).
 5. Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
 6. Executes mandatory validation gates:
    ```bash
