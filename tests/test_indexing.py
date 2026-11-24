@@ -150,6 +150,32 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     assert "pyimp.client.fetch.url" not in unresolved_symbols
 
 
+def test_python_scip_fixture_module_fqnames_drop_init_descriptor(tmp_path: Path):
+    """Module symbol and import references use the stored module name, not ``__init__``."""
+    repo_dir = FIXTURES_DIR / "python_imports"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "pyimp" / "client.py"],
+    )
+
+    test_scip = tmp_path / "modules.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit)
+
+    module = res.files[0]["module"]
+    assert module == "pyimp.client"
+    module_symbols = [s for s in res.symbols if s["name"] == "__init__"]
+    assert [s["fqname"] for s in module_symbols] == [module]
+    reference_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
+    assert (1, "requests") in reference_fqnames
+    assert (2, "yaml") in reference_fqnames
+    assert not any(fqname.endswith(".__init__") for _, fqname in reference_fqnames)
+
+
 def test_python_scip_fixture_distinguishes_calls_and_types(tmp_path: Path):
     """ReadAccess references still resolve to call/type from symbol evidence (Spec 4.5).
 

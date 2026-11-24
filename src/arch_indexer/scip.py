@@ -439,6 +439,11 @@ def _scip_module_prefix(language: str, rel_path: str) -> str:
     return ""
 
 
+def _module_fqname(fqname: str, last_suffix: str) -> str:
+    """Drop the SCIP package descriptor so module fqnames match stored module names."""
+    return fqname.removesuffix(".__init__") if last_suffix == ":" else fqname
+
+
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
     """Replace the longest matching SCIP module prefix with the plugin module name."""
     for prefix, module in renames:
@@ -680,7 +685,7 @@ def _parse_scip_payload(
 
                 symbols.append(
                     {
-                        "fqname": fqname,
+                        "fqname": _module_fqname(fqname, last_suffix),
                         "name": display_name,
                         "kind": kind,
                         "file_path": rel_path,
@@ -693,12 +698,13 @@ def _parse_scip_payload(
                 )
             else:
                 ref_kind = derive_ref_kind(occ, last_suffix, is_import=start_line in import_lines)
-                ref_key = (rel_path, start_line, col, fqname, ref_kind)
+                ref_fqname = _module_fqname(fqname, last_suffix)
+                ref_key = (rel_path, start_line, col, ref_fqname, ref_kind)
                 if ref_key not in seen_refs:
                     seen_refs.add(ref_key)
                     references.append(
                         {
-                            "symbol_fqname": fqname,
+                            "symbol_fqname": ref_fqname,
                             "file_path": rel_path,
                             "line": start_line,
                             "col": col,
@@ -710,7 +716,7 @@ def _parse_scip_payload(
                     # scip-python emits imported modules as external namespace symbols
                     # (`requests/__init__:`) with ReadAccess roles, so classify unresolved
                     # refs by symbol resolution rather than by derived ref kind.
-                    raw_symbol = fqname.removesuffix(".__init__") if last_suffix == ":" else fqname
+                    raw_symbol = _module_fqname(fqname, last_suffix)
                     unresolved_key = (rel_path, start_line, raw_symbol)
                     if unresolved_key not in seen_unresolved:
                         seen_unresolved.add(unresolved_key)
