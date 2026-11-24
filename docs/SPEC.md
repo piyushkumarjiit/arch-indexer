@@ -38,7 +38,7 @@ arch-indexer/
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
-│   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
+│   ├── store.py                     # SQLite schema & record persistence
 │   ├── indexer.py                   # Two-tier indexing orchestration & fallback recording
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
@@ -137,7 +137,7 @@ All external tools and parsers are pinned to exact versions:
 
 ### 3.3 Installation & Network Boundary
 - `arch-indexer toolchain ensure --repo <path>` detects languages in `<path>` and installs only the missing pinned indexers into `<cache>/tools/`.
-- `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed; `index --fetch-runtime` is forwarded to that automatic ensure. With `--offline`, missing tools do not trigger network access: if a Tier 1 tool is missing, the plugin falls back to Tier 2 by default, or exits with code `4` when `--strict-tier1` is also passed.
+- `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed; `index --fetch-runtime` is forwarded to that automatic ensure. With `--offline`, missing tools do not trigger network access: if a required Tier 1 indexer or its runtime is missing, the plugin falls back to Tier 2 by default, or exits with code `4` when `--strict-tier1` is also passed.
 - **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). If host `java`/`mvn` is absent and no pinned portable runtime has been fetched, Java falls back cleanly to Tier 2 tree-sitter (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK into `<cache>/runtimes/` for Java repos where host `java` is missing or too old, and the pinned Apache Maven only when the repo contains a `pom.xml` and host `mvn` is missing; it verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`. The flag governs downloads only: a runtime that was already downloaded and checksum-verified is reused on later `ensure` runs without the flag, and `ensure` prints one line naming each portable runtime it used (`downloaded` or `reused`). A failed runtime download exits non-zero after the independent Node tools have been installed and recorded.
 
 ---
