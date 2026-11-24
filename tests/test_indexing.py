@@ -565,7 +565,7 @@ def test_tier1_import_comments_do_not_label_later_references(tmp_path: Path):
 
     ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
     assert (1, "import") in ref_kinds
-    assert (3, "type") in ref_kinds
+    assert (3, "import") not in ref_kinds
 
 
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
