@@ -142,7 +142,9 @@ def _file_content_sha256(source: bytes, path: str) -> str:
                     data[index] = 0x20
         masked = bytes(data)
     content = "\n".join(
-        line for line in masked.decode("utf-8", errors="replace").splitlines() if line.strip()
+        trimmed
+        for line in masked.decode("utf-8", errors="replace").splitlines()
+        if (trimmed := line.rstrip())
     )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 

@@ -324,6 +324,27 @@ def test_comment_and_module_docstring_shift_relocates_with_zero_tokens(tmp_path:
     assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
 
 
+def test_trailing_inline_comment_shift_relocates_with_zero_tokens(tmp_path: Path, capsys):
+    """Trailing inline comments on code lines must not alter content_sha256."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (repo / "src" / "app.py").write_text(
+        '# header\ndef start(): # entry\n    return "start"\n\n\ndef stop():\n    return "stop"\n',
+        encoding="utf-8",
+    )
+    _commit(repo, "add header and trailing inline comment")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+
+    design = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:2` — `start`" in design
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
 def test_added_and_deleted_files_purge_index_and_impact_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"
