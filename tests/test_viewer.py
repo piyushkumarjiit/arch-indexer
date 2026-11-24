@@ -39,6 +39,15 @@ def test_render_viewer_deterministic(sample_graph: dict[str, Any]) -> None:
     assert "sample-store-service" in html1
 
 
+def test_sample_graph_edge_kinds(sample_graph: dict[str, Any]) -> None:
+    """Sample fixture edges must only use kinds allowed by SPEC 6.1."""
+    valid_edge_kinds = {"calls", "http_request", "reads", "writes", "publishes", "depends_on"}
+    edge_kinds = {e["kind"] for e in sample_graph["edges"]}
+    assert edge_kinds.issubset(valid_edge_kinds), (
+        f"Invalid edge kinds in sample-graph.json: {edge_kinds - valid_edge_kinds}"
+    )
+
+
 def test_no_external_resources(sample_graph: dict[str, Any]) -> None:
     """Viewer must be fully offline and self-contained with no external resource links."""
     html = render_viewer(sample_graph)
