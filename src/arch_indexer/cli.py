@@ -17,6 +17,12 @@ from arch_indexer.config import (
     DEFAULT_UNIT_TIMEOUT_SEC,
 )
 from arch_indexer.indexer import run_index
+from arch_indexer.query import (
+    DEFAULT_FLOW_DEPTH,
+    DEFAULT_QUERY_LIMIT,
+    QueryError,
+    run_query,
+)
 from arch_indexer.toolchain import (
     ensure_toolchain,
     format_status_report,
@@ -144,32 +150,49 @@ def build_parser() -> argparse.ArgumentParser:
     # query def
     q_def = query_sub.add_parser("def", help="Find definition of a symbol")
     q_def.add_argument("symbol", help="Symbol name to query")
+    q_def.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_def.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query refs
     q_refs = query_sub.add_parser("refs", help="Find references to a symbol")
     q_refs.add_argument("symbol", help="Symbol name to query")
-    q_refs.add_argument("--limit", type=int, default=100, help="Maximum references to return")
+    q_refs.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=DEFAULT_QUERY_LIMIT,
+        help="Maximum references to return",
+    )
+    q_refs.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_refs.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query file-symbols
     q_file = query_sub.add_parser("file-symbols", help="List symbols defined in a file")
     q_file.add_argument("rel_path", help="Relative file path")
+    q_file.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_file.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query entrypoints
     q_entry = query_sub.add_parser("entrypoints", help="List discovered entrypoints")
     q_entry.add_argument("--module", default=None, help="Optional module filter")
+    q_entry.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_entry.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query module-summary
     q_mod = query_sub.add_parser("module-summary", help="Summarize module contents and flows")
     q_mod.add_argument("module", help="Module identifier")
+    q_mod.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_mod.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query flow-trace
     q_trace = query_sub.add_parser("flow-trace", help="Trace control/data flow from an entrypoint")
-    q_trace.add_argument("entrypoint_id", help="Entrypoint identifier")
+    q_trace.add_argument("entrypoint_id", help="Entrypoint id from the entrypoints query")
+    q_trace.add_argument(
+        "--depth",
+        type=_positive_int,
+        default=DEFAULT_FLOW_DEPTH,
+        help="Maximum call depth to follow",
+    )
+    q_trace.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_trace.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 4. plan
@@ -322,6 +345,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except Exception as e:
             sys.stderr.write(f"Error assembling documentation: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "query":
+        try:
+            return run_query(
+                args.repo,
+                args.query_action,
+                symbol=getattr(args, "symbol", None),
+                rel_path=getattr(args, "rel_path", None),
+                module=getattr(args, "module", None),
+                entrypoint_id=getattr(args, "entrypoint_id", None),
+                limit=getattr(args, "limit", DEFAULT_QUERY_LIMIT),
+                depth=getattr(args, "depth", DEFAULT_FLOW_DEPTH),
+                as_json=args.json,
+                cache_dir=args.cache_dir,
+            )
+        except QueryError as e:
+            sys.stderr.write(f"Error: {e}\n")
             return EXIT_ERROR
 
     elif args.command == "check-citations":

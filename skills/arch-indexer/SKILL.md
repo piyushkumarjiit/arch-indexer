@@ -10,7 +10,7 @@ metadata:
 
 Orchestrator instructions for executing the 4-step conflict-free documentation workflow.
 
-> **Implementation status**: `query`, `plan` and `assemble` are not implemented yet, so the steps below describe the target workflow rather than a runnable one. See the current limits in the repository [README](../../README.md).
+> **Implementation status**: `plan` is not implemented yet, so the planning step below describes the target workflow rather than a runnable one. See the current limits in the repository [README](../../README.md).
 
 ## Orchestration Invariants
 
