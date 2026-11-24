@@ -2350,6 +2350,142 @@ def test_scip_python_local_module_alias_keeps_attribute_chain(tmp_path: Path):
     assert (4, "app.config.load") in ref_fqnames
 
 
+def test_scip_python_local_imports_resolve_to_stored_modules(tmp_path: Path):
+    """Aliased imports in a nested project resolve to the stored module fqname."""
+    repo = tmp_path / "repo"
+    auth = repo / "backend" / "src" / "auth"
+    orders = repo / "backend" / "src" / "orders"
+    auth.mkdir(parents=True)
+    orders.mkdir(parents=True)
+    (repo / "backend" / "pyproject.toml").write_text(
+        '[project]\nname = "backend"\nversion = "0.1.0"\n'
+    )
+    models = auth / "models.py"
+    models.write_text("def save(x):\n    return x\n")
+    main = orders / "main.py"
+    main.write_text(
+        "from auth.models import save\n"
+        "import auth.models as models\n"
+        "from auth import models as auth_models\n"
+        "\n"
+        "def run(x):\n"
+        "    return save(models.helper(auth_models.other(x)))\n"
+    )
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[main, models],
+    )
+    plugin = PythonPlugin()
+    file_records, symbol_records = plugin.extract_definitions(unit)
+    repo_modules: set[str] = set()
+    for file_record in file_records:
+        parts = file_record["module"].split(".")
+        for i in range(1, len(parts) + 1):
+            repo_modules.add(".".join(parts[:i]))
+    symbol_context = {
+        "file_records": {"python": file_records},
+        "fqnames": {"python": {s["fqname"] for s in symbol_records}},
+        "modules": {"python": repo_modules},
+    }
+
+    main_module = "scip-python python pkg 0.1.0 backend/src/orders/main/__init__:"
+    models_module = "scip-python python pkg 0.1.0 backend/src/auth/models/__init__:"
+    save_sym = "scip-python python pkg 0.1.0 `backend.auth.models`/save()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="backend/src/orders/main.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=main_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=models_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 16],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 24, 28],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=models_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[1, 7, 18],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 1",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[1, 22, 28],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=models_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 5, 9],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 2",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[2, 27, 38],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[5, 11, 15],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 1",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[5, 16, 22],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 2",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[5, 30, 41],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="backend/src/auth/models.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=models_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=save_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 4, 8],
+                        enclosing_range=[0, 0, 2, 0],
+                    ),
+                ],
+            ),
+        ]
+    )
+    test_scip = tmp_path / "nested_aliases.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+    ref_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
+    assert (1, "backend.auth.models.save") in ref_fqnames
+    assert (2, "backend.auth.models") in ref_fqnames
+    assert (3, "backend.auth.models") in ref_fqnames
+    assert (6, "backend.auth.models.save") in ref_fqnames
+    assert (6, "backend.auth.models.helper") in ref_fqnames
+    assert (6, "backend.auth.models.other") in ref_fqnames
+    assert not any(fqname.startswith("auth.models") for _, fqname in ref_fqnames)
+
+
 def test_scip_python_local_symbol_without_scip_module_symbol(tmp_path: Path):
     """When scip-python omits external module symbol, source line derives import."""
     repo = tmp_path / "repo"

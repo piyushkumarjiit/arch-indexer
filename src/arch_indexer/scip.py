@@ -262,6 +262,31 @@ def _resolve_relative_module(module_token: str, current_module: str, rel_path: s
     return ".".join(base_parts)
 
 
+def _match_statement_module(token: str, modules: list[str]) -> str:
+    token_parts = token.split(".")
+    matched = ""
+    for module in modules:
+        parts = module.split(".")
+        if (
+            len(parts) >= len(token_parts)
+            and parts[-len(token_parts) :] == token_parts
+            and len(module) > len(matched)
+        ):
+            matched = module
+    return matched
+
+
+def _bound_module_name(source_name: str, target_module: str) -> str:
+    source_parts = source_name.split(".")
+    target_parts = target_module.split(".")
+    if (
+        len(target_parts) >= len(source_parts)
+        and target_parts[-len(source_parts) :] == source_parts
+    ):
+        return ".".join([*target_parts[: -len(source_parts)], source_parts[0]])
+    return source_parts[0]
+
+
 def _local_import_aliases(
     doc: Document,
     file_lines: list[str],
@@ -269,29 +294,45 @@ def _local_import_aliases(
     module: str,
 ) -> dict[str, str]:
     """Map document-local import bindings to the imported symbol or module."""
+    modules_by_statement: dict[int, list[str]] = {}
     locals_by_statement: dict[int, list[Occurrence]] = {}
     for occ in doc.occurrences:
-        if not occ.symbol.startswith("local "):
+        if not occ.symbol:
             continue
         start_line, _, _ = _get_occ_range(occ)
         statement = import_lines.get(start_line)
-        if statement is not None:
+        if statement is None:
+            continue
+        if occ.symbol.startswith("local "):
             locals_by_statement.setdefault(statement, []).append(occ)
+            continue
+        if occ.symbol_roles & SymbolRole.Definition:
+            continue
+        _, fqname, _, suffix = parse_scip_symbol(occ.symbol)
+        if suffix in ("/", ":"):
+            imported_module = _module_fqname(fqname, suffix)
+            if imported_module:
+                modules_by_statement.setdefault(statement, []).append(imported_module)
 
     aliases: dict[str, str] = {}
     for statement, occurrences in locals_by_statement.items():
         text = _import_statement_text(file_lines, import_lines, statement)
+        statement_modules = modules_by_statement.get(statement, [])
         from_match = re.match(r"from\s+([.\w]+)\s+import\s+(.*)", text)
         if from_match:
             module_token = from_match.group(1)
-            base = (
-                _resolve_relative_module(module_token, module, doc.relative_path)
-                if module_token.startswith(".")
-                else module_token
-            )
+            if module_token.startswith("."):
+                base = _resolve_relative_module(module_token, module, doc.relative_path)
+            else:
+                base = _match_statement_module(module_token, statement_modules) or module_token
             bindings: dict[str, str] = {}
             for name, alias in _split_import_names(from_match.group(2)):
-                target = f"{base}.{name}" if base else name
+                combined = f"{module_token}.{name}"
+                target = (
+                    _match_statement_module(combined, statement_modules)
+                    if not module_token.startswith(".")
+                    else ""
+                ) or (f"{base}.{name}" if base else name)
                 bindings[alias or name] = target
                 bindings.setdefault(name, target)
         else:
@@ -300,11 +341,12 @@ def _local_import_aliases(
                 continue
             bindings = {}
             for name, alias in _split_import_names(import_match.group(1)):
+                target_module = _match_statement_module(name, statement_modules) or name
                 if alias:
-                    bindings[alias] = name
+                    bindings[alias] = target_module
                 else:
-                    bindings[name] = name
-                    bindings.setdefault(name.split(".")[0], name.split(".")[0])
+                    bindings[name] = target_module
+                    bindings.setdefault(name.split(".")[0], _bound_module_name(name, target_module))
 
         for occ in occurrences:
             raw = _occ_source_text(file_lines, occ)
