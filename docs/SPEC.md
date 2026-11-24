@@ -401,7 +401,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 The thin skill instructs Firstmate to run the following 4 steps:
 
 1. **Step 1 — Index & Plan (0 LLM Tokens)**
-   - Run `arch-indexer index <repo> --auto-relocate-citations` (after `arch-indexer toolchain ensure --repo <repo>` if online).
+   - Run `arch-indexer index <repo> --offline --auto-relocate-citations` (after `arch-indexer toolchain ensure --repo <repo>` if online), so indexing never re-triggers toolchain installation.
    - If exit code is `0` (`NO_CHANGES`): stop immediately and report that documentation is up to date.
    - If exit code is `2` (`DELTA_DETECTED`): run `arch-indexer plan <repo>` and inspect `work-plan.json`.
    - If exit code is `1`, `3`, or `4`: stop and report the error.
