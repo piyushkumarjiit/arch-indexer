@@ -599,6 +599,81 @@ function runTests() {
   );
   resetFilters();
 
+  // 8e. Aggregated edges must keep every distinct underlying kind
+  console.log("Checking aggregated edge kinds and container inspector details...");
+  state.goToBreadcrumb(0);
+  const systemEdges = state.getCurrentView().edges;
+  const mixedEdge = systemEdges.find(
+    (edge) => edge.source === "mod:orders" && edge.target === "ds:postgres:orders"
+  );
+  assert(mixedEdge, "System view must aggregate mod:orders -> ds:postgres:orders");
+  const fixtureDsKinds = Array.from(
+    new Set(
+      graph.edges
+        .filter((edge) => edge.target === "ds:postgres:orders")
+        .map((edge) => edge.kind)
+    )
+  ).sort();
+  assert.deepStrictEqual(
+    mixedEdge.kinds,
+    fixtureDsKinds,
+    "An aggregated edge must keep every distinct underlying kind"
+  );
+  assert.strictEqual(mixedEdge.count, 2, "Both data store accesses must be aggregated");
+
+  const parallelTraceGraph = {
+    nodes: [{ id: "ep:e", kind: "entrypoint", label: "E", file: "a.py", line: 1, tier: "scip" }],
+    edges: [
+      { source: "ep:e", target: "ds:d", kind: "writes", file: "a.py", line: 2, tier: "scip" },
+      { source: "ep:e", target: "ds:d", kind: "reads", file: "a.py", line: 3, tier: "scip" },
+    ],
+    data_stores: [{ id: "ds:d", kind: "sql", label: "D", evidence: ["a.py:4"] }],
+    external_sinks: [],
+  };
+  const parallelTraceState = new ViewerState(parallelTraceGraph);
+  parallelTraceState.startTrace("ep:e");
+  const parallelTraceEdges = parallelTraceState.getCurrentView().edges;
+  assert.strictEqual(parallelTraceEdges.length, 1, "Parallel trace edges must aggregate into one");
+  assert.deepStrictEqual(
+    parallelTraceEdges[0].kinds,
+    ["reads", "writes"],
+    "Trace-mode aggregation must keep every distinct underlying kind"
+  );
+
+  const ordersDetails = getNodeDetails(state.hierarchy, "mod:orders");
+  assert.deepStrictEqual(
+    ordersDetails.uses.map((use) => use.id),
+    ["ds:postgres:orders", "mod:auth", "mod:billing"],
+    "A module inspector must aggregate outgoing edges at module level"
+  );
+  assert.deepStrictEqual(
+    ordersDetails.usedBy.map((use) => use.id),
+    ["mod:root"],
+    "A module inspector must aggregate incoming edges from outside the module"
+  );
+  assert.strictEqual(
+    ordersDetails.usedBy[0].edgeKind,
+    "http_request",
+    "A module inspector must report its underlying edge kinds"
+  );
+  assert.strictEqual(
+    ordersDetails.tier,
+    "scip",
+    "A module inspector must derive its tier from descendant leaves"
+  );
+  assert.strictEqual(
+    getNodeDetails(state.hierarchy, "mod:root").tier,
+    "tree-sitter",
+    "A synthetic-root inspector must derive its tier from descendant leaves"
+  );
+  const dirDetails = getNodeDetails(state.hierarchy, "dir:src/orders/services");
+  assert.strictEqual(
+    dirDetails.tier,
+    "scip",
+    "A directory inspector must derive its tier from descendant files"
+  );
+  assert(dirDetails.uses.length > 0, "A directory inspector must show outgoing edges");
+
   // 9. Test Scale Graph traceFlow (Independent Oracle: graph-reachable sink set)
   console.log("Checking scale graph traceFlow reachability on ~5,000 nodes/15,000 edges...");
   const pythonExe = process.env.ARCH_VIEWER_PYTHON || "python3";
@@ -917,12 +992,66 @@ function testBrowserController(graphJsonText) {
     "The removed #drill= route must not rebuild a breadcrumb trail"
   );
 
+  // Aggregated edges keep every underlying kind and use kind-neutral labels
+  viewerController.render();
+  const inspectorContent = elements.get("inspector-content");
+  const systemViewEdges = state.getCurrentView().edges;
+  const mixedEdgeIndex = systemViewEdges.findIndex(
+    (edge) => edge.source === "mod:orders" && edge.target === "ds:postgres:orders"
+  );
+  assert(mixedEdgeIndex >= 0, "System view must aggregate mod:orders -> ds:postgres:orders");
+  const fixtureDsKinds = Array.from(
+    new Set(
+      fixtureGraph.edges
+        .filter((edge) => edge.target === "ds:postgres:orders")
+        .map((edge) => edge.kind)
+    )
+  ).sort();
+  assert.deepStrictEqual(
+    systemViewEdges[mixedEdgeIndex].kinds,
+    fixtureDsKinds,
+    "An aggregated edge must keep every distinct underlying kind"
+  );
+  assert(findText(viewport, "2 edges"), "Aggregated edge labels must be kind-neutral");
+  assert(
+    !findText(viewport, "2 calls"),
+    "Aggregated edge labels must not call reads or writes 'calls'"
+  );
+  findSvgEdges(viewport)[mixedEdgeIndex].dispatchEvent({ type: "click" });
+  assert(
+    inspectorContent.innerHTML.includes(`>${fixtureDsKinds.join(", ")}<`),
+    "Edge inspector must list every underlying kind of the clicked aggregate"
+  );
+
+  // A container inspector must show aggregated edges and a derived tier
+  viewer.selectNode("mod:orders");
+  assert(
+    inspectorContent.innerHTML.includes("Uses (3)"),
+    "Module inspector must aggregate outgoing edges"
+  );
+  assert(
+    inspectorContent.innerHTML.includes('data-id="mod:auth"'),
+    "Module inspector uses must include connected modules"
+  );
+  assert(
+    inspectorContent.innerHTML.includes('data-id="mod:billing"'),
+    "Module inspector uses must include connected modules"
+  );
+  assert(
+    inspectorContent.innerHTML.includes('data-id="ds:postgres:orders"'),
+    "Module inspector uses must include the connected data store"
+  );
+  assert(
+    inspectorContent.innerHTML.includes('data-id="mod:root"'),
+    "Module inspector usedBy must include the calling module"
+  );
+  assert(inspectorContent.innerHTML.includes(">scip<"), "Module inspector must show its derived tier");
+
   // Node inspector must show the fixture node's own symbol, file:line and tier
   const inspectorNodeId = "ep:POST:/api/orders";
   const inspectorNodeFixture = fixtureGraph.nodes.find((n) => n.id === inspectorNodeId);
   assert(inspectorNodeFixture, "Fixture must contain the inspected node");
   viewer.selectNode(inspectorNodeId);
-  const inspectorContent = elements.get("inspector-content");
   assert(
     inspectorContent.innerHTML.includes(`>${inspectorNodeFixture.symbol}<`),
     "Node inspector must show the fixture symbol"

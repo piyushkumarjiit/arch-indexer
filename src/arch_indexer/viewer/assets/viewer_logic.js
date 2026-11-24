@@ -52,6 +52,25 @@
     return Boolean(node) && (node.level === "symbol" || isBoundaryKind(node));
   }
 
+  function aggregatedEdgeKinds(edge) {
+    return Array.from(
+      new Set((edge.underlying || []).map((underlying) => underlying.kind).filter(Boolean))
+    ).sort();
+  }
+
+  function collectDescendantLeafIds(hierarchy, node, result) {
+    const ids = result || [];
+    if (!node) return ids;
+    if (isLeafNode(node)) {
+      ids.push(node.id);
+      return ids;
+    }
+    (node.children || []).forEach((childId) =>
+      collectDescendantLeafIds(hierarchy, hierarchy.nodeLookup.get(childId), ids)
+    );
+    return ids;
+  }
+
   /**
    * Build complete 5-level hierarchy tree and lookup tables from graph data.
    * Levels: system -> module -> file_group (directory) -> file -> symbol/endpoint
@@ -500,7 +519,6 @@
           edgeMap.set(edgeKey, {
             source: srcMapped,
             target: tgtMapped,
-            kind: edge.kind,
             count: 0,
             underlying: [],
           });
@@ -513,7 +531,11 @@
 
     // Deterministic sort of nodes and edges
     visibleNodes.sort((a, b) => a.id.localeCompare(b.id));
-    const visibleEdges = Array.from(edgeMap.values()).sort((a, b) => {
+    const visibleEdges = Array.from(edgeMap.values());
+    visibleEdges.forEach((edge) => {
+      edge.kinds = aggregatedEdgeKinds(edge);
+    });
+    visibleEdges.sort((a, b) => {
       const keyA = `${a.source}->${a.target}`;
       const keyB = `${b.source}->${b.target}`;
       return keyA.localeCompare(keyB);
@@ -976,32 +998,74 @@
     const node = hierarchy.nodeLookup.get(nodeId);
     if (!node) return null;
 
-    const outEdges = hierarchy.outgoingEdges.get(nodeId) || [];
-    const inEdges = hierarchy.incomingEdges.get(nodeId) || [];
+    const leafScoped = isLeafNode(node);
+    const leafIds = leafScoped ? [node.id] : collectDescendantLeafIds(hierarchy, node);
 
-    const uses = outEdges.map((e) => {
-      const tgt = hierarchy.nodeLookup.get(e.target);
-      return {
-        id: e.target,
-        label: tgt ? tgt.label : e.target,
-        kind: tgt ? tgt.kind : "unknown",
-        edgeKind: e.kind,
-        file: e.file,
-        line: e.line,
-      };
-    });
+    const mapOtherEndpoint = (otherId) => {
+      if (leafScoped) return otherId;
+      const ancestors = hierarchy.ancestorMap.get(otherId);
+      if (!ancestors) return otherId;
+      for (let i = ancestors.length - 1; i >= 0; i--) {
+        if (ancestors[i].level === node.level) return ancestors[i].id;
+      }
+      return otherId;
+    };
 
-    const usedBy = inEdges.map((e) => {
-      const src = hierarchy.nodeLookup.get(e.source);
-      return {
-        id: e.source,
-        label: src ? src.label : e.source,
-        kind: src ? src.kind : "unknown",
-        edgeKind: e.kind,
-        file: e.file,
-        line: e.line,
-      };
-    });
+    const aggregateConnected = (direction) => {
+      const entries = new Map();
+      leafIds.forEach((leafId) => {
+        const edges =
+          (direction === "out"
+            ? hierarchy.outgoingEdges.get(leafId)
+            : hierarchy.incomingEdges.get(leafId)) || [];
+        edges.forEach((edge) => {
+          const mappedId = mapOtherEndpoint(direction === "out" ? edge.target : edge.source);
+          if (!leafScoped && mappedId === node.id) return;
+          if (!entries.has(mappedId)) {
+            const other = hierarchy.nodeLookup.get(mappedId);
+            entries.set(mappedId, {
+              id: mappedId,
+              label: other ? other.label || other.id : mappedId,
+              kind: other ? other.kind : "unknown",
+              kinds: new Set(),
+              count: 0,
+              file: edge.file,
+              line: edge.line,
+            });
+          }
+          const entry = entries.get(mappedId);
+          if (edge.kind) entry.kinds.add(edge.kind);
+          entry.count++;
+        });
+      });
+      return Array.from(entries.values())
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          kind: entry.kind,
+          edgeKind: Array.from(entry.kinds).sort().join(", "),
+          count: entry.count,
+          file: entry.file,
+          line: entry.line,
+        }));
+    };
+
+    const uses = aggregateConnected("out");
+    const usedBy = aggregateConnected("in");
+
+    let tier = node.tier || null;
+    if (!leafScoped) {
+      const leafTiers = Array.from(
+        new Set(
+          leafIds
+            .map((leafId) => hierarchy.nodeLookup.get(leafId))
+            .map((leaf) => leaf && leaf.tier)
+            .filter(Boolean)
+        )
+      ).sort();
+      if (leafTiers.length > 0) tier = leafTiers.join(", ");
+    }
 
     let citation = "";
     if (node.file && node.line) {
@@ -1017,7 +1081,7 @@
       label: node.label || node.id,
       kind: node.kind,
       level: node.level,
-      tier: node.tier || null,
+      tier,
       citation,
       file: node.file,
       line: node.line,
@@ -1205,7 +1269,6 @@
               edgeMap.set(key, {
                 source: e.source,
                 target: e.target,
-                kind: e.kind,
                 count: 0,
                 underlying: [],
               });
@@ -1217,7 +1280,11 @@
         });
 
         traceNodes.sort((a, b) => a.id.localeCompare(b.id));
-        const edgesList = Array.from(edgeMap.values()).sort((a, b) => {
+        const edgesList = Array.from(edgeMap.values());
+        edgesList.forEach((edge) => {
+          edge.kinds = aggregatedEdgeKinds(edge);
+        });
+        edgesList.sort((a, b) => {
           return `${a.source}->${a.target}`.localeCompare(`${b.source}->${b.target}`);
         });
 

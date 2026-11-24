@@ -270,7 +270,7 @@
         txt.setAttribute("x", midX);
         txt.setAttribute("y", midY);
         txt.setAttribute("class", "svg-edge-label");
-        txt.textContent = `${edge.count} calls`;
+        txt.textContent = `${edge.count} edges`;
         edgesGroup.appendChild(txt);
       }
     });
@@ -486,6 +486,7 @@
     if (!panel || !content) return;
 
     const underlying = edge.underlying || [];
+    const kinds = (edge.kinds || []).join(", ");
     const citations = Array.from(
       new Set(
         underlying
@@ -502,10 +503,10 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">Kind</span>
-        <span class="detail-value">${escapeHtml(edge.kind)}</span>
+        <span class="detail-value">${escapeHtml(kinds)}</span>
       </div>
       <div class="detail-row">
-        <span class="detail-label">Underlying Calls</span>
+        <span class="detail-label">Underlying Edges</span>
         <span class="detail-value">${edge.count || 1}</span>
       </div>
       ${
