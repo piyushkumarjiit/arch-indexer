@@ -385,6 +385,7 @@ class TypeScriptPlugin(LanguagePlugin):
                 scip_file,
                 unit,
                 tier2_result=tier2_result,
+                symbol_context=symbol_context,
             )
         except Exception as e:
             scip_file.unlink(missing_ok=True)

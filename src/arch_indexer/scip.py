@@ -402,6 +402,25 @@ def _doc_module_prefix(doc: Document) -> str:
     return ""
 
 
+def _scip_module_prefix(language: str, rel_path: str) -> str:
+    if language == "python":
+        mod_path = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+        parts = [part for part in mod_path.split("/") if part]
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        return ".".join(parts)
+    if language == "typescript":
+        return rel_path.replace("/", ".")
+    return ""
+
+
+def _is_repo_symbol(raw_symbol: str, repo_fqnames: set[str], repo_modules: set[str]) -> bool:
+    if raw_symbol in repo_fqnames or raw_symbol in repo_modules:
+        return True
+    parts = raw_symbol.split(".")
+    return any(".".join(parts[:i]) in repo_modules for i in range(1, len(parts)))
+
+
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
     """Replace the longest matching SCIP module prefix with the plugin module name."""
     for prefix, module in renames:
@@ -443,6 +462,7 @@ def ingest_scip(
     *,
     work_dir: Path | None = None,
     tier2_result: IndexResult | None = None,
+    symbol_context: dict[str, Any] | None = None,
 ) -> IndexResult:
     """Ingest SCIP protobuf file into unit result and delete temporary .scip file."""
     try:
@@ -451,6 +471,7 @@ def ingest_scip(
             unit,
             work_dir=work_dir,
             tier2_result=tier2_result,
+            symbol_context=symbol_context,
         )
     finally:
         scip_path.unlink(missing_ok=True)
@@ -462,6 +483,7 @@ def _parse_scip_payload(
     *,
     work_dir: Path | None = None,
     tier2_result: IndexResult | None = None,
+    symbol_context: dict[str, Any] | None = None,
 ) -> IndexResult:
     if scip_path.stat().st_size == 0:
         raise ValueError(f"SCIP index file is empty: {scip_path}")
@@ -470,25 +492,23 @@ def _parse_scip_payload(
     symbols: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
     unresolved_refs: list[dict[str, Any]] = []
-    external_symbols: set[str] = set()
     metadata_project_root: Path | None = None
 
     document_count = 0
-    defined_symbols: set[str] = set()
+    defined_by_doc: dict[str, set[str]] = {}
     for field_num, msg in iter_scip_file(scip_path):
         if field_num == 1:
             if msg.project_root:
                 metadata_project_root = _parse_project_root(msg.project_root)
         elif field_num == 2:
             document_count += 1
+            doc_symbols = defined_by_doc.setdefault(msg.relative_path, set())
             for sym_info in msg.symbols:
                 if sym_info.symbol:
-                    defined_symbols.add(sym_info.symbol)
+                    doc_symbols.add(sym_info.symbol)
             for occ in msg.occurrences:
                 if (occ.symbol_roles & SymbolRole.Definition) and occ.symbol:
-                    defined_symbols.add(occ.symbol)
-        elif field_num == 3:
-            external_symbols.add(msg.symbol)
+                    doc_symbols.add(occ.symbol)
 
     if not document_count:
         raise ValueError(f"SCIP index file contains no documents: {scip_path}")
@@ -510,10 +530,31 @@ def _parse_scip_payload(
         search_roots.append(root_resolved)
 
     allowed_paths = {f.resolve() for f in unit.files} if unit.files else None
+
+    defined_symbols: set[str] = set()
+    for doc_path, doc_symbols in defined_by_doc.items():
+        resolved = _resolve_relative_path(doc_path, unit, search_roots)
+        if resolved is None:
+            continue
+        _, full_path = resolved
+        if allowed_paths is not None and full_path not in allowed_paths:
+            continue
+        defined_symbols.update(doc_symbols)
     namespace_prefixes = _defined_fqname_prefixes(defined_symbols)
+
     module_by_path = {f["path"]: f["module"] for f in tier2_result.files} if tier2_result else None
     tier2_symbols = tier2_result.symbols if tier2_result else []
-    module_prefixes: list[tuple[str, str]] = []
+    renames: dict[str, str] = {}
+    repo_fqnames: set[str] = set()
+    repo_modules: set[str] = set()
+    if symbol_context:
+        for file_rec in symbol_context.get("file_records", {}).get(unit.language, []):
+            module = file_rec.get("module", "")
+            prefix = _scip_module_prefix(unit.language, file_rec.get("path", ""))
+            if prefix and module and prefix != module:
+                renames.setdefault(prefix, module)
+        repo_fqnames.update(symbol_context.get("fqnames", {}).get(unit.language, set()))
+        repo_modules.update(symbol_context.get("modules", {}).get(unit.language, set()))
 
     tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     tier2_by_line: dict[tuple[str, int], dict[str, Any]] = {}
@@ -556,9 +597,9 @@ def _parse_scip_payload(
             line_count = 0
 
         module = _module_for_file(unit, rel_path, content_bytes, module_by_path)
-        doc_prefix = _doc_module_prefix(doc)
+        doc_prefix = _doc_module_prefix(doc) or _scip_module_prefix(unit.language, rel_path)
         if doc_prefix and module and doc_prefix != module:
-            module_prefixes.append((doc_prefix, module))
+            renames[doc_prefix] = module
         files.append(
             {
                 "path": rel_path,
@@ -642,8 +683,7 @@ def _parse_scip_payload(
                         }
                     )
 
-                is_external = sym_str in external_symbols or sym_str not in defined_symbols
-                if is_external:
+                if sym_str not in defined_symbols:
                     # scip-python emits imported modules as external namespace symbols
                     # (`requests/__init__:`) with ReadAccess roles, so classify unresolved
                     # refs by symbol resolution rather than by derived ref kind.
@@ -663,14 +703,21 @@ def _parse_scip_payload(
     if unit.files and not files:
         raise ValueError(f"SCIP index yielded no matching documents for unit {unit.unit_id}")
 
-    if module_prefixes:
-        renames = sorted(module_prefixes, key=lambda item: -len(item[0]))
+    if renames:
+        ordered_renames = sorted(renames.items(), key=lambda item: -len(item[0]))
         for sym in symbols:
-            sym["fqname"] = _align_fqname(sym["fqname"], renames)
+            sym["fqname"] = _align_fqname(sym["fqname"], ordered_renames)
         for ref in references:
-            ref["symbol_fqname"] = _align_fqname(ref["symbol_fqname"], renames)
+            ref["symbol_fqname"] = _align_fqname(ref["symbol_fqname"], ordered_renames)
         for unresolved in unresolved_refs:
-            unresolved["raw_symbol"] = _align_fqname(unresolved["raw_symbol"], renames)
+            unresolved["raw_symbol"] = _align_fqname(unresolved["raw_symbol"], ordered_renames)
+
+    if repo_fqnames or repo_modules:
+        unresolved_refs = [
+            unresolved
+            for unresolved in unresolved_refs
+            if not _is_repo_symbol(unresolved["raw_symbol"], repo_fqnames, repo_modules)
+        ]
 
     uncovered_paths: set[str] = set()
     if tier2_result is not None:
@@ -689,6 +736,9 @@ def _parse_scip_payload(
             )
             references.extend(
                 ref for ref in tier2_result.references if ref["file_path"] in uncovered_paths
+            )
+            unresolved_refs.extend(
+                ref for ref in tier2_result.unresolved_refs if ref["file_path"] in uncovered_paths
             )
 
     aligned_entrypoints: list[dict[str, Any]] = []

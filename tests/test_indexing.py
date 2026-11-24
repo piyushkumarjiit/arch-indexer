@@ -259,6 +259,82 @@ def test_scip_keeps_references_to_indexed_modules(tmp_path: Path):
     assert res.unresolved_refs == []
 
 
+def test_tier1_cross_unit_references_align_to_repo_module_namespace(tmp_path: Path):
+    """References to symbols outside the .scip join their plugin-namespace rows."""
+    repo = tmp_path / "repo"
+    (repo / "src" / "auth").mkdir(parents=True)
+    (repo / "src" / "orders").mkdir(parents=True)
+    (repo / "src" / "auth" / "models.py").write_text("class User:\n    pass\n")
+    orders = repo / "src" / "orders" / "main.py"
+    orders.write_text("from auth.models import User\nimport requests\n\nUser()\n")
+
+    unit = IndexUnit(
+        unit_id="python:orders",
+        name="orders",
+        language="python",
+        root_dir=repo,
+        files=[orders],
+    )
+    order_module = "scip-python python pkg 0.1.0 `src.orders.main`/"
+    user_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#"
+    save_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#save()."
+    requests_sym = "scip-python python pkg 0.1.0 requests/__init__:"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/orders/main.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=order_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 24, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[3, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=save_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[3, 5, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=requests_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[1, 7, 0],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "cross_unit.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    symbol_context = {
+        "file_records": {
+            "python": [
+                {"path": "src/auth/models.py", "module": "auth.models"},
+                {"path": "src/orders/main.py", "module": "orders.main"},
+            ]
+        },
+        "fqnames": {"python": {"auth.models.User"}},
+        "modules": {"python": {"auth", "auth.models", "orders", "orders.main"}},
+    }
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    reference_fqnames = {r["symbol_fqname"] for r in res.references}
+    assert "auth.models.User" in reference_fqnames
+    assert not any(fqname.startswith("src.auth.models") for fqname in reference_fqnames)
+    assert {u["raw_symbol"] for u in res.unresolved_refs} == {"requests"}
+
+
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
     """Verify Java SCIP fixture ingest with exact lines and references."""
     fixture_scip = FIXTURES_DIR / "java_maven" / "index.scip"
@@ -864,7 +940,7 @@ def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Pa
     a_file = repo / "src" / "a.py"
     b_file = repo / "src" / "b.py"
     a_file.write_text("def a():\n    return 1\n")
-    b_file.write_text("def b():\n    return 2\n")
+    b_file.write_text("import requests\n\ndef b():\n    return 2\n")
 
     unit = IndexUnit(
         unit_id="python:root",
@@ -912,6 +988,9 @@ def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Pa
     symbol_fqnames = {s["fqname"] for s in res.symbols}
     assert {"a.a", "b.b"} <= symbol_fqnames
     assert all(sym["fqname"] in symbol_fqnames for sym in tier2.symbols)
+    assert {u["raw_symbol"] for u in res.unresolved_refs if u["file_path"] == "src/b.py"} == {
+        "requests"
+    }
 
 
 # 7. Strict/offline exit 4 CLI tests

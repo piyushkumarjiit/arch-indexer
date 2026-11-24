@@ -334,6 +334,7 @@ class JavaPlugin(LanguagePlugin):
                 unit,
                 work_dir=work_dir,
                 tier2_result=tier2_result,
+                symbol_context=symbol_context,
             )
         except Exception as e:
             scip_file.unlink(missing_ok=True)
