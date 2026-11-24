@@ -95,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--offline", action="store_true", default=False, help="Run completely offline"
     )
     index_parser.add_argument(
+        "--fetch-runtime",
+        action="store_true",
+        default=False,
+        help=(
+            "With automatic toolchain ensure, also fetch portable JDK/Maven runtimes "
+            "when host runtimes are missing or too old"
+        ),
+    )
+    index_parser.add_argument(
         "--strict-tier1",
         action="store_true",
         default=False,
@@ -319,6 +328,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     elif args.command == "index":
         try:
+            if not args.offline:
+                try:
+                    ensure_toolchain(
+                        args.repo,
+                        cache_dir=args.cache_dir,
+                        fetch_runtime=getattr(args, "fetch_runtime", False),
+                    )
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                    sys.stderr.write(f"Warning: Toolchain ensure failed: {exc}\n")
             return run_index(
                 args.repo,
                 offline=args.offline,

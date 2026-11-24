@@ -28,7 +28,7 @@ The meaning of each exit code is owned by spec section 7.2. This table records o
 | `1` | `EXIT_ERROR` | Abort workflow and report error to supervisor (invalid flags, unreadable repository, an unusable `--drafts-dir`/`--diagrams` path, or one `packet_id` declared by more than one draft). |
 | `2` | `EXIT_DELTA_DETECTED` | Proceed to planning and worker dispatch. |
 | `3` | `EXIT_VALIDATION_FAILED` | For `check-citations`, `check-mermaid` and `assemble`: citation drift/breakage, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, missing draft section, or any other violation of the draft-file contract in spec §9.2; dispatch a targeted fix worker for the failing section(s). For `index`: the relocation was rolled back and the previous snapshot kept, so abort workflow and report stderr. |
-| `4` | `EXIT_TOOLCHAIN_MISSING` | Abort workflow and report missing toolchain. |
+| `4` | `EXIT_TOOLCHAIN_MISSING` | Required Tier 1 indexer or its runtime unavailable during a `--strict-tier1 --offline` run. Abort workflow and report missing toolchain. |
 
 ---
 
@@ -41,7 +41,7 @@ When network access is available, install required language indexers into the lo
 ```bash
 arch-indexer toolchain ensure --repo <repo>
 ```
-*Note: `toolchain ensure` is the ONLY command permitted network access. Optional status inspection: `arch-indexer toolchain status --repo <repo>`.*
+*Note: toolchain installation is the only operation permitted network access; it happens here, and also automatically inside `index` unless `--offline` is passed (step 1b runs `--offline`, so no network access occurs there). Optional status inspection: `arch-indexer toolchain status --repo <repo>`.*
 
 #### 1b. Index Repository & Detect Delta (Offline)
 Run offline deterministic indexing with automatic citation line-shift repair:

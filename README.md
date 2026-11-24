@@ -9,13 +9,13 @@ Every technical claim in the generated documents is traceable to the code throug
 
 ## How it works
 
-1. **Index (no AI).** Detects the languages in the target repository, installs the pinned indexers it needs, and builds a local index of symbols, definitions and references. It currently targets Python, TypeScript and Java/Maven, plus infrastructure files such as Dockerfiles, shell scripts and Terraform. A precise SCIP indexer is used when the project can be resolved; otherwise a no-build parser is used as a fallback.
+1. **Index (no AI).** Detects the languages in the target repository, runs `arch-indexer toolchain ensure` automatically (unless `--offline` is passed) to install any missing pinned indexers, and builds a local index of symbols, definitions and references. It currently targets Python, TypeScript and Java/Maven, plus infrastructure files such as Dockerfiles, shell scripts and Terraform. A precise SCIP indexer is used when the project can be resolved; otherwise a no-build parser is used as a fallback.
 2. **Detect changes (no AI).** Compares the repository with the previous run and reports only what changed, so an unchanged repository costs nothing to re-check.
 3. **Graph and visualise (no AI).** Exports a control- and data-flow graph, generates the Mermaid diagrams used in the design document, and builds an offline HTML viewer for exploring flows from entry points to data stores.
 4. **Write (AI workers, bounded).** Writers read the index through a local query tool, draft only the sections affected by a change, and cite the code for every claim.
 5. **Assemble and verify (no AI).** Merges the drafts, embeds the diagrams, and runs the citation and diagram checks.
 
-Indexing, querying, planning, graphing, assembly and validation run offline; only toolchain installation uses the network.
+Querying, graphing, assembly and validation run offline; indexing runs toolchain ensure automatically unless `--offline` is passed.
 
 ## Install and usage
 
@@ -24,9 +24,9 @@ pip install -e .   # add "[dev]" to also install pytest and ruff
 
 # Toolchain management
 arch-indexer toolchain status --repo /path/to/repo
-arch-indexer toolchain ensure --repo /path/to/repo   # the only command that uses the network
+arch-indexer toolchain ensure --repo /path/to/repo   # install missing pinned indexers (also run automatically by index without --offline)
 
-# Index a repository (Tier 2 tree-sitter)
+# Index a repository (Tier 1 SCIP, Tier 2 tree-sitter fallback)
 arch-indexer index /path/to/repo
 
 # Read-only queries over the local index (offline, deterministic)
@@ -53,7 +53,7 @@ arch-indexer assemble /path/to/repo --drafts-dir docs/.drafts [--docs-dir docs] 
 
 ### Indexing
 
-`index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary and, when any section is impacted, an impacted-section count. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
+`index` discovers Python, TypeScript/JavaScript and Java/Maven units plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary and, when any section is impacted, an impacted-section count. Language units use their pinned Tier 1 SCIP indexer when available (installed automatically by `toolchain ensure` unless `--offline` is passed; add `--fetch-runtime` to also fetch the pinned portable JDK/Maven) and its runtime is available; otherwise they use the Tier 2 `tree-sitter` parser, while infrastructure units always use the pure-Python scanner. Every file row records its `tier` (`scip` or `tree-sitter`) and, for a Tier 2 fallback, the `fallback_reason`. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
 
 Each run also writes `<cache>/repos/<id>/master-index.json`, the compact module, file, symbol, entrypoint and unresolved-reference summary that `plan` and the workers read. It then snapshots the indexed tree to `<cache>/repos/<id>/state.json` (file and symbol signatures, the module-to-section map and the hashes of generated diagram blocks; see [section 5.1 of the spec](docs/SPEC.md)) and diffs the snapshot against the previous run into `index-delta.json` and `impacted-sections.json` next to `index.db`:
 
@@ -64,9 +64,9 @@ Each run also writes `<cache>/repos/<id>/master-index.json`, the compact module,
 
 Sections are read from existing documents through `<!-- SECTION:<id>:START -->`/`<!-- SECTION:<id>:END -->` markers, or from every `##` heading when a document has no markers; a start marker may carry the `:exempt` flag defined in [section 9.2 of the spec](docs/SPEC.md).
 
-Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing is not implemented yet. `--docs-dir` selects where the graph artifacts (`docs/graph.json` and `docs/flow-viewer.html`) are written, and where documents are read from and citations relocated. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
+`--docs-dir` selects where the graph artifacts (`docs/graph.json` and `docs/flow-viewer.html`) are written, and where documents are read from and citations relocated. `--offline --strict-tier1` exits `4` only when a required Tier 1 indexer or its runtime is not available; runtime failures such as OOM, timeout, missing `node_modules`, unresolved Maven artifacts or a failed build fall back to Tier 2 with the `fallback_reason` recorded. `--strict-tier1` without `--offline` also falls back to Tier 2.
 
-`ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning and that language falls back to Tier 2 tree-sitter indexing. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
+`ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning; `index` then either falls back to Tier 2 tree-sitter indexing for that language or, under `--offline --strict-tier1`, exits `4`. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
 
 ```bash
 arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
@@ -105,4 +105,4 @@ For multi-worker automated execution, see the Firstmate skill definition at [`sk
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`, including AUTO-DIAGRAM verification against `graph.json`), Tier 2 `tree-sitter` indexing (`index`), the delta engine (`state.json`, `index-delta.json`, `impacted-sections.json`, `--force-full`, `--auto-relocate-citations`), bounded worker planning (`plan`, `work-plan.json`), the assembly slice (`assemble`), deterministic graph export and Mermaid generation, the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`, `docs/flow-viewer.html`) and the read-only index queries (`query`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands and generated artifacts it specifies beyond these slices (SCIP Tier 1) are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`, including AUTO-DIAGRAM verification against `graph.json`), two-tier indexing (`index`: Tier 1 SCIP with Tier 2 `tree-sitter` fallback), the delta engine (`state.json`, `index-delta.json`, `impacted-sections.json`, `--force-full`, `--auto-relocate-citations`), bounded worker planning (`plan`, `work-plan.json`), the assembly slice (`assemble`), deterministic graph export and Mermaid generation, the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`, `docs/flow-viewer.html`) and the read-only index queries (`query`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands and generated artifacts it specifies beyond these slices are not implemented yet.

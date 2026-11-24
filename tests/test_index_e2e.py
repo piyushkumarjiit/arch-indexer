@@ -1,6 +1,7 @@
 import shutil
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from arch_indexer.cli import (
     EXIT_DELTA_DETECTED,
@@ -23,7 +24,7 @@ def test_index_command_e2e_python(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
     repo = copy_fixture("python", tmp_path)
 
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     captured = capsys.readouterr()
@@ -57,7 +58,7 @@ def test_index_command_e2e_mixed(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
     repo = copy_fixture("mixed", tmp_path)
 
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     captured = capsys.readouterr()
@@ -72,7 +73,8 @@ def test_index_strict_tier1_exits_toolchain_missing(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
     repo = copy_fixture("python", tmp_path)
 
-    code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
+    with patch("arch_indexer.cli.ensure_toolchain"):
+        code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     code = main(["index", str(repo), "--offline", "--strict-tier1", "--cache-dir", str(cache)])
@@ -84,7 +86,7 @@ def test_index_strict_tier1_exits_toolchain_missing(tmp_path: Path, capsys):
 
 def test_index_unreadable_repo_exits_error(tmp_path: Path, capsys):
     missing = tmp_path / "does_not_exist"
-    code = main(["index", str(missing)])
+    code = main(["index", "--offline", str(missing)])
     assert code == EXIT_ERROR
 
 
@@ -92,7 +94,7 @@ def test_chunk_files_must_be_positive(tmp_path: Path, capsys):
     cache = tmp_path / "cache"
     repo = copy_fixture("python", tmp_path)
 
-    code = main(["index", str(repo), "--chunk-files", "-5", "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--chunk-files", "-5", "--cache-dir", str(cache)])
     assert code == EXIT_ERROR
     assert "positive integer" in capsys.readouterr().err
 
@@ -110,7 +112,7 @@ def test_python_relative_and_src_layout_imports(tmp_path: Path, capsys):
     )
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -159,7 +161,7 @@ def test_typescript_index_import_and_alias(tmp_path: Path, capsys):
     )
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -188,7 +190,7 @@ def test_bare_call_names_are_language_and_kind_scoped(tmp_path: Path, capsys):
     (repo / "app.ts").write_text("export function callFetch() { fetch('http://x'); }\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -223,7 +225,7 @@ def test_python_project_root_imports(tmp_path: Path, capsys):
     )
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -260,7 +262,7 @@ def test_imported_names_shadow_external_imports(tmp_path: Path, capsys):
     (repo / "app.ts").write_text("import { format } from 'date-fns';\nformat('x');\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -285,7 +287,7 @@ def test_cross_language_module_tables(tmp_path: Path, capsys):
     (repo / "use.py").write_text("import types\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -313,7 +315,7 @@ def test_typescript_esm_js_specifier(tmp_path: Path, capsys):
     )
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -343,7 +345,7 @@ def test_cross_file_symbol_resolution(tmp_path: Path, capsys):
     (repo / "main.py").write_text("from utils import helper\n\ndef run():\n    helper()\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_files = list((cache / "repos").glob("*/index.db"))
@@ -393,7 +395,7 @@ def test_python_sibling_projects_keep_unique_fqnames(tmp_path: Path, capsys):
         )
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     conn = sqlite3.connect(next((cache / "repos").glob("*/index.db")))
@@ -422,7 +424,7 @@ def test_commonjs_require_shadows_repo_names(tmp_path: Path, capsys):
     (repo / "b.js").write_text("const format = require('date-fns/format');\nformat(d);\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     conn = sqlite3.connect(next((cache / "repos").glob("*/index.db")))
@@ -467,7 +469,7 @@ def test_colliding_unit_ids_keep_each_units_definitions(tmp_path: Path, capsys):
     (repo / "index.ts").write_text("export function main() { return 2; }\n")
 
     cache = tmp_path / "cache"
-    code = main(["index", str(repo), "--cache-dir", str(cache)])
+    code = main(["index", "--offline", str(repo), "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
     db_path = next((cache / "repos").glob("*/index.db"))
@@ -500,7 +502,7 @@ def test_offline_strict_tier1_failure_keeps_existing_index(tmp_path: Path, capsy
     cache = tmp_path / "cache"
     repo = copy_fixture("python", tmp_path)
 
-    assert main(["index", str(repo), "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
+    assert main(["index", "--offline", str(repo), "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
     db_path = next((cache / "repos").glob("*/index.db"))
     conn = sqlite3.connect(db_path)
     before = conn.execute("SELECT path, sha256 FROM files ORDER BY path").fetchall()

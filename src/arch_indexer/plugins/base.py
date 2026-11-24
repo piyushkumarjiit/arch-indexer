@@ -125,7 +125,11 @@ class LanguagePlugin(abc.ABC):
 
     @abc.abstractmethod
     def index_unit_tier1(
-        self, unit: IndexUnit, limits: dict[str, Any]
+        self,
+        unit: IndexUnit,
+        limits: dict[str, Any],
+        symbol_context: dict[str, Any] | None = None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult | FallbackSignal:
         """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
         raise NotImplementedError

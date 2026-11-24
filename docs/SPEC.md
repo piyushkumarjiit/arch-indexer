@@ -12,7 +12,7 @@ A thin Firstmate skill invokes `arch-indexer` and instructs the Firstmate orches
   2. **User Guide** (`docs/USER_GUIDE.md`)
 - **Footnoted traceability**: every technical claim cites `file:line` and symbol name in footnotes or a references block so prose remains clean.
 - **No LLM-authored graphs or diagrams**: graph JSON, Mermaid diagrams, and the interactive viewer are generated strictly by deterministic code.
-- **Network isolation**: only toolchain installation (`arch-indexer toolchain ensure`) may access the network. Indexing, querying, planning, diagram rendering, assembly, and validation run 100% offline.
+- **Network isolation**: only toolchain installation (`arch-indexer toolchain ensure`, including the automatic ensure that `arch-indexer index` runs unless `--offline` is passed) may access the network. Indexing with `--offline`, querying, planning, diagram rendering, assembly, and validation run 100% offline.
 - **No MCP servers**: all agent lookups use the local `arch-indexer query` CLI.
 - **Memory-safe on 7 GB RAM hosts (~5 GB free)**: bounded, configurable Node/JVM heap limits and per-package/chunked indexing.
 - **No target dependency installation by default**: target projects (including heavy GPU/ML Python repos or private-artifact Maven repos) are never `pip install`ed or forced to fetch private dependencies; unresolved references are recorded rather than failing the run.
@@ -31,13 +31,15 @@ arch-indexer/
 │   ├── cli.py                       # CLI commands and exit codes
 │   ├── config.py                    # Cache paths, memory limits, worker and diagram budgets
 │   ├── toolchain.py                 # Language detection & pinned tool installation
+│   ├── scip.py / scip_pb2.py        # Streaming SCIP protobuf ingest & generated message bindings
 │   ├── plugins/
 │   │   ├── base.py                  # LanguagePlugin interface & IndexingTier enum
 │   │   ├── python_plugin.py         # Tier 1: scip-python | Tier 2: tree-sitter-python
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
-│   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
+│   ├── store.py                     # SQLite schema & record persistence
+│   ├── indexer.py                   # Two-tier indexing orchestration & fallback recording
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
@@ -135,7 +137,7 @@ All external tools and parsers are pinned to exact versions:
 
 ### 3.3 Installation & Network Boundary
 - `arch-indexer toolchain ensure --repo <path>` detects languages in `<path>` and installs only the missing pinned indexers into `<cache>/tools/`.
-- `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed. With `--offline`, missing tools do not trigger network access: if a Tier 1 tool is missing, the plugin either falls back to Tier 2 (`--allow-fallback`, default) or exits with code `4` (`--strict-tier1`).
+- `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed; `index --fetch-runtime` is forwarded to that automatic ensure. With `--offline`, missing tools do not trigger network access: if a required Tier 1 indexer or its runtime is missing, the plugin falls back to Tier 2 by default, or exits with code `4` when `--strict-tier1` is also passed.
 - **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). If host `java`/`mvn` is absent and no pinned portable runtime has been fetched, Java falls back cleanly to Tier 2 tree-sitter (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK into `<cache>/runtimes/` for Java repos where host `java` is missing or too old, and the pinned Apache Maven only when the repo contains a `pom.xml` and host `mvn` is missing; it verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`. The flag governs downloads only: a runtime that was already downloaded and checksum-verified is reused on later `ensure` runs without the flag, and `ensure` prints one line naming each portable runtime it used (`downloaded` or `reused`). A failed runtime download exits non-zero after the independent Node tools have been installed and recorded.
 
 ---
@@ -158,7 +160,9 @@ Each language implements a uniform interface:
 ### 4.3 Tier Recording & Unresolved References
 Every indexed file row in `index.db` records:
 - `tier`: `"scip"` or `"tree-sitter"`
-- `fallback_reason`: `null` or short deterministic code (`"maven_unresolved_artifact"`, `"missing_node_modules"`, `"oom_limit"`, `"timeout"`, `"tool_unavailable"`)
+- `fallback_reason`: `null` or short deterministic code (`"maven_unresolved_artifact"`, `"missing_node_modules"`, `"oom_limit"`, `"timeout"`, `"tool_unavailable"`, `"build_failure"`, `"partial_scip_coverage"`)
+
+When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
 
 Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing.
 
@@ -173,6 +177,7 @@ All external indexer subprocesses receive strict, configurable caps:
 Core tables:
 - `files(path PK, language, sha256, line_count, module, tier, fallback_reason)`
 - `symbols(id PK, fqname, name, kind, file_path, start_line, end_line, body_sha256, visibility, decorators_json)`
+  - `visibility` and `decorators_json` are `NULL` when the tier that produced the row does not report them: SCIP carries neither, so a Tier 1 symbol with no matching Tier 2 symbol stores `NULL` rather than a guessed default. A JSON array such as `[]` means the tier recorded that the symbol has no decorators.
 - `references(id PK, symbol_fqname, file_path, line, col, ref_kind)` (`call`, `import`, `type`, `read`, `write`)
 - `entrypoints(id PK, kind, name, method, route_or_trigger, file_path, line, symbol_fqname, auth_symbols_json)`
   - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
@@ -295,16 +300,16 @@ Generated as a **single self-contained HTML file** with inline CSS and vanilla J
 
 ### 7.1 Commands
 ```bash
-# 1. Toolchain management (ONLY command allowed network access)
+# 1. Toolchain management (network-capable; installs the pinned indexers)
 arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>] [--fetch-runtime]
 arch-indexer toolchain status --repo <path>
 
 # 2. Deterministic indexing, delta detection, graph & viewer export
 arch-indexer index <repo> \
-  [--offline] [--strict-tier1] [--force-full] \
+  [--offline] [--fetch-runtime] [--strict-tier1] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] \
-  [--docs-dir docs] [--auto-relocate-citations]
+  [--docs-dir docs] [--auto-relocate-citations] [--cache-dir <dir>]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
@@ -341,7 +346,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
-| `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer is not present in the local cache. |
+| `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
 
 ---
 
