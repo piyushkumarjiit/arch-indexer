@@ -221,6 +221,13 @@ def _flow_diagram(
     boundaries = {**stores, **sinks}
 
     visited, selected = _reachable(entry_ids, _edge_map(graph))
+    known = set(nodes) | set(boundaries) | set(modules)
+    visited &= known
+    selected = [
+        edge
+        for edge in selected
+        if str(edge.get("source")) in known and str(edge.get("target")) in known
+    ]
     notes: list[str] = []
 
     def group_of(node_id: str) -> str:

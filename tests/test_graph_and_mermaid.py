@@ -305,3 +305,59 @@ def test_build_graph_from_store_matches_exported_graph(tmp_path):
     with IndexStore(cache) as store:
         rebuilt = build_graph(store, repo)
     assert json.dumps(rebuilt, sort_keys=True) == json.dumps(graph, sort_keys=True)
+
+
+def test_mermaid_tolerates_empty_and_dangling_graphs():
+    empty = {
+        "schema_version": "1.0",
+        "repo_name": "empty",
+        "modules": [],
+        "nodes": [],
+        "edges": [],
+        "data_stores": [],
+        "external_sinks": [],
+    }
+    overview = generate_diagram(empty, MODULE_OVERVIEW_ID)
+    assert overview is not None
+    assert validate_mermaid_block(overview.splitlines(), "docs/empty.md", 1) == []
+
+    dangling = {
+        **empty,
+        "modules": [
+            {
+                "id": "mod:a",
+                "name": "a",
+                "language": "python",
+                "path": "a",
+                "file_count": 1,
+                "tier": "scip",
+            }
+        ],
+        "nodes": [
+            {
+                "id": "ep:GET:/x",
+                "kind": "entrypoint",
+                "label": "GET /x",
+                "module_id": "mod:a",
+                "file": "a/api.py",
+                "line": 1,
+                "symbol": "x",
+                "tier": "scip",
+                "metadata": {"kind": "http", "method": "GET", "route": "/x"},
+            }
+        ],
+        "edges": [
+            {
+                "source": "ep:GET:/x",
+                "target": "sym:missing",
+                "kind": "calls",
+                "file": "a/api.py",
+                "line": 2,
+                "tier": "scip",
+            }
+        ],
+    }
+    flow = generate_diagram(dangling, "flow-x")
+    assert flow is not None
+    assert "sym_missing" not in flow
+    assert validate_mermaid_block(flow.splitlines(), "docs/dangling.md", 1) == []
