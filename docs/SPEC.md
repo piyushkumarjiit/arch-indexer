@@ -261,7 +261,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "unresolved_refs_count": 14
 }
 ```
-Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts.
+Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/known_symbols.py`.
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
@@ -306,12 +306,12 @@ arch-indexer index <repo> \
   [--docs-dir docs] [--auto-relocate-citations]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
-arch-indexer query <repo> def <symbol>
-arch-indexer query <repo> refs <symbol> [--limit 100]
-arch-indexer query <repo> file-symbols <rel-path>
-arch-indexer query <repo> entrypoints [--module <mod>]
-arch-indexer query <repo> module-summary <mod>
-arch-indexer query <repo> flow-trace <entrypoint-id>
+arch-indexer query <repo> def <symbol> [--json]
+arch-indexer query <repo> refs <symbol> [--limit 100] [--json]
+arch-indexer query <repo> file-symbols <rel-path> [--json]
+arch-indexer query <repo> entrypoints [--module <mod>] [--json]
+arch-indexer query <repo> module-summary <mod> [--json]
+arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
 
 # 4. Bounded worker planning
 arch-indexer plan <repo> \
