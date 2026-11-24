@@ -53,9 +53,8 @@ arch-indexer/
 │   ├── planner.py                   # Bounded worker packet generator
 │   └── assembler.py                 # Deterministic section merger & diagram injector
 ├── skills/
-│   └── firstmate/
-│       └── arch-indexer/
-│           └── SKILL.md             # Thin Firstmate orchestrator skill (copied/installed into Firstmate)
+│   └── arch-indexer/
+│       └── SKILL.md                 # Thin Firstmate orchestrator skill (copied/installed into Firstmate)
 └── tests/
     ├── fixtures/                    # Minimal Python, TS, Java/Maven, Infra fixture repos
     ├── test_indexing.py
