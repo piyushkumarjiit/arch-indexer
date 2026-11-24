@@ -636,7 +636,7 @@ def test_tier1_import_comments_do_not_label_later_references(tmp_path: Path):
 
     ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
     assert (1, "import") in ref_kinds
-    assert (3, "import") not in ref_kinds
+    assert (3, "call") in ref_kinds
 
 
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
@@ -2072,3 +2072,185 @@ def test_offline_strict_tier1_falls_back_on_runtime_failure(tmp_path: Path):
                 "SELECT tier, fallback_reason FROM files WHERE path='src/app.py'"
             ).fetchone()
             assert row == ("tree-sitter", "oom_limit")
+
+
+def test_derive_ref_kind_class_instantiation_vs_type_annotation():
+    """Class-descriptor references (#) are classified by usage: call vs type."""
+    # Syntax-based
+    fn_occ = scip_pb2.Occurrence(syntax_kind=int(scip_pb2.SyntaxKind.IdentifierFunction))
+    assert derive_ref_kind(fn_occ, "#") == "call"
+
+    type_occ = scip_pb2.Occurrence(syntax_kind=int(scip_pb2.SyntaxKind.IdentifierType))
+    assert derive_ref_kind(type_occ, "#") == "type"
+
+    # Line-text usage based
+    read_occ = scip_pb2.Occurrence(
+        symbol="pkg/User#",
+        symbol_roles=int(scip_pb2.SymbolRole.ReadAccess),
+        range=[5, 4, 8],
+    )
+    # User() call / instantiation
+    assert derive_ref_kind(read_occ, "#", line_text="    User()\n") == "call"
+    # new User() in TS/Java
+    new_occ = scip_pb2.Occurrence(
+        symbol="pkg/User#",
+        symbol_roles=int(scip_pb2.SymbolRole.ReadAccess),
+        range=[5, 8, 12],
+    )
+    assert derive_ref_kind(new_occ, "#", line_text="    new User()\n") == "call"
+    # u: User type annotation
+    assert derive_ref_kind(read_occ, "#", line_text="def foo(u: User):\n") == "type"
+    # -> User return annotation
+    assert derive_ref_kind(read_occ, "#", line_text="def foo() -> User:\n") == "type"
+    # default when no usage text provided
+    assert derive_ref_kind(read_occ, "#") == "type"
+
+
+def test_scip_python_local_symbol_aliased_import_resolves_call(tmp_path: Path):
+    """Local symbol with 'from ... import ... as ...' resolves call to target symbol."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text("from pkg import helper as my_helper\n\nmy_helper()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 app/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 pkg/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 8],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 16, 35],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 0, 9],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "test.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+    ref_map = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_map[(1, "pkg.helper")] == "import"
+    assert ref_map[(3, "pkg.helper")] == "call"
+
+
+def test_scip_python_local_symbol_without_scip_module_symbol(tmp_path: Path):
+    """When scip-python omits external module symbol, source line derives import."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text("from uninstalled_package import helper\n\nhelper()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    # scip only emitted local 0 without uninstalled_package symbol
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 app/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 32, 38],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 0, 6],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "test.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+    ref_map = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_map[(1, "uninstalled_package.helper")] == "import"
+    assert ref_map[(3, "uninstalled_package.helper")] == "call"
+
+
+def test_scip_python_local_symbol_definition_on_import_not_skipped(tmp_path: Path):
+    """Occurrence with SymbolRole.Definition on import line is recorded as import, not dropped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text("from pkg import util\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 app/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 pkg/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 8],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 16, 20],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "test.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+    ref_map = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_map[(1, "pkg.util")] == "import"
+    assert not any(s["name"] == "util" for s in res.symbols)

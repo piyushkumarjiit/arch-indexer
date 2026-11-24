@@ -359,3 +359,53 @@ def test_cli_check_mermaid_dispatch(tmp_path):
     (docs / "DESIGN.md").write_text("```mermaid\nflowchart TD\n  A -> B\n```\n", encoding="utf-8")
     code_err = main(["check-mermaid", str(repo), "--docs-dir", "docs"])
     assert code_err == 3
+
+
+def test_cli_index_runs_toolchain_ensure_automatically(tmp_path):
+    repo = FIXTURES_DIR / "python"
+    cache = tmp_path / "cache"
+
+    with (
+        patch("arch_indexer.cli.ensure_toolchain") as mock_ensure,
+        patch("arch_indexer.cli.run_index", return_value=EXIT_DELTA_DETECTED) as mock_index,
+    ):
+        code = main(["index", str(repo), "--cache-dir", str(cache)])
+        assert code == EXIT_DELTA_DETECTED
+        mock_ensure.assert_called_once_with(
+            str(repo),
+            cache_dir=str(cache),
+            fetch_runtime=False,
+        )
+        mock_index.assert_called_once()
+
+
+def test_cli_index_runs_toolchain_ensure_with_fetch_runtime(tmp_path):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+
+    with (
+        patch("arch_indexer.cli.ensure_toolchain") as mock_ensure,
+        patch("arch_indexer.cli.run_index", return_value=EXIT_DELTA_DETECTED) as mock_index,
+    ):
+        code = main(["index", str(repo), "--cache-dir", str(cache), "--fetch-runtime"])
+        assert code == EXIT_DELTA_DETECTED
+        mock_ensure.assert_called_once_with(
+            str(repo),
+            cache_dir=str(cache),
+            fetch_runtime=True,
+        )
+        mock_index.assert_called_once()
+
+
+def test_cli_index_offline_skips_toolchain_ensure(tmp_path):
+    repo = FIXTURES_DIR / "python"
+    cache = tmp_path / "cache"
+
+    with (
+        patch("arch_indexer.cli.ensure_toolchain") as mock_ensure,
+        patch("arch_indexer.cli.run_index", return_value=EXIT_DELTA_DETECTED) as mock_index,
+    ):
+        code = main(["index", str(repo), "--offline", "--cache-dir", str(cache)])
+        assert code == EXIT_DELTA_DETECTED
+        mock_ensure.assert_not_called()
+        mock_index.assert_called_once()
