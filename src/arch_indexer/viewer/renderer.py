@@ -10,9 +10,10 @@ from typing import Any
 def safe_json_embed(data: dict[str, Any]) -> str:
     """Serialize data to JSON, safely escaping HTML characters so labels cannot break script tags.
 
-    Standard Unicode escaping replaces '<', '>', and '&' with their '\\u00xx' sequences.
-    This guarantees that strings like '</script>' cannot be interpreted as HTML tags by
-    the browser, while JSON.parse faithfully recovers the exact original text.
+    The serialized '<', '>', and '&' characters are replaced with their JSON escapes
+    ('\\u003c', '\\u003e', '\\u0026'). This guarantees that strings like '</script>'
+    cannot be interpreted as HTML tags by the browser, while JSON.parse faithfully
+    recovers the exact original text.
     """
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return raw.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")

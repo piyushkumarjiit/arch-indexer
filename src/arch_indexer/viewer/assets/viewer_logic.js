@@ -375,6 +375,16 @@
   }
 
   /**
+   * Filter semantics, defined once here for every group (modules, kinds, tiers):
+   * each group holds the explicit set of selected values. All values selected means no
+   * restriction; an empty set excludes every leaf in that group (the UI shows an empty
+   * state). A container is visible when at least one leaf beneath it passes all groups;
+   * an aggregate edge is visible when at least one underlying raw edge connects leaves
+   * that pass all groups. A container with no leaves is visible only when every group is
+   * fully selected.
+   */
+
+  /**
    * Check whether a leaf node (symbol, data store, external sink) passes the filters.
    */
   function leafPassesFilters(node, activeFilters) {
