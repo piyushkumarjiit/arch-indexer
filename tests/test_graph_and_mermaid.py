@@ -20,6 +20,7 @@ from arch_indexer.config import (
     DEFAULT_MAX_DIAGRAM_NODES,
 )
 from arch_indexer.graph import build_graph, load_graph, module_key
+from arch_indexer.graph_rules import classify_image, classify_token
 from arch_indexer.mermaid_gen import (
     MODULE_OVERVIEW_ID,
     diagram_ids,
@@ -298,15 +299,14 @@ def test_module_overview_aggregates_module_edges(tmp_path):
 
 
 def test_module_key_groups_by_module_directory():
-    # Oracle: a module key names the module directory, so container roots
-    # (source roots, the Python project package, the Java reverse-domain prefix)
-    # never become the module for every file of a repository.
+    # Oracle: a module key names the module directory, stripping source roots
+    # and Java reverse-domain prefixes without dropping package depth.
     assert module_key("src.orders.service", "typescript") == "orders"
     assert module_key("src.auth.login", "typescript") == "auth"
     assert module_key("com.acme.orders", "java") == "orders"
     assert module_key("com.acme.billing", "java") == "billing"
-    assert module_key("backend.app.orders.routes", "python") == "orders"
-    assert module_key("backend.app.users", "python") == "users"
+    assert module_key("services.orders.app.db", "python") == "orders"
+    assert module_key("orders.api.routes", "python") == "orders"
     assert module_key("app.main", "python") == "main"
     assert module_key("", "python") == "root"
 
@@ -554,3 +554,356 @@ def test_mermaid_tolerates_empty_and_dangling_graphs():
     assert flow is not None
     assert "sym_missing" not in flow
     assert validate_mermaid_block(flow.splitlines(), "docs/dangling.md", 1) == []
+
+
+def test_build_graph_preserves_python_monorepo_and_flat_packages(tmp_path):
+    # Oracle: distinct top-level services/packages keep separate mod:* buckets
+    # regardless of nesting depth, while a container prefix shared by all
+    # Python files (tested above via backend.app.*) is stripped.
+    monorepo = tmp_path / "monorepo"
+    monorepo.mkdir()
+    with IndexStore(tmp_path / "mono.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "services/orders/app/db.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 10,
+                    "module": "services.orders.app.db",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "services/users/app/db.py",
+                    "language": "python",
+                    "sha256": "b" * 64,
+                    "line_count": 10,
+                    "module": "services.users.app.db",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        graph = build_graph(store, monorepo)
+    assert {module["id"] for module in graph["modules"]} == {"mod:orders", "mod:users"}
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    with IndexStore(tmp_path / "flat.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "orders/models.py",
+                    "language": "python",
+                    "sha256": "c" * 64,
+                    "line_count": 10,
+                    "module": "orders.models",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "orders/api/routes.py",
+                    "language": "python",
+                    "sha256": "d" * 64,
+                    "line_count": 10,
+                    "module": "orders.api.routes",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "billing/api/routes.py",
+                    "language": "python",
+                    "sha256": "e" * 64,
+                    "line_count": 10,
+                    "module": "billing.api.routes",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        graph = build_graph(store, flat)
+    assert {module["id"] for module in graph["modules"]} == {"mod:orders", "mod:billing"}
+
+
+def test_boundary_rules_handle_registry_prefixes_scoped_packages_and_internal_symbols(tmp_path):
+    # Oracle: container images with registry/org prefixes and scoped npm or
+    # slash-delimited packages classify cleanly, while resolved internal
+    # symbols never turn into boundaries even when a sibling import is unresolved.
+    assert classify_image("docker.io/library/redis:7") == ("cache", "redis", "Redis")
+    assert classify_image("bitnami/postgresql:15") == ("sql", "postgres", "PostgreSQL")
+    assert classify_image("apache/kafka:3.7") == ("queue", "kafka", "Kafka")
+
+    assert classify_token("@prisma/client") == (
+        "datastore",
+        "sql",
+        "prisma",
+        "SQL database (Prisma)",
+    )
+    assert classify_token("@sendgrid/mail") == ("sink", "smtp", "sendgrid", "SendGrid")
+    assert classify_token("stripe/lib") == ("sink", "http_api", "stripe", "Stripe API")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with IndexStore(tmp_path / "store.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "app/service.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 30,
+                    "module": "app.service",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "app/schemas/requests.py",
+                    "language": "python",
+                    "sha256": "b" * 64,
+                    "line_count": 10,
+                    "module": "app.schemas.requests",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "app.service.run",
+                    "name": "run",
+                    "kind": "function",
+                    "file_path": "app/service.py",
+                    "start_line": 1,
+                    "end_line": 20,
+                    "body_sha256": "c" * 64,
+                },
+                {
+                    "fqname": "app.schemas.requests.CreateOrder",
+                    "name": "CreateOrder",
+                    "kind": "class",
+                    "file_path": "app/schemas/requests.py",
+                    "start_line": 1,
+                    "end_line": 5,
+                    "body_sha256": "d" * 64,
+                },
+            ]
+        )
+        store.insert_references(
+            [
+                {
+                    "symbol_fqname": "app.schemas.requests.CreateOrder",
+                    "file_path": "app/service.py",
+                    "line": 5,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "@prisma/client.PrismaClient",
+                    "file_path": "app/service.py",
+                    "line": 8,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+            ]
+        )
+        store.insert_unresolved_refs(
+            [
+                {
+                    "file_path": "app/service.py",
+                    "line": 1,
+                    "raw_symbol": "app.legacy",
+                    "language": "python",
+                },
+                {
+                    "file_path": "app/service.py",
+                    "line": 2,
+                    "raw_symbol": "@prisma/client",
+                    "language": "typescript",
+                },
+                {
+                    "file_path": "app/service.py",
+                    "line": 3,
+                    "raw_symbol": "@sendgrid/mail",
+                    "language": "typescript",
+                },
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    assert [store["id"] for store in graph["data_stores"]] == ["ds:prisma"]
+    assert [sink["id"] for sink in graph["external_sinks"]] == ["ext:sendgrid"]
+
+
+def test_multi_route_handler_emits_edges_for_every_bound_entrypoint(tmp_path):
+    # Oracle: when one handler serves multiple routes/methods, every emitted
+    # entrypoint node must carry the handler's outgoing call and boundary edges.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with IndexStore(tmp_path / "store.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "orders/routes.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 25,
+                    "module": "orders.routes",
+                    "tier": "tree-sitter",
+                }
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "orders.routes.orders_handler",
+                    "name": "orders_handler",
+                    "kind": "function",
+                    "file_path": "orders/routes.py",
+                    "start_line": 5,
+                    "end_line": 15,
+                    "body_sha256": "b" * 64,
+                },
+                {
+                    "fqname": "orders.routes.load_orders",
+                    "name": "load_orders",
+                    "kind": "function",
+                    "file_path": "orders/routes.py",
+                    "start_line": 17,
+                    "end_line": 22,
+                    "body_sha256": "c" * 64,
+                },
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "orders_handler",
+                    "method": "GET",
+                    "route_or_trigger": "/orders",
+                    "file_path": "orders/routes.py",
+                    "line": 5,
+                    "symbol_fqname": "orders.routes.orders_handler",
+                    "auth_symbols_json": "[]",
+                },
+                {
+                    "kind": "http",
+                    "name": "orders_handler",
+                    "method": "POST",
+                    "route_or_trigger": "/orders",
+                    "file_path": "orders/routes.py",
+                    "line": 5,
+                    "symbol_fqname": "orders.routes.orders_handler",
+                    "auth_symbols_json": "[]",
+                },
+            ]
+        )
+        store.insert_references(
+            [
+                {
+                    "symbol_fqname": "orders.routes.load_orders",
+                    "file_path": "orders/routes.py",
+                    "line": 8,
+                    "col": 4,
+                    "ref_kind": "call",
+                }
+            ]
+        )
+        store.insert_unresolved_refs(
+            [
+                {
+                    "file_path": "orders/routes.py",
+                    "line": 10,
+                    "raw_symbol": "redis.get",
+                    "language": "python",
+                }
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    assert {(edge["source"], edge["target"], edge["kind"]) for edge in graph["edges"]} == {
+        ("ep:GET:/orders", "sym:orders.routes.load_orders", "calls"),
+        ("ep:GET:/orders", "ds:redis", "reads"),
+        ("ep:POST:/orders", "sym:orders.routes.load_orders", "calls"),
+        ("ep:POST:/orders", "ds:redis", "reads"),
+    }
+    flow = generate_diagram(graph, "flow-orders")
+    assert flow is not None
+    assert f"{mermaid_id('ep:GET:/orders')} -->|calls|" in flow
+    assert f"{mermaid_id('ep:POST:/orders')} -->|calls|" in flow
+
+
+def test_flow_diagram_deduplicates_before_edge_budget_slicing():
+    # Oracle: repeated call sites between the same (source, target, kind) merge
+    # into a single Mermaid edge and must not consume budget slots or drop
+    # distinct edges.
+    repeated_calls = [
+        {
+            "source": "ep:POST:/checkout",
+            "target": "sym:a_helper",
+            "kind": "calls",
+            "file": "checkout.py",
+            "line": line,
+            "tier": "scip",
+        }
+        for line in range(1, 62)
+    ]
+    graph = {
+        "schema_version": "1.0",
+        "repo_name": "shop",
+        "modules": [
+            {
+                "id": "mod:checkout",
+                "name": "checkout",
+                "language": "python",
+                "path": "checkout",
+                "file_count": 1,
+                "tier": "scip",
+            }
+        ],
+        "nodes": [
+            {
+                "id": "ep:POST:/checkout",
+                "kind": "entrypoint",
+                "label": "POST /checkout",
+                "module_id": "mod:checkout",
+                "file": "checkout.py",
+                "line": 1,
+                "symbol": "checkout",
+                "tier": "scip",
+                "metadata": {"kind": "http", "method": "POST", "route": "/checkout"},
+            },
+            {
+                "id": "sym:a_helper",
+                "kind": "service",
+                "label": "a_helper",
+                "module_id": "mod:checkout",
+                "file": "checkout.py",
+                "line": 100,
+                "symbol": "a_helper",
+                "tier": "scip",
+                "metadata": {"symbol_kind": "function"},
+            },
+        ],
+        "edges": [
+            *repeated_calls,
+            {
+                "source": "ep:POST:/checkout",
+                "target": "ext:stripe",
+                "kind": "http_request",
+                "file": "checkout.py",
+                "line": 70,
+                "tier": "scip",
+            },
+        ],
+        "data_stores": [],
+        "external_sinks": [
+            {
+                "id": "ext:stripe",
+                "kind": "http_api",
+                "label": "Stripe API",
+                "evidence": ["checkout.py:70"],
+            }
+        ],
+    }
+
+    flow = generate_diagram(graph, "flow-checkout", max_nodes=10, max_edges=5)
+    assert flow is not None
+    assert "budget" not in flow
+    assert f"{mermaid_id('ep:POST:/checkout')} -->|calls| {mermaid_id('sym:a_helper')}" in flow
+    assert f"{mermaid_id('ep:POST:/checkout')} -->|http_request| {mermaid_id('ext:stripe')}" in flow

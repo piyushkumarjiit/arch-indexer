@@ -114,7 +114,7 @@ def _matches(fragment: str, lowered: str, *, allow_prefix: bool, split_words: bo
     """
     if "." in fragment:
         return fragment in lowered
-    separators = r"[._-]" if split_words else r"[.-]"
+    separators = r"[._/@-]" if split_words else r"[./@-]"
     for segment in re.split(separators, lowered):
         if segment == fragment:
             return True

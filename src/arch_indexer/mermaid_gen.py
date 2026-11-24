@@ -210,6 +210,31 @@ def _reachable(
     return visited, selected
 
 
+def _dedup_flow_edges(
+    edges: list[dict[str, Any]],
+    visited: set[str],
+    remap: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Normalize and deduplicate flow edges by ``(source, target, kind)``."""
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for edge in edges:
+        source = str(edge.get("source"))
+        target = str(edge.get("target"))
+        if remap is not None:
+            source = remap.get(source, source)
+            target = remap.get(target, target)
+        if source not in visited or target not in visited or source == target:
+            continue
+        kind = re.sub(r"[^A-Za-z_]+", "_", str(edge.get("kind")))
+        key = (source, target, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"source": source, "target": target, "kind": kind})
+    return deduped
+
+
 def _flow_diagram(
     graph: dict[str, Any],
     diagram_id: str,
@@ -224,14 +249,10 @@ def _flow_diagram(
     sinks = {sink["id"]: sink for sink in graph.get("external_sinks", [])}
     boundaries = {**stores, **sinks}
 
-    visited, selected = _reachable(entry_ids, _edge_map(graph))
+    visited, raw_selected = _reachable(entry_ids, _edge_map(graph))
     known = set(nodes) | set(boundaries) | set(modules)
     visited &= known
-    selected = [
-        edge
-        for edge in selected
-        if str(edge.get("source")) in known and str(edge.get("target")) in known
-    ]
+    selected = _dedup_flow_edges(raw_selected, visited)
     notes: list[str] = []
 
     def group_of(node_id: str) -> str:
@@ -251,24 +272,14 @@ def _flow_diagram(
             if group_of(node_id) == "service" and str(nodes[node_id].get("module_id")) in modules
         }
         if remap:
-            aggregated_nodes = {remap.get(node_id, node_id) for node_id in visited}
-            aggregated_edges: list[dict[str, Any]] = []
-            seen: set[tuple[str, str, str]] = set()
-            for edge in selected:
-                source = remap.get(str(edge.get("source")), str(edge.get("source")))
-                target = remap.get(str(edge.get("target")), str(edge.get("target")))
-                key = (source, target, str(edge.get("kind")))
-                if source == target or key in seen:
-                    continue
-                seen.add(key)
-                aggregated_edges.append({"source": source, "target": target, "kind": key[2]})
-            visited, selected = aggregated_nodes, aggregated_edges
+            visited = {remap.get(node_id, node_id) for node_id in visited}
+            selected = _dedup_flow_edges(selected, visited, remap=remap)
             notes.append("service nodes collapsed to their modules")
 
     if len(visited) > max_nodes or len(selected) > max_edges:
         degree: dict[str, int] = {}
         for edge in selected:
-            for endpoint in (str(edge.get("source")), str(edge.get("target"))):
+            for endpoint in (edge["source"], edge["target"]):
                 degree[endpoint] = degree.get(endpoint, 0) + 1
         ordered: list[str] = []
         for group in ("entry", "boundary"):
@@ -280,18 +291,10 @@ def _flow_diagram(
             )
         )
         kept = set(ordered[:max_nodes])
-        selected = [
-            edge
-            for edge in selected
-            if str(edge.get("source")) in kept and str(edge.get("target")) in kept
-        ]
+        selected = _dedup_flow_edges(selected, kept)
         selected = sorted(
             selected,
-            key=lambda edge: (
-                str(edge.get("source")),
-                str(edge.get("target")),
-                str(edge.get("kind")),
-            ),
+            key=lambda edge: (edge["source"], edge["target"], edge["kind"]),
         )[:max_edges]
         visited = kept
         notes.append("flow truncated to the node/edge budget")
@@ -310,24 +313,13 @@ def _flow_diagram(
         lines.append("  " + _budget_note("; ".join(notes), max_nodes, max_edges))
     for node_id in sorted(visited, key=lambda nid: (group_of(nid), nid)):
         lines.append(_declaration(node_id, label_for(node_id)))
-    edge_keys: set[tuple[str, str, str]] = set()
     for edge in sorted(
         selected,
-        key=lambda item: (
-            str(item.get("source")),
-            str(item.get("target")),
-            str(item.get("kind")),
-        ),
+        key=lambda item: (item["source"], item["target"], item["kind"]),
     ):
-        source, target = str(edge.get("source")), str(edge.get("target"))
-        kind = re.sub(r"[^A-Za-z_]+", "_", str(edge.get("kind")))
-        if source not in visited or target not in visited or source == target:
-            continue
-        key = (source, target, kind)
-        if key in edge_keys:
-            continue
-        edge_keys.add(key)
-        lines.append(f"  {mermaid_id(source)} -->|{kind}| {mermaid_id(target)}")
+        src_id = mermaid_id(edge["source"])
+        dst_id = mermaid_id(edge["target"])
+        lines.append(f"  {src_id} -->|{edge['kind']}| {dst_id}")
     return "\n".join(lines)
 
 

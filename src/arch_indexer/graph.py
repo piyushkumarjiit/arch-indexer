@@ -61,11 +61,32 @@ def module_key(module: str, language: str) -> str:
         parts = parts[2:] or parts[-1:]
     while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
         parts = parts[1:]
-    if language == "python" and len(parts) >= 3:
-        parts = parts[1:]
+    return parts[0] if parts else "root"
+
+
+def _python_module_keys(file_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Compute Python module keys, stripping a container prefix shared by all Python files."""
+    split_parts: dict[str, list[str]] = {}
+    for row in file_rows:
+        if row["language"] != "python":
+            continue
+        parts = [part for part in row["module"].split(".") if part]
         while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
             parts = parts[1:]
-    return parts[0] if parts else "root"
+        split_parts[row["path"]] = parts
+
+    if (
+        len(split_parts) > 1
+        and all(len(parts) > 1 for parts in split_parts.values())
+        and len({parts[0] for parts in split_parts.values()}) == 1
+    ):
+        for path, parts in split_parts.items():
+            trimmed = parts[1:]
+            while len(trimmed) > 1 and trimmed[0] in _SOURCE_ROOTS:
+                trimmed = trimmed[1:]
+            split_parts[path] = trimmed
+
+    return {path: (parts[0] if parts else "root") for path, parts in split_parts.items()}
 
 
 def _common_dir(paths: list[str]) -> str:
@@ -109,8 +130,13 @@ def _build_modules(
     grouped: dict[str, dict[str, Any]] = {}
     module_by_file: dict[str, str] = {}
     tier_by_file: dict[str, str] = {}
+    py_keys = _python_module_keys(file_rows)
     for row in file_rows:
-        key = module_key(row["module"], row["language"])
+        key = (
+            py_keys[row["path"]]
+            if row["language"] == "python"
+            else module_key(row["module"], row["language"])
+        )
         module_id = f"mod:{key}"
         module_by_file[row["path"]] = module_id
         tier_by_file[row["path"]] = row["tier"]
@@ -168,10 +194,10 @@ def _entrypoint_nodes(
     entrypoint_rows: list[dict[str, Any]],
     module_by_file: dict[str, str],
     tier_by_file: dict[str, str],
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Build stable entrypoint nodes and a handler-symbol to node-id map."""
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Build stable entrypoint nodes and a handler-symbol to node-ids map."""
     nodes: list[dict[str, Any]] = []
-    handler_to_node: dict[str, str] = {}
+    handler_to_nodes: dict[str, list[str]] = {}
     used: set[str] = set()
 
     for row in entrypoint_rows:
@@ -218,9 +244,9 @@ def _entrypoint_nodes(
             }
         )
         fqname = row["symbol_fqname"]
-        if fqname and fqname not in handler_to_node:
-            handler_to_node[fqname] = node_id
-    return nodes, handler_to_node
+        if fqname:
+            handler_to_nodes.setdefault(fqname, []).append(node_id)
+    return nodes, handler_to_nodes
 
 
 def _boundary_id(boundary: str, canonical: str) -> str:
@@ -230,7 +256,9 @@ def _boundary_id(boundary: str, canonical: str) -> str:
 
 def _external_root(symbol: str) -> str:
     """Package prefix that identifies a symbol as coming from an external import."""
-    parts = symbol.split(".")
+    parts = [part for part in re.split(r"[./@]", symbol) if part]
+    if not parts:
+        return ""
     head = parts[0].lower()
     if head in _REVERSE_DOMAIN_TLDS and len(parts) > 1:
         return ".".join(parts[:2]).lower()
@@ -241,6 +269,7 @@ def _collect_boundaries(
     ref_rows: list[dict[str, Any]],
     unresolved_rows: list[dict[str, Any]],
     symbols_by_file: dict[str, list[dict[str, Any]]],
+    symbols_by_fqname: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Detect data stores/sinks and the symbol-to-boundary edges that use them."""
     boundaries: dict[str, dict[str, Any]] = {}
@@ -272,8 +301,11 @@ def _collect_boundaries(
 
     external_roots = {_external_root(row["raw_symbol"]) for row in unresolved_rows}
     for row in ref_rows:
-        if _external_root(row["symbol_fqname"]) in external_roots:
-            consider(row["symbol_fqname"], row["file_path"], row["line"])
+        fqname = row["symbol_fqname"]
+        if fqname in symbols_by_fqname:
+            continue
+        if _external_root(fqname) in external_roots:
+            consider(fqname, row["file_path"], row["line"])
     for row in unresolved_rows:
         consider(row["raw_symbol"], row["file_path"], row["line"])
     return boundaries, candidates
@@ -360,9 +392,10 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
     entrypoint_rows = _row_dicts(
         store,
         "SELECT kind, name, method, route_or_trigger, file_path, line, symbol_fqname, "
-        "auth_symbols_json FROM entrypoints ORDER BY file_path, line, kind, name",
+        "auth_symbols_json FROM entrypoints "
+        "ORDER BY file_path, line, kind, name, method, route_or_trigger",
     )
-    entrypoint_nodes, handler_to_node = _entrypoint_nodes(
+    entrypoint_nodes, handler_to_nodes = _entrypoint_nodes(
         entrypoint_rows, module_by_file, tier_by_file
     )
 
@@ -383,7 +416,7 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
     )
 
     boundaries, boundary_candidates = _collect_boundaries(
-        ref_rows, unresolved_rows, symbols_by_file
+        ref_rows, unresolved_rows, symbols_by_file, symbols_by_fqname
     )
     for boundary_id, record in _collect_infra_boundaries(infra_rows).items():
         merged = boundaries.setdefault(boundary_id, record)
@@ -413,13 +446,13 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
     service_fqnames = _select_service_symbols(
         call_pairs,
         {candidate["source_fqname"] for candidate in boundary_candidates},
-        set(handler_to_node),
+        set(handler_to_nodes),
     )
 
-    def node_id_for(fqname: str) -> str | None:
-        if fqname in handler_to_node:
-            return handler_to_node[fqname]
-        return f"sym:{fqname}" if fqname in service_fqnames else None
+    def node_ids_for(fqname: str) -> list[str]:
+        if fqname in handler_to_nodes:
+            return handler_to_nodes[fqname]
+        return [f"sym:{fqname}"] if fqname in service_fqnames else []
 
     service_nodes: list[dict[str, Any]] = []
     for fqname in sorted(service_fqnames):
@@ -447,37 +480,40 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
         edge_map.setdefault(key, edge)
 
     for call in call_edges:
-        source = node_id_for(call["source_fqname"])
-        target = node_id_for(call["target_fqname"])
-        if source is None or target is None or source == target:
-            continue
-        add_edge(
-            {
-                "source": source,
-                "target": target,
-                "kind": "calls",
-                "file": call["file"],
-                "line": call["line"],
-                "tier": tier_by_file.get(call["file"], "tree-sitter"),
-            }
-        )
+        sources = node_ids_for(call["source_fqname"])
+        targets = node_ids_for(call["target_fqname"])
+        tier = tier_by_file.get(call["file"], "tree-sitter")
+        for source in sources:
+            for target in targets:
+                if source == target:
+                    continue
+                add_edge(
+                    {
+                        "source": source,
+                        "target": target,
+                        "kind": "calls",
+                        "file": call["file"],
+                        "line": call["line"],
+                        "tier": tier,
+                    }
+                )
 
     for candidate in boundary_candidates:
-        source = node_id_for(candidate["source_fqname"])
-        if source is None:
-            continue
-        add_edge(
-            {
-                "source": source,
-                "target": candidate["target"],
-                "kind": edge_kind_for_token(
-                    candidate["token"], boundary_kind=candidate["boundary_kind"]
-                ),
-                "file": candidate["file"],
-                "line": candidate["line"],
-                "tier": tier_by_file.get(candidate["file"], "tree-sitter"),
-            }
+        edge_kind = edge_kind_for_token(
+            candidate["token"], boundary_kind=candidate["boundary_kind"]
         )
+        tier = tier_by_file.get(candidate["file"], "tree-sitter")
+        for source in node_ids_for(candidate["source_fqname"]):
+            add_edge(
+                {
+                    "source": source,
+                    "target": candidate["target"],
+                    "kind": edge_kind,
+                    "file": candidate["file"],
+                    "line": candidate["line"],
+                    "tier": tier,
+                }
+            )
 
     edges = sorted(
         edge_map.values(),
