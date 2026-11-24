@@ -309,9 +309,9 @@ def test_tier1_cross_unit_references_align_to_repo_module_namespace(tmp_path: Pa
         root_dir=repo,
         files=[orders],
     )
-    order_module = "scip-python python pkg 0.1.0 `orders.main`/"
-    user_sym = "scip-python python pkg 0.1.0 `auth.models`/User#"
-    save_sym = "scip-python python pkg 0.1.0 `auth.models`/User#save()."
+    order_module = "scip-python python pkg 0.1.0 `src.orders.main`/"
+    user_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#"
+    save_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#save()."
     requests_sym = "scip-python python pkg 0.1.0 requests/__init__:"
     scip_index = scip_pb2.Index(
         documents=[
@@ -457,9 +457,9 @@ def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
     """References align to stored modules when the target project root is a subdirectory."""
     repo = tmp_path / "repo"
     backend = repo / "backend"
-    (backend / "auth").mkdir(parents=True)
+    (backend / "src" / "auth").mkdir(parents=True)
     (backend / "pyproject.toml").write_text("[project]\nname = 'backend'\n")
-    (backend / "auth" / "models.py").write_text("class User:\n    pass\n")
+    (backend / "src" / "auth" / "models.py").write_text("class User:\n    pass\n")
     manage = repo / "manage.py"
     manage.write_text("from auth.models import User\n\nUser()\n")
 
@@ -471,7 +471,7 @@ def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
         files=[manage],
     )
     root_module = "scip-python python pkg 0.1.0 `manage`/"
-    user_sym = "scip-python python pkg 0.1.0 `auth.models`/User#"
+    user_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#"
     scip_index = scip_pb2.Index(
         documents=[
             scip_pb2.Document(
@@ -502,7 +502,7 @@ def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
     symbol_context = {
         "file_records": {
             "python": [
-                {"path": "backend/auth/models.py", "module": "backend.auth.models"},
+                {"path": "backend/src/auth/models.py", "module": "backend.auth.models"},
                 {"path": "manage.py", "module": "manage"},
             ]
         },

@@ -429,11 +429,14 @@ def _emitter_module_prefix(
     unit: IndexUnit, rel_path: str, root_cache: dict[tuple[str, ...], bool] | None = None
 ) -> str:
     """Return the module namespace the language's SCIP emitter uses for a file."""
+    prefix = _scip_module_prefix(unit.language, rel_path)
     if unit.language == "python":
         from arch_indexer.plugins.python_plugin import _module_info
 
-        return _module_info(unit.root_dir, rel_path, root_cache)[1]
-    return _scip_module_prefix(unit.language, rel_path)
+        project = _module_info(unit.root_dir, rel_path, root_cache)[3].replace("/", ".")
+        if project and prefix.startswith(project + "."):
+            return prefix[len(project) + 1 :]
+    return prefix
 
 
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
