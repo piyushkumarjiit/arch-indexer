@@ -878,3 +878,174 @@ def test_shared_modules_not_double_counted_in_greedy_packing(tmp_path: Path):
     assert plan2["packets"][0]["line_count"] == 100
     assert plan2["packets"][0]["symbol_count"] == 10
 
+
+def test_deleted_file_exclusive_path_and_root_key_no_misattribution(tmp_path: Path):
+    """Nested dir matching module name and source-root prefix do not misattribute deletions."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {
+            "name": "app",
+            "path": "src",
+            "line_count": 40,
+            "symbol_count": 4,
+            "files": ["src/app.py"],
+        },
+        {
+            "name": "billing",
+            "path": "src/billing",
+            "line_count": 100,
+            "symbol_count": 10,
+            "files": ["src/billing/invoices.py"],
+        },
+        {
+            "name": "orders",
+            "path": "src/orders",
+            "line_count": 100,
+            "symbol_count": 10,
+            "files": ["src/orders/cart.py"],
+        },
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec1",
+            "heading": "1. Architecture Overview",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["modified_file"],
+        },
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["billing", "orders"],
+            "diagram_ids": [],
+            "cited_files": ["src/billing/invoices.py", "src/orders/cart.py"],
+            "reasons": ["deleted_file"],
+        },
+    ]
+    delta = {
+        "added_files": [],
+        "added_symbols": [],
+        "deleted_files": [
+            "src/orders/billing/old_adapter.py",
+            "app/orders/legacy.py",
+        ],
+        "deleted_symbols": [
+            {
+                "file_path": "src/orders/billing/old_adapter.py",
+                "fqname": "orders.billing.old_adapter.adapt",
+                "kind": "function",
+                "name": "adapt",
+                "start_line": 1,
+                "end_line": 3,
+            },
+            {
+                "file_path": "app/orders/legacy.py",
+                "fqname": "orders.legacy.old_fn",
+                "kind": "function",
+                "name": "old_fn",
+                "start_line": 1,
+                "end_line": 2,
+            },
+        ],
+        "is_first_run": False,
+        "modified_files": ["src/app.py"],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=delta
+    )
+    assert run_plan(repo, max_lines_per_worker=120, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packets = {p["packet_id"]: p for p in plan["packets"]}
+
+    # 'app' at src/app.py must not claim 'app/orders/legacy.py' ('app' is a source root)
+    assert packets["design-sec1"]["delta_slice"]["deleted_files"] == []
+    assert packets["design-sec1"]["delta_slice"]["deleted_symbols"] == []
+
+    # 'billing' with exclusive path 'src/billing' must not claim 'src/orders/billing/old_adapter.py'
+    assert packets["design-sec2-mod-billing"]["delta_slice"]["deleted_files"] == []
+    assert packets["design-sec2-mod-billing"]["delta_slice"]["deleted_symbols"] == []
+
+    # 'orders' owns 'src/orders/billing/old_adapter.py'
+    assert packets["design-sec2-mod-orders"]["delta_slice"]["deleted_files"] == [
+        "src/orders/billing/old_adapter.py"
+    ]
+    assert {s["name"] for s in packets["design-sec2-mod-orders"]["delta_slice"]["deleted_symbols"]} == {
+        "adapt"
+    }
+
+
+def test_polyglot_shared_canonical_module_no_duplicate_packet(tmp_path: Path):
+    """Non-oversized section and missing_section mapping to same canonical module emit one packet."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {
+            "name": "billing",
+            "language": "python",
+            "path": ".",
+            "line_count": 150,
+            "symbol_count": 15,
+            "files": ["src/billing/invoices.py", "packages/billing/api.ts"],
+        },
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["src", "src.billing", "src.billing.invoices"],
+            "diagram_ids": [],
+            "cited_files": ["src/billing/invoices.py"],
+            "reasons": ["modified_file"],
+        },
+    ]
+    missing_sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "2-components-modules-packages.billing.api",
+            "heading": "2. Components & Modules: packages.billing.api",
+            "module": "packages.billing.api",
+            "reasons": ["section_missing", "module_added"],
+        },
+    ]
+    delta = {
+        "added_files": ["packages/billing/api.ts"],
+        "added_symbols": [],
+        "deleted_files": [],
+        "deleted_symbols": [],
+        "is_first_run": False,
+        "modified_files": ["src/billing/invoices.py"],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+
+    cache_paths = _setup_synthetic_cache(
+        repo,
+        cache,
+        modules=modules,
+        impacted_sections=sections,
+        missing_sections=missing_sections,
+        delta=delta,
+    )
+    assert run_plan(repo, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert plan["total_packets"] == 1
+    pkt = plan["packets"][0]
+    assert pkt["packet_id"] == "design-sec2"
+    assert pkt["assigned_modules"] == ["billing"]
+    assert pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
+    assert pkt["delta_slice"]["added_files"] == ["packages/billing/api.ts"]
+

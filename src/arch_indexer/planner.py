@@ -241,30 +241,36 @@ def _specific_module_paths(module_paths: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def _path_module_key(file_path: str, language: str = "python") -> str:
+    """Derive a canonical module key from a file path using graph.module_key rules."""
+    parts = list(PurePosixPath(file_path).with_suffix("").parts)
+    if parts and parts[-1] in ("__init__", "index") and len(parts) > 1:
+        parts = parts[:-1]
+    if (
+        len(parts) >= 4
+        and parts[0] == "src"
+        and parts[1] in ("main", "test")
+        and parts[2] in ("java", "kotlin", "scala")
+    ):
+        parts = parts[3:]
+    return module_key(".".join(parts), language)
+
+
 def _file_belongs_to_module(
     file_path: str,
     mod: str,
     specific_paths: Mapping[str, str],
 ) -> bool:
-    """Match a file path against a canonical module by path boundary."""
-    mod_path = specific_paths.get(mod, "")
-    if mod_path and (file_path == mod_path or file_path.startswith(f"{mod_path}/")):
-        return True
+    """Match a file path against a canonical module by exclusive path or path-derived key."""
     if mod == "infra" and is_infra_file(file_path):
         return True
-    parts = PurePosixPath(file_path).parts
-    if not parts:
-        return False
-    dir_parts = parts[:-1]
+    if mod in specific_paths:
+        mod_path = specific_paths[mod]
+        return file_path == mod_path or file_path.startswith(f"{mod_path}/")
     if mod == "root":
-        return not dir_parts
-    if mod in dir_parts:
-        return True
-    if (not dir_parts or all(part in _SOURCE_ROOTS for part in dir_parts)) and (
-        PurePosixPath(file_path).stem == mod
-    ):
-        return True
-    return False
+        return "/" not in file_path
+    lang = "java" if file_path.endswith((".java", ".kt", ".scala")) else "python"
+    return _path_module_key(file_path, lang) == mod
 
 
 def _build_raw_module_map(
@@ -731,45 +737,11 @@ def run_plan(
 
     for target_doc in sorted(sections_by_doc):
         doc_sections = sections_by_doc[target_doc]
+        regular_sections = [sec for sec in doc_sections if not sec.is_missing_section]
+        missing_sections = [sec for sec in doc_sections if sec.is_missing_section]
         non_oversized: list[SectionItem] = []
 
-        for sec in doc_sections:
-            if sec.is_missing_section:
-                for mod in sec.modules or [""]:
-                    slice_key = (target_doc, sec.sec_id, mod)
-                    if slice_key in handled_module_slices:
-                        continue
-                    handled_module_slices.add(slice_key)
-
-                    slice_mods = [mod] if mod else []
-                    pkt_id = f"{sec.sec_id}-mod-{mod}" if mod else sec.sec_id
-                    draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
-                    d_slice = extract_delta_slice(
-                        delta,
-                        slice_mods,
-                        module_files,
-                        [],
-                        module_paths=module_paths,
-                    )
-                    d_diagrams = resolve_packet_diagram_ids(
-                        [sec.sec_id], slice_mods, sec.diagram_ids, graph
-                    )
-                    pkt = Packet(
-                        packet_id=pkt_id,
-                        target_doc=target_doc,
-                        section_ids=[sec.sec_id],
-                        draft_output_path=draft_path,
-                        assigned_modules=slice_mods,
-                        delta_slice=d_slice,
-                        diagram_ids=d_diagrams,
-                        line_count=module_lines.get(mod, 0) if mod else 0,
-                        symbol_count=module_symbols.get(mod, 0) if mod else 0,
-                    )
-                    packets.append(
-                        _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
-                    )
-                continue
-
+        for sec in regular_sections:
             # Oversized check per SPEC 9.2: split into module slices
             is_oversized = len(sec.modules) > 1 and (
                 sec.lines > max_lines_per_worker or sec.symbols > max_symbols_per_worker
@@ -814,7 +786,44 @@ def run_plan(
                         _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
                     )
             else:
+                for m in sec.modules:
+                    handled_module_slices.add((target_doc, sec.sec_id, m))
                 non_oversized.append(sec)
+
+        for sec in missing_sections:
+            for mod in sec.modules or [""]:
+                slice_key = (target_doc, sec.sec_id, mod)
+                if slice_key in handled_module_slices:
+                    continue
+                handled_module_slices.add(slice_key)
+
+                slice_mods = [mod] if mod else []
+                pkt_id = f"{sec.sec_id}-mod-{mod}" if mod else sec.sec_id
+                draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
+                d_slice = extract_delta_slice(
+                    delta,
+                    slice_mods,
+                    module_files,
+                    [],
+                    module_paths=module_paths,
+                )
+                d_diagrams = resolve_packet_diagram_ids(
+                    [sec.sec_id], slice_mods, sec.diagram_ids, graph
+                )
+                pkt = Packet(
+                    packet_id=pkt_id,
+                    target_doc=target_doc,
+                    section_ids=[sec.sec_id],
+                    draft_output_path=draft_path,
+                    assigned_modules=slice_mods,
+                    delta_slice=d_slice,
+                    diagram_ids=d_diagrams,
+                    line_count=module_lines.get(mod, 0) if mod else 0,
+                    symbol_count=module_symbols.get(mod, 0) if mod else 0,
+                )
+                packets.append(
+                    _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
+                )
 
         # Greedily pack non-oversized sections respecting all three budgets
         cur_sections: list[SectionItem] = []
