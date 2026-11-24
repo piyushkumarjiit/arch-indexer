@@ -907,3 +907,65 @@ def test_flow_diagram_deduplicates_before_edge_budget_slicing():
     assert "budget" not in flow
     assert f"{mermaid_id('ep:POST:/checkout')} -->|calls| {mermaid_id('sym:a_helper')}" in flow
     assert f"{mermaid_id('ep:POST:/checkout')} -->|http_request| {mermaid_id('ext:stripe')}" in flow
+
+
+def test_build_graph_exports_all_service_nodes_without_cap(tmp_path):
+    # Oracle: SPEC 6.1 exports the complete graph to graph.json without a
+    # 5,000-node cap; readability budgets belong only in Mermaid generation.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    total_services = 5005
+    with IndexStore(tmp_path / "large.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "svc/big.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 20000,
+                    "module": "svc.big",
+                    "tier": "scip",
+                }
+            ]
+        )
+        symbols = [
+            {
+                "fqname": "svc.big.root_fn",
+                "name": "root_fn",
+                "kind": "function",
+                "file_path": "svc/big.py",
+                "start_line": 1,
+                "end_line": 11000,
+                "body_sha256": "b" * 64,
+            }
+        ]
+        refs = []
+        for idx in range(total_services - 1):
+            fqname = f"svc.big.helper_{idx}"
+            line = 12000 + idx
+            symbols.append(
+                {
+                    "fqname": fqname,
+                    "name": f"helper_{idx}",
+                    "kind": "function",
+                    "file_path": "svc/big.py",
+                    "start_line": line,
+                    "end_line": line,
+                    "body_sha256": "c" * 64,
+                }
+            )
+            refs.append(
+                {
+                    "symbol_fqname": fqname,
+                    "file_path": "svc/big.py",
+                    "line": idx + 2,
+                    "col": 4,
+                    "ref_kind": "call",
+                }
+            )
+        store.insert_symbols(symbols)
+        store.insert_references(refs)
+        graph = build_graph(store, repo)
+
+    assert len(graph["nodes"]) == total_services
+    assert len(graph["edges"]) == total_services - 1

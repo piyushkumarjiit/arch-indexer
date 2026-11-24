@@ -26,10 +26,6 @@ from arch_indexer.viewer import render_viewer
 
 SCHEMA_VERSION = "1.0"
 
-# Upper bound on service nodes so a very large repository still yields a
-# viewer-friendly payload; entrypoint-reachable symbols are kept first.
-MAX_SERVICE_NODES = 5000
-
 # Source roots that should not become a module name on their own.
 _SOURCE_ROOTS = frozenset({"src", "lib", "app", "apps", "pkg", "packages", "services", "modules"})
 # Reverse-domain prefixes that Java packages share with every other package.
@@ -343,38 +339,6 @@ def _collect_infra_boundaries(infra_rows: list[dict[str, Any]]) -> dict[str, dic
     return boundaries
 
 
-def _select_service_symbols(
-    call_pairs: list[tuple[str, str]],
-    boundary_sources: set[str],
-    handler_fqnames: set[str],
-) -> set[str]:
-    """Pick service symbols, newest-cap deterministically favouring reachable ones."""
-    participants = {fqname for pair in call_pairs for fqname in pair} | boundary_sources
-    service = participants - handler_fqnames
-    if len(service) <= MAX_SERVICE_NODES:
-        return service
-
-    adjacency: dict[str, list[str]] = {}
-    for source, target in call_pairs:
-        adjacency.setdefault(source, []).append(target)
-
-    reachable: set[str] = set()
-    stack = sorted(handler_fqnames & participants, reverse=True)
-    while stack:
-        current = stack.pop()
-        if current in reachable:
-            continue
-        reachable.add(current)
-        stack.extend(sorted(adjacency.get(current, ()), reverse=True))
-
-    degree: Counter[str] = Counter()
-    for source, target in call_pairs:
-        degree[source] += 1
-        degree[target] += 1
-    ordered = sorted(service, key=lambda fqname: (fqname not in reachable, -degree[fqname], fqname))
-    return set(ordered[:MAX_SERVICE_NODES])
-
-
 def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
     """Build the deterministic SPEC 6.1 graph payload from an open index."""
     repo = Path(repo_path)
@@ -422,7 +386,6 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
         merged = boundaries.setdefault(boundary_id, record)
         merged["evidence"].update(record["evidence"])
 
-    call_pairs: list[tuple[str, str]] = []
     call_edges: list[dict[str, Any]] = []
     for row in ref_rows:
         if row["ref_kind"] != "call":
@@ -433,7 +396,6 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
         caller = _enclosing_symbol(symbols_by_file, row["file_path"], row["line"])
         if caller is None or caller["fqname"] == callee["fqname"]:
             continue
-        call_pairs.append((caller["fqname"], callee["fqname"]))
         call_edges.append(
             {
                 "source_fqname": caller["fqname"],
@@ -443,11 +405,12 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
             }
         )
 
-    service_fqnames = _select_service_symbols(
-        call_pairs,
-        {candidate["source_fqname"] for candidate in boundary_candidates},
-        set(handler_to_nodes),
+    participants = (
+        {edge["source_fqname"] for edge in call_edges}
+        | {edge["target_fqname"] for edge in call_edges}
+        | {candidate["source_fqname"] for candidate in boundary_candidates}
     )
+    service_fqnames = participants - set(handler_to_nodes)
 
     def node_ids_for(fqname: str) -> list[str]:
         if fqname in handler_to_nodes:
