@@ -27,7 +27,7 @@ The meaning of each exit code is owned by spec section 7.2. This table records o
 | `0` | `EXIT_OK` / `EXIT_NO_CHANGES` | No documentation work is needed. Terminate workflow immediately; skip LLM worker dispatch. |
 | `1` | `EXIT_ERROR` | Abort workflow and report error to supervisor (invalid flags, unreadable repository, an unusable `--drafts-dir`/`--diagrams` path, or one `packet_id` declared by more than one draft). |
 | `2` | `EXIT_DELTA_DETECTED` | Proceed to planning and worker dispatch. |
-| `3` | `EXIT_VALIDATION_FAILED` | For `check-citations`, `check-mermaid` and `assemble`: citation drift/breakage, missing symbol, uncited technical section, invalid Mermaid syntax, missing draft section, or any other violation of the draft-file contract in spec §9.2; dispatch a targeted fix worker for the failing section(s). For `index`: the relocation was rolled back and the previous snapshot kept, so abort workflow and report stderr. |
+| `3` | `EXIT_VALIDATION_FAILED` | For `check-citations`, `check-mermaid` and `assemble`: citation drift/breakage, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, missing draft section, or any other violation of the draft-file contract in spec §9.2; dispatch a targeted fix worker for the failing section(s). For `index`: the relocation was rolled back and the previous snapshot kept, so abort workflow and report stderr. |
 | `4` | `EXIT_TOOLCHAIN_MISSING` | Abort workflow and report missing toolchain. |
 
 ---
@@ -152,7 +152,7 @@ The assembly command automatically:
 1. Starts a missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton.
 2. Patches updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (untouched sections and sibling slices preserved).
 3. Renumbers footnotes globally across each document into sequential `[^1]..[^N]` entries in `## References`.
-4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping when one is supplied; slots without a mapping entry keep their current content.
+4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping when one is supplied. With `docs/graph.json` present, the mapping must cover every diagram id the graph generates, because `check-mermaid` rejects stale slots and slots the graph does not produce (spec §7.1).
 5. Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
 6. Executes mandatory validation gates:
    ```bash
