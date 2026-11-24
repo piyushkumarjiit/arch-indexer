@@ -11,8 +11,14 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any
+
+import tree_sitter_java as tsjava
+import tree_sitter_python as tspython
+import tree_sitter_typescript as tstypescript
+from tree_sitter import Language, Node, Parser
 
 from arch_indexer.checks.citations import (
     CANONICAL_DOCS,
@@ -92,9 +98,52 @@ def _group_symbols(symbols: Iterable[dict[str, Any]]) -> dict[str, tuple[dict[st
     return {key: tuple(records) for key, records in grouped.items()}
 
 
-def _file_content_sha256(text: str) -> str:
-    """Hash the non-blank content of a file, ignoring line positions."""
-    content = "\n".join(line for line in text.splitlines() if line.strip())
+@cache
+def _parser_for_suffix(suffix: str) -> Parser | None:
+    if suffix == ".py":
+        return Parser(Language(tspython.language()))
+    if suffix in (".ts", ".js", ".mjs", ".cjs"):
+        return Parser(Language(tstypescript.language_typescript()))
+    if suffix in (".tsx", ".jsx"):
+        return Parser(Language(tstypescript.language_tsx()))
+    if suffix == ".java":
+        return Parser(Language(tsjava.language()))
+    return None
+
+
+def _masked_ranges(node: Node, ranges: list[tuple[int, int]]) -> None:
+    if node.type in ("comment", "line_comment", "block_comment"):
+        ranges.append((node.start_byte, node.end_byte))
+        return
+    if (
+        node.type == "expression_statement"
+        and node.parent is not None
+        and node.parent.type == "module"
+        and len(node.named_children) == 1
+        and node.named_children[0].type in ("string", "concatenated_string")
+    ):
+        ranges.append((node.start_byte, node.end_byte))
+        return
+    for child in node.children:
+        _masked_ranges(child, ranges)
+
+
+def _file_content_sha256(source: bytes, path: str) -> str:
+    """Hash the non-blank, non-comment content of a file, ignoring line positions."""
+    parser = _parser_for_suffix(Path(path).suffix.lower())
+    masked = source
+    if parser is not None:
+        ranges: list[tuple[int, int]] = []
+        _masked_ranges(parser.parse(source).root_node, ranges)
+        data = bytearray(source)
+        for start, end in ranges:
+            for index in range(start, min(end, len(data))):
+                if data[index] not in (0x0A, 0x0D):
+                    data[index] = 0x20
+        masked = bytes(data)
+    content = "\n".join(
+        line for line in masked.decode("utf-8", errors="replace").splitlines() if line.strip()
+    )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -115,14 +164,14 @@ class RepoSnapshot:
         return snapshot
 
     def record_content_hashes(self, repo_path: str | Path) -> None:
-        """Record a non-blank content signature for each indexed file."""
+        """Record a non-blank, non-comment content signature for each indexed file."""
         root = Path(repo_path)
         for path, record in self.files.items():
             try:
-                text = (root / path).read_text(encoding="utf-8", errors="replace")
+                source = (root / path).read_bytes()
             except OSError:
                 continue
-            record["content_sha256"] = _file_content_sha256(text)
+            record["content_sha256"] = _file_content_sha256(source, path)
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any] | None) -> RepoSnapshot | None:

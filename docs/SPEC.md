@@ -185,7 +185,7 @@ Core tables:
 
 ### 5.1 Snapshot & Delta Calculation
 On each `arch-indexer index <repo>` run:
-1. Compute current `sha256` for all tracked source/infra files, a `content_sha256` per file over its non-blank content (ignoring line positions), and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
+1. Compute current `sha256` for all tracked source/infra files, a `content_sha256` per file over its non-blank, non-comment content (module-level docstrings are excluded), and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
 2. Compare against `<cache>/repos/<id>/state.json`.
 3. Produce `index-delta.json` containing:
    - `is_first_run`: boolean

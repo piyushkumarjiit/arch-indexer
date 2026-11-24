@@ -303,6 +303,27 @@ def test_signature_edit_with_line_shift_blocks_move_only_relocation(tmp_path: Pa
     assert reasons["1-architecture-overview"] == ["modified_file"]
 
 
+def test_comment_and_module_docstring_shift_relocates_with_zero_tokens(tmp_path: Path, capsys):
+    """Comment and module-docstring edits must not force workers when symbols only shift."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (repo / "src" / "app.py").write_text(
+        '# license header\n"""Module documentation."""\n\n' + APP_SOURCE,
+        encoding="utf-8",
+    )
+    _commit(repo, "add a license header and module docstring")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+
+    design = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:4` — `start`" in design
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
 def test_added_and_deleted_files_purge_index_and_impact_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"
