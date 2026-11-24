@@ -196,7 +196,7 @@ def run_index(
         # Spec 5.3: deleted files are purged from every table. The index was just rebuilt
         # from disk, but purging keeps the guarantee explicit and idempotent.
         store.purge_files(delta.deleted_files)
-        master_index = build_master_index(store, target_repo, graph)
+        master_index = build_master_index(store, target_repo)
 
     module_by_file = {
         path: record["module"] for path, record in current.files.items() if record.get("module")

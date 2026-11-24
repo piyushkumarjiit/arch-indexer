@@ -43,44 +43,31 @@ EXIT_ERROR: int = 1
 CANONICAL_SECTION_MAP: dict[str, dict[str, str]] = {
     "DESIGN.md": {
         "1-architecture-overview": "design-sec1",
-        "architecture-overview": "design-sec1",
         "1. architecture overview": "design-sec1",
         "2-components-modules": "design-sec2",
-        "components-modules": "design-sec2",
         "2. components & modules": "design-sec2",
         "3-control-data-flows": "design-sec3",
-        "control-data-flows": "design-sec3",
         "3. control & data flows": "design-sec3",
         "4-data-model": "design-sec4",
-        "data-model": "design-sec4",
         "4. data model": "design-sec4",
         "5-interfaces-entry-points": "design-sec5",
-        "interfaces-entry-points": "design-sec5",
         "5. interfaces & entry points": "design-sec5",
         "6-security": "design-sec6",
-        "security": "design-sec6",
         "6. security": "design-sec6",
         "7-deployment-infrastructure": "design-sec7",
-        "deployment-infrastructure": "design-sec7",
         "7. deployment & infrastructure": "design-sec7",
         "8-known-gaps-limitations": "design-sec8",
-        "known-gaps-limitations": "design-sec8",
         "8. known gaps & limitations": "design-sec8",
         "references": "design-references",
-        "design-references": "design-references",
     },
     "USER_GUIDE.md": {
         "1-system-overview": "guide-sec1",
-        "system-overview": "guide-sec1",
         "1. system overview": "guide-sec1",
         "2-user-roles-permissions": "guide-sec2",
-        "user-roles-permissions": "guide-sec2",
         "2. user roles & permissions": "guide-sec2",
         "3-role-workflows": "guide-sec3",
-        "role-workflows": "guide-sec3",
         "3. role workflows": "guide-sec3",
         "references": "guide-references",
-        "guide-references": "guide-references",
     },
 }
 
@@ -103,7 +90,6 @@ class Packet:
         return {
             "assigned_modules": sorted(self.assigned_modules),
             "delta_slice": self.delta_slice,
-            "diagram_ids": sorted(self.diagram_ids),
             "draft_output_path": self.draft_output_path,
             "line_count": self.line_count,
             "packet_id": self.packet_id,
@@ -135,15 +121,12 @@ def normalize_section_id(raw_id: str, heading: str, target_doc: str) -> str:
         return doc_map[raw_lower]
     if heading_lower in doc_map:
         return doc_map[heading_lower]
-    if raw_id.startswith("design-") or raw_id.startswith("guide-"):
-        return raw_id
     return raw_id
 
 
 def build_master_index(
     store: IndexStore,
     repo_path: str | Path,
-    graph: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate master-index.json: compact deterministic summary for agents (SPEC 2.2, 4.3)."""
     target_repo = Path(repo_path).resolve()
@@ -262,8 +245,8 @@ def _file_belongs_to_module(
     specific_paths: Mapping[str, str],
 ) -> bool:
     """Match a file path against a canonical module by exclusive path or path-derived key."""
-    if mod == "infra" and is_infra_file(file_path):
-        return True
+    if is_infra_file(file_path):
+        return mod == "infra"
     if mod in specific_paths:
         mod_path = specific_paths[mod]
         return file_path == mod_path or file_path.startswith(f"{mod_path}/")
@@ -554,7 +537,6 @@ def run_plan(
     max_lines_per_worker: int = DEFAULT_MAX_LINES_PER_WORKER,
     max_symbols_per_worker: int = DEFAULT_MAX_SYMBOLS_PER_WORKER,
     max_sections_per_worker: int = DEFAULT_MAX_SECTIONS_PER_WORKER,
-    docs_dir: str = DEFAULT_DOCS_DIR,
     cache_dir: str | Path | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
@@ -601,10 +583,8 @@ def run_plan(
         return EXIT_ERROR
 
     # 3. Verify graph.json
-    effective_docs_dir = impacted_sections.get("docs_dir") or docs_dir or DEFAULT_DOCS_DIR
+    effective_docs_dir = str(impacted_sections.get("docs_dir") or DEFAULT_DOCS_DIR)
     graph_file = target_repo / effective_docs_dir / "graph.json"
-    if not graph_file.is_file():
-        graph_file = target_repo / "docs" / "graph.json"
     if not graph_file.is_file():
         stderr.write(
             f"Error: Missing required input file '{graph_file}'. Run 'arch-indexer index' first.\n"

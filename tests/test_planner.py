@@ -7,7 +7,7 @@ from pathlib import Path
 
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_ERROR, EXIT_OK, main
 from arch_indexer.config import RepoCachePaths
-from arch_indexer.planner import run_plan
+from arch_indexer.planner import normalize_section_id, run_plan
 from arch_indexer.storage.state import write_json
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -491,7 +491,7 @@ def test_round_trip_fixture_indexing_to_plan(tmp_path: Path, capsys):
         assert pkt["draft_output_path"] == f"docs/.drafts/{pkt['packet_id']}.md"
         assert isinstance(pkt["assigned_modules"], list)
         assert isinstance(pkt["delta_slice"], dict)
-        assert isinstance(pkt["diagram_ids"], list)
+        assert "diagram_ids" not in pkt
         assert isinstance(pkt["pre_rendered_diagram_ids"], list)
         assert isinstance(pkt["line_count"], int)
         assert isinstance(pkt["symbol_count"], int)
@@ -1048,4 +1048,143 @@ def test_polyglot_shared_canonical_module_no_duplicate_packet(tmp_path: Path):
     assert pkt["assigned_modules"] == ["billing"]
     assert pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
     assert pkt["delta_slice"]["added_files"] == ["packages/billing/api.ts"]
+
+
+def test_infra_deleted_file_not_claimed_by_non_infra_module(tmp_path: Path):
+    """Deleted infra files belong strictly to 'infra', never 'root' or script-stem modules."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {
+            "name": "root",
+            "path": ".",
+            "line_count": 30,
+            "symbol_count": 3,
+            "files": ["main.py"],
+        },
+        {
+            "name": "deploy",
+            "path": "src",
+            "line_count": 60,
+            "symbol_count": 6,
+            "files": ["src/deploy.py"],
+        },
+        {
+            "name": "infra",
+            "path": ".",
+            "line_count": 80,
+            "symbol_count": 2,
+            "files": ["infra/base.tf"],
+        },
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec1",
+            "heading": "1. Architecture Overview",
+            "modules": ["root"],
+            "diagram_ids": [],
+            "cited_files": ["main.py"],
+            "reasons": ["modified_file"],
+        },
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec7",
+            "heading": "7. Deployment & Infrastructure",
+            "modules": ["deploy", "infra"],
+            "diagram_ids": [],
+            "cited_files": ["src/deploy.py", "deploy.sh", "Dockerfile"],
+            "reasons": ["deleted_file"],
+        },
+    ]
+    delta = {
+        "added_files": [],
+        "added_symbols": [],
+        "deleted_files": ["Dockerfile", "docker-compose.yml", "deploy.sh"],
+        "deleted_symbols": [
+            {
+                "file_path": "deploy.sh",
+                "fqname": "deploy.run",
+                "kind": "function",
+                "name": "run",
+                "start_line": 1,
+                "end_line": 3,
+            }
+        ],
+        "is_first_run": False,
+        "modified_files": ["main.py"],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=delta
+    )
+    assert run_plan(repo, max_lines_per_worker=100, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packets = {p["packet_id"]: p for p in plan["packets"]}
+
+    assert packets["design-sec1"]["delta_slice"]["deleted_files"] == []
+    assert packets["design-sec7-mod-deploy"]["delta_slice"]["deleted_files"] == []
+    assert packets["design-sec7-mod-deploy"]["delta_slice"]["deleted_symbols"] == []
+
+    infra_pkt = packets["design-sec7-mod-infra"]
+    assert infra_pkt["delta_slice"]["deleted_files"] == [
+        "Dockerfile",
+        "deploy.sh",
+        "docker-compose.yml",
+    ]
+    assert [s["name"] for s in infra_pkt["delta_slice"]["deleted_symbols"]] == ["run"]
+
+
+def test_plan_docs_dir_strict_from_impacted_sections_and_no_cli_flag(tmp_path: Path):
+    """plan has no --docs-dir flag and uses impacted-sections docs_dir without docs/ fallback."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    # CLI rejects --docs-dir on plan (SPEC 7.1)
+    assert main(["plan", str(repo), "--docs-dir", "custom_docs"]) == EXIT_ERROR
+
+    modules = [{"name": "app", "line_count": 20, "symbol_count": 2, "files": ["src/app.py"]}]
+    sections = [
+        {
+            "doc": "custom_docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["first_run"],
+        }
+    ]
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, docs_dir="custom_docs"
+    )
+
+    # Reading custom_docs/graph.json succeeds and emits custom_docs/.drafts/...
+    assert run_plan(repo, cache_dir=cache) == EXIT_OK
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert plan["packets"][0]["draft_output_path"] == "custom_docs/.drafts/design-sec2.md"
+
+    # Removing custom_docs/graph.json while docs/graph.json exists must fail (no fallback)
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "custom_docs" / "graph.json").replace(repo / "docs" / "graph.json")
+    err = io.StringIO()
+    assert run_plan(repo, cache_dir=cache, err=err) == EXIT_ERROR
+    assert "custom_docs/graph.json" in err.getvalue()
+
+
+def test_normalize_section_id_narrowed_to_canonical_outline():
+    """normalize_section_id maps CANONICAL_SECTION_OUTLINE slugs/headings without unnumbered aliases."""
+    assert normalize_section_id("1-architecture-overview", "", "DESIGN.md") == "design-sec1"
+    assert normalize_section_id("", "2. Components & Modules", "DESIGN.md") == "design-sec2"
+    assert normalize_section_id("references", "References", "DESIGN.md") == "design-references"
+    assert normalize_section_id("3-role-workflows", "", "USER_GUIDE.md") == "guide-sec3"
+    assert normalize_section_id("references", "References", "USER_GUIDE.md") == "guide-references"
+    assert normalize_section_id("architecture-overview", "", "DESIGN.md") == "architecture-overview"
+    assert normalize_section_id("design-sec4", "", "DESIGN.md") == "design-sec4"
 
