@@ -40,10 +40,6 @@ SECTION_START_RE = re.compile(
     r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):START(?::(?P<flag>[^>\s]+)|\s+(?P<attrs>[^>]+))?\s*-->",
     re.IGNORECASE,
 )
-SECTION_END_RE = re.compile(
-    r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):END\s*-->",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
