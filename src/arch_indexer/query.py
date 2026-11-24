@@ -93,20 +93,18 @@ def _open_index(repo: str | Path, cache_dir: str | Path | None) -> sqlite3.Conne
     return conn
 
 
-def _escape_like(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+def _match_clause(column: str, text: str) -> tuple[str, list[Any]]:
+    """Match a column exactly or as a case-sensitive dotted suffix (``name`` matches ``pkg.name``)."""
+    suffix = f".{text}"
+    clause = f"({column} = ? OR (length({column}) >= ? AND substr({column}, -?) = ?))"
+    return clause, [text, len(suffix), len(suffix), suffix]
 
 
-def _match_clause(column: str, text: str) -> tuple[str, list[str]]:
-    """Match a column exactly or as a dotted suffix (``name`` matches ``pkg.name``)."""
-    clause = f"({column} = ? OR {column} LIKE ? ESCAPE '\\')"
-    return clause, [text, f"%.{_escape_like(text)}"]
-
-
-def _prefix_clause(column: str, text: str) -> tuple[str, list[str]]:
-    """Match a column exactly or as a dotted prefix (``pkg`` matches ``pkg.mod``)."""
-    clause = f"({column} = ? OR {column} LIKE ? ESCAPE '\\')"
-    return clause, [text, f"{_escape_like(text)}.%"]
+def _prefix_clause(column: str, text: str) -> tuple[str, list[Any]]:
+    """Match a column exactly or as a case-sensitive dotted prefix (``pkg`` matches ``pkg.mod``)."""
+    prefix = f"{text}."
+    clause = f"({column} = ? OR substr({column}, 1, ?) = ?)"
+    return clause, [text, len(prefix), prefix]
 
 
 def _symbol_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -164,6 +162,7 @@ def query_refs(
     where = f"WHERE {clause}"
     total = conn.execute(f'SELECT COUNT(*) FROM "references" {where}', params).fetchone()[0]
 
+    fqnames: list[str] = []
     if total == 0:
         # A symbol defined in the index may only be referenced by its full fqname.
         fqnames = sorted({d["fqname"] for d in _find_definitions(conn, symbol)})
@@ -174,6 +173,8 @@ def query_refs(
             total = conn.execute(f'SELECT COUNT(*) FROM "references" {where}', params).fetchone()[0]
 
     if total == 0:
+        if fqnames:
+            return [], 0
         raise QueryError(f"symbol not found: {symbol} (no definition or reference in the index)")
 
     rows = conn.execute(

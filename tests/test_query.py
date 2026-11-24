@@ -657,3 +657,108 @@ def preview():
         "0 app/main.py:9 app.main.preview",
         "1 app/main.py:10 app.main.preview -> Image.open",
     ]
+
+
+def test_refs_on_defined_unreferenced_symbol_returns_empty(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    _write_fixture(repo)
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    code, out, err = _query(capsys, str(repo), "refs", "handle_order", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert out == ""
+    assert err == ""
+
+    code, out, err = _query(
+        capsys, str(repo), "refs", "handle_order", "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK
+    assert err == ""
+    payload = _json(out)
+    assert payload == {
+        "query": "handle_order",
+        "count": 0,
+        "returned": 0,
+        "limit": 100,
+        "truncated": False,
+        "references": [],
+    }
+
+
+def test_query_matching_is_case_sensitive_for_symbols_and_modules(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    (repo / "app" / "models.py").write_text(
+        """\
+class User:
+    pass
+"""
+    )
+    (repo / "app" / "routes.py").write_text(
+        """\
+from fastapi import FastAPI
+
+from app.models import User
+
+app = FastAPI()
+
+
+@app.get("/users")
+def user():
+    return User()
+
+
+def call_user():
+    return user()
+"""
+    )
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    code, out, _ = _query(capsys, str(repo), "refs", "User", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert out.strip().splitlines() == [
+        "app/routes.py:3 import app.models.User",
+        "app/routes.py:10 call app.models.User",
+    ]
+
+    code, out, err = _query(capsys, str(repo), "def", "routes.User", "--cache-dir", str(cache))
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "symbol not found: routes.User" in err
+
+    code, out, _ = _query(capsys, str(repo), "def", "routes.user", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert out.strip() == "app/routes.py:9 function app.routes.user"
+
+    code, out, err = _query(
+        capsys, str(repo), "refs", "routes.User", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert out == ""
+    assert "symbol not found: routes.User" in err
+
+    for subcommand in ("entrypoints", "module-summary"):
+        args = (
+            ("entrypoints", "--module", "App")
+            if subcommand == "entrypoints"
+            else ("module-summary", "App")
+        )
+        code, out, err = _query(capsys, str(repo), *args, "--cache-dir", str(cache))
+        assert code == EXIT_ERROR
+        assert out == ""
+        assert "module not found: App" in err
+
+    code, out, _ = _query(
+        capsys, str(repo), "entrypoints", "--module", "app", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK
+    assert "app.routes.user" in out
+
+    code, out, _ = _query(
+        capsys, str(repo), "module-summary", "app.routes", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK
+    assert out.startswith("# module app.routes ")
