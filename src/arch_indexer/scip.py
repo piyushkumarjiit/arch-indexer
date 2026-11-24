@@ -119,6 +119,8 @@ def parse_scip_symbol(symbol_str: str) -> tuple[str, str, str, str]:
     desc_str = _extract_descriptor_string(symbol_str)
     descs = parse_scip_descriptors(desc_str)
     names = [d[0] for d in descs]
+    if len(names) >= 2 and names[-1] == "<init>":
+        names[-1] = names[-2]
     simple_name = names[-1] if names else ""
     fqname = ".".join(names)
     last_suffix = descs[-1][1] if descs else ""
@@ -414,13 +416,6 @@ def _scip_module_prefix(language: str, rel_path: str) -> str:
     return ""
 
 
-def _is_repo_symbol(raw_symbol: str, repo_fqnames: set[str], repo_modules: set[str]) -> bool:
-    if raw_symbol in repo_fqnames or raw_symbol in repo_modules:
-        return True
-    parts = raw_symbol.split(".")
-    return any(".".join(parts[:i]) in repo_modules for i in range(1, len(parts)))
-
-
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
     """Replace the longest matching SCIP module prefix with the plugin module name."""
     for prefix, module in renames:
@@ -621,6 +616,8 @@ def _parse_scip_payload(
 
             start_line, col, end_line = _get_occ_range(occ)
             simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
+            if simple_name == "<clinit>":
+                continue
             is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
             if (
                 not is_definition
@@ -633,6 +630,8 @@ def _parse_scip_payload(
 
             if is_definition:
                 display_name = info.display_name if (info and info.display_name) else simple_name
+                if display_name == "<init>":
+                    display_name = simple_name
                 kind = (
                     SCIP_KIND_MAP.get(info.kind, inferred_kind)
                     if (info and info.kind)
@@ -648,9 +647,9 @@ def _parse_scip_payload(
 
                 tier2_meta = None
                 if kind != "module":
-                    tier2_meta = tier2_by_key.get(
-                        (rel_path, start_line, display_name)
-                    ) or tier2_by_line.get((rel_path, start_line))
+                    tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
+                    if tier2_meta is None and last_suffix not in ("()", "[]"):
+                        tier2_meta = tier2_by_line.get((rel_path, start_line))
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind
@@ -716,7 +715,8 @@ def _parse_scip_payload(
         unresolved_refs = [
             unresolved
             for unresolved in unresolved_refs
-            if not _is_repo_symbol(unresolved["raw_symbol"], repo_fqnames, repo_modules)
+            if unresolved["raw_symbol"] not in repo_fqnames
+            and unresolved["raw_symbol"] not in repo_modules
         ]
 
     uncovered_paths: set[str] = set()

@@ -61,6 +61,11 @@ def test_scip_symbol_parsing():
     assert fq == "com.example.App"
     assert kind == "class"
 
+    simple, fq, kind, _ = parse_scip_symbol(
+        "semanticdb maven maven/com.example/demo 1.0.0 com/example/App#<init>()."
+    )
+    assert (simple, fq, kind) == ("App", "com.example.App.App", "method")
+
     simple, fq, kind, _ = parse_scip_symbol("local 42")
     assert simple == "local 42"
     assert fq == "local 42"
@@ -323,7 +328,7 @@ def test_tier1_cross_unit_references_align_to_repo_module_namespace(tmp_path: Pa
                 {"path": "src/orders/main.py", "module": "orders.main"},
             ]
         },
-        "fqnames": {"python": {"auth.models.User"}},
+        "fqnames": {"python": {"auth.models.User", "auth.models.User.save"}},
         "modules": {"python": {"auth", "auth.models", "orders", "orders.main"}},
     }
 
@@ -333,6 +338,153 @@ def test_tier1_cross_unit_references_align_to_repo_module_namespace(tmp_path: Pa
     assert "auth.models.User" in reference_fqnames
     assert not any(fqname.startswith("src.auth.models") for fqname in reference_fqnames)
     assert {u["raw_symbol"] for u in res.unresolved_refs} == {"requests"}
+
+
+def test_tier1_external_symbol_sharing_repo_parent_stays_unresolved(tmp_path: Path):
+    """External packages sharing a repo parent module are not treated as internal."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java" / "com" / "example"
+    java_dir.mkdir(parents=True)
+    order = java_dir / "Order.java"
+    order.write_text(
+        "package com.example;\n\nimport com.google.common.collect.Lists;\n\npublic class Order {}\n"
+    )
+
+    unit = IndexUnit(
+        unit_id="java:root",
+        name="root",
+        language="java",
+        root_dir=repo,
+        files=[order],
+    )
+    order_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Order#"
+    init_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Order#<init>()."
+    clinit_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Order#<clinit>()."
+    external_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/google/common/collect/Lists#"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/Order.java",
+                language="Java",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=init_sym,
+                        display_name="<init>",
+                        kind=scip_pb2.SymbolInformation.Kind.Constructor,
+                    )
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="semanticdb maven maven/com.example/demo 1.0.0 com/", range=[0, 8, 0]
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="semanticdb maven maven/com.example/demo 1.0.0 com/example/",
+                        range=[0, 12, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=order_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 13, 4],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=init_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 20, 4],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=clinit_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 24, 4],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=external_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 7, 2],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "java_external.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    symbol_context = {
+        "file_records": {
+            "java": [{"path": "src/main/java/com/example/Order.java", "module": "com.example"}]
+        },
+        "fqnames": {"java": {"com.example.Order", "com.example.Order.Order"}},
+        "modules": {"java": {"com", "com.example"}},
+    }
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    assert {u["raw_symbol"] for u in res.unresolved_refs} == {"com.google.common.collect.Lists"}
+    symbol_fqnames = {s["fqname"] for s in res.symbols}
+    assert "com.example.Order.Order" in symbol_fqnames
+    assert not any(s["name"] in ("<init>", "<clinit>") for s in res.symbols)
+
+
+def test_tier1_parameter_symbols_do_not_inherit_function_metadata(tmp_path: Path):
+    """Parameter definitions keep their own kind and empty decorators."""
+    repo_dir = FIXTURES_DIR / "python_imports"
+    client = repo_dir / "src" / "pyimp" / "client.py"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[client],
+    )
+    tier2 = IndexResult(
+        unit_id="python:root",
+        tier=IndexingTier.TIER2,
+        success=True,
+        files=[
+            {
+                "path": "src/pyimp/client.py",
+                "language": "python",
+                "sha256": "0" * 64,
+                "line_count": 8,
+                "module": "pyimp.client",
+                "tier": "tree-sitter",
+                "fallback_reason": "tool_unavailable",
+            }
+        ],
+        symbols=[
+            {
+                "fqname": "pyimp.client.fetch",
+                "name": "fetch",
+                "kind": "function",
+                "file_path": "src/pyimp/client.py",
+                "start_line": 5,
+                "end_line": 6,
+                "body_sha256": "0" * 64,
+                "visibility": "public",
+                "decorators_json": '["@app.get(\\"/f\\")"]',
+            },
+            {
+                "fqname": "pyimp.client.parse",
+                "name": "parse",
+                "kind": "function",
+                "file_path": "src/pyimp/client.py",
+                "start_line": 9,
+                "end_line": 10,
+                "body_sha256": "0" * 64,
+                "visibility": "public",
+                "decorators_json": "[]",
+            },
+        ],
+    )
+    test_scip = tmp_path / "params.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert sym_map["fetch"]["decorators_json"] == '["@app.get(\\"/f\\")"]'
+    for parameter in ("url", "text"):
+        assert sym_map[parameter]["kind"] == "variable"
+        assert sym_map[parameter]["visibility"] == "public"
+        assert sym_map[parameter]["decorators_json"] == "[]"
 
 
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
