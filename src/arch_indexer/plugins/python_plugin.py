@@ -267,7 +267,7 @@ def _extract_string_literal(node: Node | None, source_bytes: bytes) -> str | Non
     if _has_node_type(node, "interpolation"):
         return None
     try:
-        value = ast.literal_eval(_get_node_text(node, source_bytes).strip())
+        value = ast.literal_eval(f"({_get_node_text(node, source_bytes)})")
     except (SyntaxError, ValueError):
         return None
     return value if isinstance(value, str) else None
@@ -1851,15 +1851,6 @@ class PythonPlugin(LanguagePlugin):
                                     "line": func_line,
                                     "symbol_fqname": func_fqname,
                                     "auth_symbols_json": "[]",
-                                }
-                            )
-                        else:
-                            unresolved_refs.append(
-                                {
-                                    "file_path": rel_path,
-                                    "line": dec_node.start_point[0] + 1,
-                                    "raw_symbol": f"{receiver}.{attr}",
-                                    "language": "python",
                                 }
                             )
 

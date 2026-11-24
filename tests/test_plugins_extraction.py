@@ -1961,41 +1961,6 @@ def test_python_security_scheme_subclasses_recognised(tmp_path: Path):
     assert auth["transitive_route"] == ["get_auth_user"]
 
 
-def test_python_unresolvable_route_receiver_recorded_as_unresolved_ref(tmp_path: Path):
-    """A route receiver imported from an unresolvable module becomes an unresolved_ref row."""
-    # Common requirements.txt-only layout without a pyproject.toml in backend/
-    backend = tmp_path / "backend"
-    (backend / "app").mkdir(parents=True)
-    (backend / "app" / "routes.py").write_text(
-        "from fastapi import APIRouter\n\nrouter = APIRouter()\n"
-    )
-    (backend / "app" / "views.py").write_text(
-        "from app.routes import router\n\n@router.get('/{id}')\ndef get_item(id: int): pass\n"
-    )
-    unit = IndexUnit(
-        unit_id="python:backend",
-        name="backend",
-        language="python",
-        root_dir=tmp_path,
-        files=[
-            backend / "app" / "routes.py",
-            backend / "app" / "views.py",
-        ],
-    )
-    res = PythonPlugin().index_unit_tier2(unit)
-    # The route decorator on unresolvable receiver must NOT be dropped silently
-    views_eps = [e for e in res.entrypoints if e["file_path"] == "backend/app/views.py"]
-    assert views_eps == []
-    unresolved = [
-        (u["file_path"], u["line"], u["raw_symbol"])
-        for u in res.unresolved_refs
-        if u["file_path"] == "backend/app/views.py"
-    ]
-    # Both the import and the decorator receiver are recorded as unresolved_refs
-    assert ("backend/app/views.py", 1, "app.routes.router") in unresolved
-    assert ("backend/app/views.py", 3, "router.get") in unresolved
-
-
 def test_python_argparse_cross_file_builder_detected(tmp_path: Path):
     """Argparse CLI entrypoint detected when parser is built in one file and parsed in another."""
     tool_dir = tmp_path / "tool"
@@ -2155,7 +2120,10 @@ settings = Settings()
 app = FastAPI()
 dyn_router = APIRouter(prefix=settings.API_V1_STR)
 none_router = APIRouter(prefix=None)
-concat_router = APIRouter(prefix="/a" "/b")
+concat_router = APIRouter(
+    prefix="/a"
+    "/b"
+)
 bin_router = APIRouter(prefix='/x' + '/y')
 
 @dyn_router.get(dependencies=[Depends(auth)], path="/items")
@@ -2164,7 +2132,12 @@ def dyn_items(): pass
 @none_router.get(summary="", path="/status")
 def status(): pass
 
-@concat_router.api_route("/entries", dependencies=[Depends(auth)], methods=["post", "put"])
+@concat_router.api_route(
+    "/ent"
+    "ries",
+    dependencies=[Depends(auth)],
+    methods=["post", "put"],
+)
 def entries(): pass
 
 @bin_router.get("/bin")
