@@ -281,6 +281,43 @@ def test_auto_diagram_block_matching_graph_but_no_graph_file_still_passes(tmp_pa
     assert run_check_mermaid(repo, out=out) == 0, out.getvalue()
 
 
+def test_assemble_derives_auto_diagrams_from_graph(tmp_path):
+    """A freshly assembled DESIGN.md passes the AUTO-DIAGRAM gate without --diagrams."""
+    from arch_indexer.assembler import assemble
+
+    repo = _copy_fixture("python_routes", tmp_path)
+    assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
+    expected = set(diagram_ids(load_graph(repo / "docs" / "graph.json")))
+
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    (drafts / "overview.md").write_text(
+        "---\n"
+        "packet_id: overview\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec1]\n"
+        "---\n"
+        "The fixture exposes a small set of services.\n",
+        encoding="utf-8",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    code = assemble(
+        repo=repo,
+        drafts_dir="docs/.drafts",
+        cache_dir=tmp_path / "cache",
+        out=out,
+        err=err,
+    )
+    assert code == 0, out.getvalue() + err.getvalue()
+
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    slots = set(re.findall(r"<!-- AUTO-DIAGRAM:([^:]+):START -->", content))
+    assert slots == expected
+    out = io.StringIO()
+    assert run_check_mermaid(repo, out=out) == 0, out.getvalue()
+
+
 def test_module_overview_aggregates_module_edges(tmp_path):
     repo = _write_repo(
         tmp_path / "repo",

@@ -14,6 +14,7 @@ from arch_indexer.assembler import (
     patch_section_in_doc,
     renumber_footnotes_in_doc,
 )
+from arch_indexer.checks.mermaid import run_check_mermaid
 from arch_indexer.cli import main
 from arch_indexer.skeletons import load_skeleton
 
@@ -32,7 +33,7 @@ def test_skeleton_loading_and_content():
     assert "<!-- SECTION:design-sec8:START -->" in design_skel
     assert "<!-- SECTION:design-references:START:exempt -->" in design_skel
     assert "<!-- AUTO-DIAGRAM:module-overview:START -->" in design_skel
-    assert "<!-- AUTO-DIAGRAM:flow-overview:START -->" in design_skel
+    assert "<!-- AUTO-DIAGRAM:flow-main:START -->" in design_skel
 
     guide_skel = load_skeleton("USER_GUIDE.md")
     assert "# User Guide" in guide_skel
@@ -42,6 +43,16 @@ def test_skeleton_loading_and_content():
     assert "<!-- SECTION:guide-references:START:exempt -->" in guide_skel
     assert "### How to Task Template" in guide_skel
     assert "[HUMAN INTENT NEEDED]" in guide_skel
+
+
+def test_packaged_skeleton_passes_auto_diagram_check(tmp_path):
+    """An unmodified packaged skeleton is a gate-passing starting document."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "DESIGN.md").write_text(load_skeleton("DESIGN.md"), encoding="utf-8")
+
+    out = io.StringIO()
+    assert run_check_mermaid(repo, out=out) == 0, out.getvalue()
 
 
 def test_parse_draft_file(tmp_path):
@@ -231,12 +242,12 @@ def test_inject_diagrams():
         "  Old --> Diagram\n"
         "```\n"
         "<!-- AUTO-DIAGRAM:module-overview:END -->\n\n"
-        "<!-- AUTO-DIAGRAM:flow-overview:START -->\n"
+        "<!-- AUTO-DIAGRAM:flow-main:START -->\n"
         "```mermaid\n"
         "flowchart TD\n"
         "  Untouched\n"
         "```\n"
-        "<!-- AUTO-DIAGRAM:flow-overview:END -->\n"
+        "<!-- AUTO-DIAGRAM:flow-main:END -->\n"
     )
     mapping = {
         "module-overview": "flowchart LR\n  ModA --> ModB",
@@ -442,7 +453,7 @@ def test_assemble_diagram_injection(tmp_path):
 
     content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
     assert "App --> DB" in content
-    # flow-overview was not in diagrams mapping, remains default placeholder
+    # flow-main was not in diagrams mapping, remains default placeholder
     assert "Flow" in content
 
 
@@ -1283,11 +1294,11 @@ def test_assemble_deletes_only_consumed_draft_files(tmp_path):
         pytest.param(
             "design-sec3",
             "Prose beside a slot[^1].\n\n"
-            "<!-- AUTO-DIAGRAM:flow-overview:START -->\n"
-            "<!-- AUTO-DIAGRAM:flow-overview:END -->\n\n"
+            "<!-- AUTO-DIAGRAM:flow-main:START -->\n"
+            "<!-- AUTO-DIAGRAM:flow-main:END -->\n\n"
             "[^1]: `src/app.py:4` — `beta`\n",
             "AUTO-DIAGRAM",
-            id="flow-overview-slot",
+            id="flow-main-slot",
         ),
         pytest.param(
             "design-sec3",
@@ -1318,9 +1329,7 @@ def test_assemble_preserves_diagram_slots_across_redraft_and_slice_removal(tmp_p
     """Document-owned slots survive a slice re-draft and a later --remove-slice."""
     repo, drafts = _repo_with_app(tmp_path)
     diagrams_file = tmp_path / "diagrams.json"
-    diagrams_file.write_text(
-        json.dumps({"flow-overview": "flowchart TD\n  A --> B"}), encoding="utf-8"
-    )
+    diagrams_file.write_text(json.dumps({"flow-main": "flowchart TD\n  A --> B"}), encoding="utf-8")
     _write_design_draft(
         drafts,
         "flow.md",
@@ -1339,7 +1348,7 @@ def test_assemble_preserves_diagram_slots_across_redraft_and_slice_removal(tmp_p
         == 0
     )
     first = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    assert first.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert first.count("<!-- AUTO-DIAGRAM:flow-main:START -->") == 1
     assert "A --> B" in first
 
     drafts.mkdir(parents=True)
@@ -1361,7 +1370,7 @@ def test_assemble_preserves_diagram_slots_across_redraft_and_slice_removal(tmp_p
         == 0
     )
     second = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    assert second.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert second.count("<!-- AUTO-DIAGRAM:flow-main:START -->") == 1
     assert "A --> B" in second
     assert "Flow prose v2" in second
     assert "Flow prose v1" not in second
@@ -1378,7 +1387,7 @@ def test_assemble_preserves_diagram_slots_across_redraft_and_slice_removal(tmp_p
         == 0
     )
     third = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    assert third.count("<!-- AUTO-DIAGRAM:flow-overview:START -->") == 1
+    assert third.count("<!-- AUTO-DIAGRAM:flow-main:START -->") == 1
     assert "A --> B" in third
     assert "Flow prose v2" not in third
 
@@ -1413,7 +1422,7 @@ def test_assemble_preserves_auto_diagram_slots_in_patched_sections(tmp_path):
 
     diagrams_file = tmp_path / "diagrams.json"
     diagrams_file.write_text(
-        json.dumps({"flow-overview": "flowchart TD\n  Entry --> Worker"}), encoding="utf-8"
+        json.dumps({"flow-main": "flowchart TD\n  Entry --> Worker"}), encoding="utf-8"
     )
 
     code = assemble(repo=repo, drafts_dir="docs/.drafts", diagrams=diagrams_file)
