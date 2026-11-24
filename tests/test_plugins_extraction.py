@@ -2263,9 +2263,7 @@ def test_python_argparse_reassigned_parser_variable_detected(tmp_path: Path):
     tool_dir.mkdir()
     (tool_dir / "__init__.py").write_text("")
     (tool_dir / "parser.py").write_text(
-        "from argparse import ArgumentParser as AP\n\n"
-        "def build_parser():\n"
-        "    return AP()\n"
+        "from argparse import ArgumentParser as AP\n\ndef build_parser():\n    return AP()\n"
     )
     (tool_dir / "reassign_cli.py").write_text(
         "from tool.parser import build_parser\n\n"
