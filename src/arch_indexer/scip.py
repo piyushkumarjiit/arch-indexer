@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
@@ -165,7 +166,53 @@ def _starts_import(stripped: str, language: str) -> bool:
     return False
 
 
-def _import_line_numbers(file_lines: list[str], language: str) -> dict[int, int]:
+class _ImportInfo(NamedTuple):
+    lines: dict[int, int]
+    spans: list[tuple[int, int, int, int]]
+    texts: dict[int, str]
+
+
+def _import_span_text(
+    file_lines: list[str], start_line: int, start_col: int, end_line: int, end_col: int
+) -> str:
+    parts: list[str] = []
+    for line_no in range(start_line, end_line + 1):
+        if not (1 <= line_no <= len(file_lines)):
+            continue
+        line = file_lines[line_no - 1]
+        col_start = start_col if line_no == start_line else 0
+        col_end = end_col if line_no == end_line else len(line)
+        parts.append(_code_only(line[col_start:col_end].strip(), "python"))
+    return " ".join(parts).replace("\\", " ")
+
+
+def _python_import_info(file_lines: list[str]) -> _ImportInfo | None:
+    try:
+        tree = ast.parse("\n".join(file_lines))
+    except SyntaxError:
+        return None
+    lines: dict[int, int] = {}
+    spans: list[tuple[int, int, int, int]] = []
+    texts: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        start_line = node.lineno
+        start_col = node.col_offset
+        end_line = node.end_lineno or start_line
+        end_col = node.end_col_offset
+        if end_col is None:
+            end_col = len(file_lines[end_line - 1]) if 1 <= end_line <= len(file_lines) else 0
+        spans.append((start_line, start_col, end_line, end_col))
+        for line_no in range(start_line, min(end_line, len(file_lines)) + 1):
+            lines.setdefault(line_no, start_line)
+        texts.setdefault(
+            start_line, _import_span_text(file_lines, start_line, start_col, end_line, end_col)
+        )
+    return _ImportInfo(lines, spans, texts)
+
+
+def _heuristic_import_line_numbers(file_lines: list[str], language: str) -> dict[int, int]:
     """Map each 1-based import line to the first line of its import statement."""
     lines: dict[int, int] = {}
     depth = 0
@@ -185,6 +232,30 @@ def _import_line_numbers(file_lines: list[str], language: str) -> dict[int, int]
         if depth <= 0:
             depth = 0
     return lines
+
+
+def _import_info(file_lines: list[str], language: str) -> _ImportInfo:
+    if language == "python":
+        info = _python_import_info(file_lines)
+        if info is not None:
+            return info
+    lines = _heuristic_import_line_numbers(file_lines, language)
+    spans = [(line_no, 0, line_no, len(file_lines[line_no - 1])) for line_no in lines]
+    return _ImportInfo(lines, spans, {})
+
+
+def _in_import_span(start_line: int, col: int, spans: list[tuple[int, int, int, int]]) -> bool:
+    for span_start_line, span_start_col, span_end_line, span_end_col in spans:
+        if (
+            (span_start_line, span_start_col)
+            <= (start_line, col)
+            < (
+                span_end_line,
+                span_end_col,
+            )
+        ):
+            return True
+    return False
 
 
 def _occ_source_text(file_lines: list[str], occ: Occurrence) -> str:
@@ -228,13 +299,13 @@ def _attribute_chain(file_lines: list[str], occ: Occurrence) -> str:
     return match.group(0) if match else ""
 
 
-def _import_statement_text(
-    file_lines: list[str], import_lines: dict[int, int], statement: int
-) -> str:
+def _import_statement_text(file_lines: list[str], info: _ImportInfo, statement: int) -> str:
+    if statement in info.texts:
+        return info.texts[statement]
     parts = [
         _code_only(file_lines[line_no - 1].strip(), "python")
-        for line_no in sorted(import_lines)
-        if import_lines[line_no] == statement and 1 <= line_no <= len(file_lines)
+        for line_no in sorted(info.lines)
+        if info.lines[line_no] == statement and 1 <= line_no <= len(file_lines)
     ]
     return " ".join(parts).replace("\\", " ")
 
@@ -287,20 +358,34 @@ def _bound_module_name(source_name: str, target_module: str) -> str:
     return source_parts[0]
 
 
+def _preceding_statement_module(
+    modules: list[tuple[int, int, str]], start_line: int, col: int
+) -> str:
+    best: tuple[int, int, str] | None = None
+    for line_no, module_col, module in modules:
+        if (line_no, module_col) <= (start_line, col) and (
+            best is None or (line_no, module_col) >= (best[0], best[1])
+        ):
+            best = (line_no, module_col, module)
+    return best[2] if best else ""
+
+
 def _local_import_aliases(
     doc: Document,
     file_lines: list[str],
-    import_lines: dict[int, int],
+    info: _ImportInfo,
     module: str,
 ) -> dict[str, str]:
     """Map document-local import bindings to the imported symbol or module."""
-    modules_by_statement: dict[int, list[str]] = {}
+    modules_by_statement: dict[int, list[tuple[int, int, str]]] = {}
     locals_by_statement: dict[int, list[Occurrence]] = {}
     for occ in doc.occurrences:
         if not occ.symbol:
             continue
-        start_line, _, _ = _get_occ_range(occ)
-        statement = import_lines.get(start_line)
+        start_line, col, _ = _get_occ_range(occ)
+        if not _in_import_span(start_line, col, info.spans):
+            continue
+        statement = info.lines.get(start_line)
         if statement is None:
             continue
         if occ.symbol.startswith("local "):
@@ -312,12 +397,15 @@ def _local_import_aliases(
         if suffix in ("/", ":"):
             imported_module = _module_fqname(fqname, suffix)
             if imported_module:
-                modules_by_statement.setdefault(statement, []).append(imported_module)
+                modules_by_statement.setdefault(statement, []).append(
+                    (start_line, col, imported_module)
+                )
 
     aliases: dict[str, str] = {}
     for statement, occurrences in locals_by_statement.items():
-        text = _import_statement_text(file_lines, import_lines, statement)
-        statement_modules = modules_by_statement.get(statement, [])
+        text = _import_statement_text(file_lines, info, statement)
+        modules = sorted(modules_by_statement.get(statement, []))
+        statement_modules = [imported_module for _, _, imported_module in modules]
         from_match = re.match(r"from\s+([.\w]+)\s+import\s+(.*)", text)
         if from_match:
             module_token = from_match.group(1)
@@ -335,25 +423,38 @@ def _local_import_aliases(
                 ) or (f"{base}.{name}" if base else name)
                 bindings[alias or name] = target
                 bindings.setdefault(name, target)
-        else:
-            import_match = re.match(r"import\s+(.*)", text)
-            if not import_match:
-                continue
-            bindings = {}
-            for name, alias in _split_import_names(import_match.group(1)):
-                target_module = _match_statement_module(name, statement_modules) or name
-                if alias:
-                    bindings[alias] = target_module
-                else:
-                    bindings[name] = target_module
-                    bindings.setdefault(name.split(".")[0], _bound_module_name(name, target_module))
+
+            for occ in occurrences:
+                raw = _occ_source_text(file_lines, occ)
+                binding = raw.split(" as ")[-1].strip() if " as " in raw else raw
+                target = bindings.get(binding)
+                if target is None and binding:
+                    target = bindings.get(binding.split(".", 1)[0])
+                if target:
+                    aliases[occ.symbol] = target
+            continue
+
+        import_match = re.match(r"import\s+(.*)", text)
+        if not import_match:
+            continue
+        bindings = {}
+        for name, alias in _split_import_names(import_match.group(1)):
+            target_module = _match_statement_module(name, statement_modules) or name
+            if alias:
+                bindings[alias] = target_module
+            else:
+                bindings[name] = target_module
+                bindings.setdefault(name.split(".")[0], _bound_module_name(name, target_module))
 
         for occ in occurrences:
-            raw = _occ_source_text(file_lines, occ)
-            binding = raw.split(" as ")[-1].strip() if " as " in raw else raw
-            target = bindings.get(binding)
-            if target is None and binding:
-                target = bindings.get(binding.split(".", 1)[0])
+            start_line, col, _ = _get_occ_range(occ)
+            target = _preceding_statement_module(modules, start_line, col)
+            if target is None or not target:
+                raw = _occ_source_text(file_lines, occ)
+                binding = raw.split(" as ")[-1].strip() if " as " in raw else raw
+                target = bindings.get(binding)
+                if target is None and binding:
+                    target = bindings.get(binding.split(".", 1)[0])
             if target:
                 aliases[occ.symbol] = target
     return aliases
@@ -843,8 +944,8 @@ def _parse_scip_payload(
             }
         )
 
-        import_lines = _import_line_numbers(file_lines, unit.language)
-        local_aliases = _local_import_aliases(doc, file_lines, import_lines, module)
+        import_info = _import_info(file_lines, unit.language)
+        local_aliases = _local_import_aliases(doc, file_lines, import_info, module)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
         for occ in doc.occurrences:
@@ -856,13 +957,14 @@ def _parse_scip_payload(
                 continue
 
             start_line, col, end_line = _get_occ_range(occ)
+            is_import_occ = _in_import_span(start_line, col, import_info.spans)
             is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
             if is_local:
-                if is_definition and start_line not in import_lines:
+                if is_definition and not is_import_occ:
                     continue
                 is_definition = False
                 fqname = local_aliases[sym_str]
-                if start_line not in import_lines:
+                if not is_import_occ:
                     fqname += _attribute_chain(file_lines, occ)
                 simple_name = fqname.rsplit(".", 1)[-1]
                 inferred_kind = "variable"
@@ -931,7 +1033,7 @@ def _parse_scip_payload(
                     }
                 )
             else:
-                is_import_line = start_line in import_lines
+                is_import_line = is_import_occ
                 line_str = (
                     file_lines[start_line - 1]
                     if file_lines and 1 <= start_line <= len(file_lines)

@@ -650,7 +650,7 @@ def test_tier1_docstring_from_line_does_not_label_later_references(tmp_path: Pat
         "def load(path):\n"
         '    """Read a config file.\n'
         "\n"
-        "    from the cache directory (see CachePaths, fall back to defaults\n"
+        "    from the import cache (see CachePaths, fall back to defaults\n"
         "    when it is missing.\n"
         '    """\n'
         "    return parse(read(path))\n"
@@ -702,6 +702,58 @@ def test_tier1_docstring_from_line_does_not_label_later_references(tmp_path: Pat
     assert (7, "app.parse") not in {
         (r["line"], r["symbol_fqname"]) for r in res.references if r["ref_kind"] == "import"
     }
+
+
+def test_tier1_one_line_import_does_not_label_following_call(tmp_path: Path):
+    """A call after a semicolon on an import line is not itself an import."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text("import util; util.helper()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    module_sym = "scip-python python pkg 0.1.0 app/__init__:"
+    util_module = "scip-python python pkg 0.1.0 util/__init__:"
+    helper_sym = "scip-python python pkg 0.1.0 `util`/helper()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=util_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 7, 11],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=helper_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 18, 24],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "compound.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_kinds[(1, "util")] == "import"
+    assert ref_kinds[(1, "util.helper")] == "call"
 
 
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
@@ -2348,6 +2400,81 @@ def test_scip_python_local_module_alias_keeps_attribute_chain(tmp_path: Path):
     res = ingest_scip(test_scip, unit)
     ref_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
     assert (4, "app.config.load") in ref_fqnames
+
+
+def test_scip_python_local_imports_pair_with_their_module_occurrence(tmp_path: Path):
+    """Each alias binds to its own module occurrence, not a sibling's longer match."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text(
+        "import util, app.util as app_util\n\ndef run():\n    util.helper()\n    app_util.other()\n"
+    )
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    module_sym = "scip-python python pkg 0.1.0 app/__init__:"
+    util_module = "scip-python python pkg 0.1.0 util/__init__:"
+    app_util_module = "scip-python python pkg 0.1.0 app/util/__init__:"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=util_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 7, 11],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 7, 11],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=app_util_module,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 13, 21],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 1",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 25, 33],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[3, 4, 8],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 1",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[4, 4, 12],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "sibling_modules.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    ref_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
+    assert (4, "util.helper") in ref_fqnames
+    assert (5, "app.util.other") in ref_fqnames
+    assert (4, "app.util.helper") not in ref_fqnames
 
 
 def test_scip_python_local_imports_resolve_to_stored_modules(tmp_path: Path):
