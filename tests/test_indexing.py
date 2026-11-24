@@ -105,7 +105,7 @@ def test_python_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert sym_map["hello"]["start_line"] == 1
     assert sym_map["hello"]["kind"] == "function"
     assert len(sym_map["hello"]["body_sha256"]) == 64
-    assert sym_map["__init__"]["kind"] == "module"
+    assert all(s["kind"] != "module" for s in res.symbols)
 
 
 def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Path):
@@ -168,8 +168,7 @@ def test_python_scip_fixture_module_fqnames_drop_init_descriptor(tmp_path: Path)
 
     module = res.files[0]["module"]
     assert module == "pyimp.client"
-    module_symbols = [s for s in res.symbols if s["name"] == "__init__"]
-    assert [s["fqname"] for s in module_symbols] == [module]
+    assert all(s["fqname"] != module for s in res.symbols)
     reference_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
     assert (1, "requests") in reference_fqnames
     assert (2, "yaml") in reference_fqnames
@@ -340,10 +339,8 @@ def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert "Component" in sym_map
     assert sym_map["Component"]["start_line"] == 1
     assert sym_map["Component"]["end_line"] == 1
-    assert "index.ts" in sym_map
-    assert sym_map["index.ts"]["end_line"] == 1
-    assert "component.tsx" in sym_map
-    assert sym_map["component.tsx"]["end_line"] == 1
+    assert "index.ts" not in sym_map
+    assert "component.tsx" not in sym_map
 
 
 def test_java_scip_fixture_ignores_package_prefix_occurrences(tmp_path: Path):
@@ -816,6 +813,81 @@ def test_tier1_one_line_import_does_not_label_following_call(tmp_path: Path):
     assert ref_kinds[(1, "util.helper")] == "call"
 
 
+def test_tier1_typescript_import_span_ends_at_statement(tmp_path: Path):
+    """A call after a TypeScript import statement is not part of the import span."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.ts"
+    app.write_text('import { helper } from "./util"; helper();\n')
+
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=repo,
+        files=[app],
+    )
+    helper_sym = "scip-typescript npm ts-fixture 1.0.0 src/`util.ts`/helper()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=helper_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 33, 39],
+                    )
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "typescript_statement.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    helper_refs = [r for r in res.references if r["symbol_fqname"].endswith("helper")]
+    assert len(helper_refs) == 1
+    assert helper_refs[0]["ref_kind"] == "call"
+
+
+def test_tier1_java_import_span_ends_at_statement(tmp_path: Path):
+    """A type use after a Java import statement is not labelled as an import."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "App.java"
+    app.write_text("import java.util.List; class A { List x; }\n")
+
+    unit = IndexUnit("java:root", "root", "java", repo, files=[app])
+    list_sym = "semanticdb maven maven/com.example/demo 1.0.0 java/util/List#"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="App.java",
+                language="Java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=list_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        syntax_kind=int(scip_pb2.SyntaxKind.IdentifierType),
+                        range=[0, 33, 37],
+                    )
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "java_statement.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    list_refs = [r for r in res.references if r["symbol_fqname"].endswith("List")]
+    assert len(list_refs) == 1
+    assert list_refs[0]["ref_kind"] == "type"
+
+
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
     """Repo field references stay internal even though Phase 1 records only types."""
     repo = tmp_path / "repo"
@@ -982,7 +1054,7 @@ def test_tier1_parameter_definitions_are_not_recorded_as_symbols(tmp_path: Path)
 
     sym_map = {s["name"]: s for s in res.symbols}
     assert sym_map["fetch"]["decorators_json"] == '["@app.get(\\"/f\\")"]'
-    assert set(sym_map) == {"__init__", "fetch", "parse"}
+    assert set(sym_map) == {"fetch", "parse"}
 
 
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
@@ -1734,8 +1806,8 @@ def test_tier1_class_instantiation_uses_tier2_call_kind(tmp_path: Path):
     assert ref_kinds[(6, "app.User")] == "call"
 
 
-def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):
-    """Module rows keep public visibility instead of borrowing a sibling's metadata."""
+def test_tier1_module_definitions_are_not_symbol_rows(tmp_path: Path):
+    """Module definitions do not become symbol rows or borrow a sibling's metadata."""
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     secret = repo / "src" / "secret.py"
@@ -1789,9 +1861,7 @@ def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):
 
     res = ingest_scip(test_scip, unit, tier2_result=tier2)
     sym_map = {s["name"]: s for s in res.symbols}
-    assert sym_map["__init__"]["kind"] == "module"
-    assert sym_map["__init__"]["visibility"] == "public"
-    assert sym_map["__init__"]["decorators_json"] == "[]"
+    assert "__init__" not in sym_map
     assert sym_map["_secret"]["visibility"] == "private"
 
 
@@ -1850,7 +1920,63 @@ def test_tier1_same_line_field_does_not_inherit_class_metadata(tmp_path: Path):
 
     res = ingest_scip(test_scip, unit, tier2_result=tier2)
     sym_map = {s["name"]: s for s in res.symbols}
-    assert json.loads(sym_map["TIMEOUT"]["decorators_json"]) == []
+    assert sym_map["TIMEOUT"]["visibility"] is None
+    assert sym_map["TIMEOUT"]["decorators_json"] is None
+
+
+def test_tier1_java_private_field_metadata_is_unknown(tmp_path: Path):
+    """A Java field Tier 2 never records is stored with unknown visibility and decorators."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java" / "com" / "example"
+    java_dir.mkdir(parents=True)
+    widget = java_dir / "Widget.java"
+    widget.write_text("package com.example;\n\npublic class Widget {\n    private int count;\n}\n")
+
+    unit = IndexUnit("java:root", "root", "java", repo, files=[widget])
+    tier2 = JavaPlugin().index_unit_tier2(unit)
+    assert all(s["name"] != "count" for s in tier2.symbols)
+
+    class_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Widget#"
+    field_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Widget#count."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/Widget.java",
+                language="Java",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=class_sym,
+                        display_name="Widget",
+                        kind=scip_pb2.SymbolInformation.Kind.Class,
+                    ),
+                    scip_pb2.SymbolInformation(
+                        symbol=field_sym,
+                        display_name="count",
+                        kind=scip_pb2.SymbolInformation.Kind.Field,
+                    ),
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=class_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[2, 13, 19],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=field_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[3, 16, 21],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "widget.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert sym_map["count"]["visibility"] is None
+    assert sym_map["count"]["decorators_json"] is None
 
 
 def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Path):

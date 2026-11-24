@@ -221,7 +221,7 @@ def _heuristic_import_line_numbers(file_lines: list[str], language: str) -> dict
     for line_no, raw in enumerate(file_lines, start=1):
         stripped = raw.strip()
         if depth == 0 and not continued:
-            if not _starts_import(stripped, language):
+            if not _starts_import(_code_only(stripped, language).strip(), language):
                 continue
             statement_start = line_no
         lines[line_no] = statement_start
@@ -234,14 +234,54 @@ def _heuristic_import_line_numbers(file_lines: list[str], language: str) -> dict
     return lines
 
 
+def _statement_end_col(line: str, terminators: str) -> int:
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'`":
+            quote = char
+        elif line.startswith("//", index) or line.startswith("/*", index):
+            break
+        elif char in terminators:
+            return index + 1
+        index += 1
+    return len(line)
+
+
+def _heuristic_import_spans(
+    file_lines: list[str], lines: dict[int, int]
+) -> list[tuple[int, int, int, int]]:
+    by_statement: dict[int, list[int]] = {}
+    for line_no, statement in lines.items():
+        by_statement.setdefault(statement, []).append(line_no)
+    spans: list[tuple[int, int, int, int]] = []
+    for statement, statement_lines in by_statement.items():
+        first_line = file_lines[statement - 1]
+        start_col = len(first_line) - len(first_line.lstrip())
+        end_line = max(statement_lines)
+        end_col = _statement_end_col(file_lines[end_line - 1], ";")
+        spans.append((statement, start_col, end_line, end_col))
+    return spans
+
+
 def _import_info(file_lines: list[str], language: str) -> _ImportInfo:
     if language == "python":
         info = _python_import_info(file_lines)
         if info is not None:
             return info
     lines = _heuristic_import_line_numbers(file_lines, language)
-    spans = [(line_no, 0, line_no, len(file_lines[line_no - 1])) for line_no in lines]
-    return _ImportInfo(lines, spans, {})
+    return _ImportInfo(lines, _heuristic_import_spans(file_lines, lines), {})
 
 
 def _in_import_span(start_line: int, col: int, spans: list[tuple[int, int, int, int]]) -> bool:
@@ -1029,22 +1069,22 @@ def _parse_scip_payload(
                     if (info and info.kind)
                     else inferred_kind
                 )
+                if kind == "module":
+                    continue
 
                 enc_start, enc_end = _get_enclosing_range(occ, start_line, end_line)
-                tier2_meta = None
-                if kind != "module":
-                    tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
-                    if tier2_meta is None:
-                        containing = [
-                            candidate
-                            for candidate in tier2_by_name.get((rel_path, display_name), ())
-                            if candidate["start_line"] <= start_line <= candidate["end_line"]
-                        ]
-                        if containing:
-                            tier2_meta = max(containing, key=lambda c: c["start_line"])
+                tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
+                if tier2_meta is None:
+                    containing = [
+                        candidate
+                        for candidate in tier2_by_name.get((rel_path, display_name), ())
+                        if candidate["start_line"] <= start_line <= candidate["end_line"]
+                    ]
+                    if containing:
+                        tier2_meta = max(containing, key=lambda c: c["start_line"])
                 if tier2_meta and tier2_meta.get("end_line"):
                     enc_end = max(enc_end, tier2_meta["end_line"])
-                if kind != "module" and tier2_meta is None and not _has_enclosing_range(occ):
+                if tier2_meta is None and not _has_enclosing_range(occ):
                     enc_end = max(
                         enc_end, _fallback_definition_end(file_lines, start_line, definition_starts)
                     )
@@ -1079,8 +1119,8 @@ def _parse_scip_payload(
                         "start_line": start_line,
                         "end_line": enc_end,
                         "body_sha256": body_sha256,
-                        "visibility": (tier2_meta or {}).get("visibility") or "public",
-                        "decorators_json": (tier2_meta or {}).get("decorators_json") or "[]",
+                        "visibility": (tier2_meta or {}).get("visibility"),
+                        "decorators_json": (tier2_meta or {}).get("decorators_json"),
                     }
                 )
             else:
