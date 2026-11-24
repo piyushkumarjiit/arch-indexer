@@ -69,7 +69,8 @@ arch-indexer/
     ├── test_graph_and_mermaid.py
     ├── test_query.py
     ├── test_citations.py
-    └── test_plan_and_assemble.py
+    ├── test_planner.py
+    └── test_assembler.py
 ```
 
 ### 2.2 External Tool-Local Cache Layout
@@ -482,8 +483,9 @@ Built against small, committed fixture repositories under `tests/fixtures/` (run
 - **`test_citations.py`**:
   - Valid citations pass; missing file, out-of-range line, wrong symbol, shifted line, and dangling footnote all fail with exit `3` and exact diagnostic codes.
   - File-to-section mapping accurately isolates impacted sections.
-- **`test_plan_and_assemble.py`**:
+- **`test_planner.py`**:
   - Large synthetic index splits into multiple bounded packets under line/symbol budgets with disjoint draft paths.
+- **`test_assembler.py`**:
   - `assemble` merges drafts, patches only impacted sections, globally renumbers footnotes, injects diagrams, deletes drafts, and enforces validation gates.
 
 ### 10.2 Progressive End-to-End Validation Plan
