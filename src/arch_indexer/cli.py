@@ -17,6 +17,7 @@ from arch_indexer.config import (
     DEFAULT_UNIT_TIMEOUT_SEC,
 )
 from arch_indexer.indexer import run_index
+from arch_indexer.planner import run_plan
 from arch_indexer.query import (
     DEFAULT_FLOW_DEPTH,
     DEFAULT_QUERY_LIMIT,
@@ -216,6 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_SECTIONS_PER_WORKER,
         help="Max sections per worker packet",
     )
+    plan_parser.add_argument(
+        "--docs-dir",
+        default=DEFAULT_DOCS_DIR,
+        help="Docs directory containing graph.json and target docs",
+    )
     plan_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 5. assemble
@@ -333,6 +339,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error during indexing: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "plan":
+        try:
+            return run_plan(
+                repo=args.repo,
+                max_lines_per_worker=args.max_lines_per_worker,
+                max_symbols_per_worker=args.max_symbols_per_worker,
+                max_sections_per_worker=args.max_sections_per_worker,
+                docs_dir=args.docs_dir,
+                cache_dir=args.cache_dir,
+            )
+        except Exception as e:
+            sys.stderr.write(f"Error planning worker packets: {e}\n")
             return EXIT_ERROR
 
     elif args.command == "assemble":
