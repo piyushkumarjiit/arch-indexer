@@ -129,7 +129,12 @@ def _masked_ranges(node: Node, ranges: list[tuple[int, int]]) -> None:
 
 
 def _file_content_sha256(source: bytes, path: str) -> str:
-    """Hash the non-blank, non-comment content of a file, ignoring line positions."""
+    """Hash a file's content ignoring line numbers, blank lines and trailing whitespace.
+
+    Comments (and, for Python, module-level docstrings) are masked only for languages with
+    a tree-sitter parser; other files keep their comment text, so editing a comment in them
+    still counts as a content change and blocks the zero-token relocation path.
+    """
     parser = _parser_for_suffix(Path(path).suffix.lower())
     masked = source
     if parser is not None:
@@ -166,7 +171,7 @@ class RepoSnapshot:
         return snapshot
 
     def record_content_hashes(self, repo_path: str | Path) -> None:
-        """Record a non-blank, non-comment content signature for each indexed file."""
+        """Record a line-number-independent content signature for each indexed file."""
         root = Path(repo_path)
         for path, record in self.files.items():
             try:

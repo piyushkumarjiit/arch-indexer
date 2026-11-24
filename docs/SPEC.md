@@ -37,8 +37,8 @@ arch-indexer/
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
+│   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
 │   ├── storage/
-│   │   ├── db.py                    # SQLite schema & streaming SCIP/AST ingestion
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph/
 │   │   ├── builder.py               # Deterministic graph.json builder
@@ -185,7 +185,7 @@ Core tables:
 
 ### 5.1 Snapshot & Delta Calculation
 On each `arch-indexer index <repo>` run:
-1. Compute current `sha256` for all tracked source/infra files, a `content_sha256` per file over its non-blank, non-comment content (module-level docstrings are excluded), and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
+1. Compute current `sha256` for all tracked source/infra files and a `content_sha256` per file that ignores line numbers, blank lines and trailing whitespace. For the tree-sitter-parsed languages, comments are masked out first (and, for Python, module-level docstrings); other files (for example Dockerfiles, shell scripts and CI workflows) keep their comment text. Record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
 2. Compare against `<cache>/repos/<id>/state.json`.
 3. Produce `index-delta.json` containing:
    - `is_first_run`: boolean
