@@ -8,6 +8,7 @@ import pytest
 from arch_indexer.assembler import (
     DraftFormatError,
     assemble,
+    extract_existing_definitions,
     inject_diagrams,
     parse_draft_file,
     patch_section_in_doc,
@@ -103,6 +104,52 @@ def test_parse_draft_multi_section(tmp_path):
     assert "[^multi-packet__2]" in packet.sections["design-sec3"]
 
 
+def test_parse_draft_file_rejects_duplicate_footnote_definition_ids(tmp_path):
+    """One draft may define each local footnote id only once; a repeat is a format error."""
+    draft_path = tmp_path / "multi.md"
+    draft_path.write_text(
+        "---\n"
+        "packet_id: multi\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2, design-sec3]\n"
+        "---\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "Components call alpha[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-sec3:START -->\n"
+        "Flows call beta[^1].\n"
+        "<!-- SECTION:design-sec3:END -->\n\n"
+        "[^1]: `src/a.py:1` — `alpha`\n"
+        "[^1]: `src/b.py:1` — `beta`\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DraftFormatError, match="duplicate footnote"):
+        parse_draft_file(draft_path)
+
+
+def test_parse_draft_file_keeps_footnote_definitions_inside_fenced_code(tmp_path):
+    """A `[^1]: ...` line inside a fenced example is code, not a real definition."""
+    draft_path = tmp_path / "fenced.md"
+    draft_path.write_text(
+        "---\n"
+        "packet_id: fenced\n"
+        "target_doc: DESIGN.md\n"
+        "section_ids: [design-sec2]\n"
+        "---\n"
+        "Real prose cites alpha[^1].\n\n"
+        "[^1]: `src/a.py:1` — `alpha`\n\n"
+        "```markdown\n"
+        "[^1]: `src/example.py:9` — `example`\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    packet = parse_draft_file(draft_path)
+    assert packet.definitions == {"fenced__1": "`src/a.py:1` — `alpha`"}
+    assert "[^1]: `src/example.py:9` — `example`" in packet.sections["design-sec2"]
+
+
 def test_patch_section_in_doc():
     doc = (
         "<!-- SECTION:sec1:START -->\n"
@@ -144,6 +191,39 @@ def test_renumber_footnotes_and_deduplication():
     assert "[^1]: `src/a.py:10` — `func_a`" in renumbered
     assert "[^2]: `src/b.py:20` — `func_b`" in renumbered
     assert "[^3]" not in renumbered
+
+
+def test_renumber_footnotes_keeps_definitions_inside_fenced_code():
+    """The references block is rebuilt from prose definitions; fenced examples stay verbatim."""
+    doc = (
+        "# Design\n\n"
+        "Prose cites alpha[^1].\n\n"
+        "```markdown\n"
+        "[^1]: `src/example.py:9` — `example`\n"
+        "```\n\n"
+        "<!-- SECTION:references:START:exempt -->\n"
+        "## References\n\n"
+        "[^1]: `src/old.py:3` — `old`\n"
+        "<!-- SECTION:references:END -->\n"
+    )
+    renumbered = renumber_footnotes_in_doc(doc, {"1": "`src/a.py:1` — `alpha`"})
+
+    assert "```markdown\n[^1]: `src/example.py:9` — `example`\n```" in renumbered
+    assert renumbered.count("[^1]: `src/a.py:1` — `alpha`") == 1
+    assert "src/old.py:3" not in renumbered
+
+
+def test_extract_existing_definitions_ignores_fenced_examples():
+    """A definition-looking line inside a fenced block is not an existing citation."""
+    doc = (
+        "Prose cites alpha[^1].\n\n"
+        "[^1]: `src/a.py:1` — `alpha`\n\n"
+        "```markdown\n"
+        "[^1]: `src/example.py:9` — `example`\n"
+        "```\n"
+    )
+
+    assert extract_existing_definitions(doc) == {"1": "`src/a.py:1` — `alpha`"}
 
 
 def test_inject_diagrams():
@@ -826,6 +906,31 @@ def test_assemble_rejects_repeated_packet_id_across_drafts(tmp_path, second_sect
     assert "design-sec2-mod-billing" in err.getvalue()
     assert (drafts / "first.md").is_file()
     assert (drafts / "second.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_rejects_duplicate_footnote_definition_ids(tmp_path):
+    """A draft redefining a local footnote id exits 3, keeps the draft, and writes no docs."""
+    repo, drafts = _repo_with_app(tmp_path)
+    draft = drafts / "multi.md"
+    _write_design_draft(
+        drafts,
+        "multi.md",
+        "multi",
+        ["design-sec2", "design-sec3"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "Components call alpha[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-sec3:START -->\n"
+        "Flows call beta[^1].\n"
+        "<!-- SECTION:design-sec3:END -->\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n"
+        "[^1]: `src/app.py:4` — `beta`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 3
+    assert draft.is_file()
     assert not (repo / "docs" / "DESIGN.md").exists()
 
 

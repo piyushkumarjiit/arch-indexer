@@ -122,11 +122,21 @@ def parse_draft_file(path: Path) -> DraftPacket:
     # Extract footnote definitions from body
     cleaned_body_lines: list[str] = []
     local_definitions: dict[str, str] = {}
+    in_fence = False
     for line in _split_lines(body):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            cleaned_body_lines.append(line)
+            continue
+        if in_fence:
+            cleaned_body_lines.append(line)
+            continue
         def_match = FOOTNOTE_DEF_RE.match(line)
         if def_match:
             fn_id = def_match.group("id").strip()
             def_body = def_match.group("body").strip()
+            if fn_id in local_definitions:
+                raise DraftFormatError(f"duplicate footnote definition [^{fn_id}] in draft")
             local_definitions[fn_id] = def_body
         else:
             cleaned_body_lines.append(line)
@@ -242,7 +252,13 @@ def parse_draft_file(path: Path) -> DraftPacket:
 def extract_existing_definitions(doc_text: str) -> dict[str, str]:
     """Extract footnote definitions from an existing document."""
     defs: dict[str, str] = {}
+    in_fence = False
     for line in _split_lines(doc_text):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         m = FOOTNOTE_DEF_RE.match(line)
         if m:
             fn_id = m.group("id").strip()
@@ -340,7 +356,15 @@ def renumber_footnotes_in_doc(doc_text: str, definitions: dict[str, str]) -> str
     # Strip any existing footnote definitions from the entire document
     lines = _split_lines(doc_text)
     non_def_lines: list[str] = []
+    in_fence = False
     for line in lines:
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            non_def_lines.append(line)
+            continue
+        if in_fence:
+            non_def_lines.append(line)
+            continue
         if FOOTNOTE_DEF_RE.match(line):
             continue
         non_def_lines.append(line)
@@ -538,7 +562,7 @@ def assemble(
     ):
         stderr.write(
             f"Error: Drafts directory '{resolved_drafts_dir}' must not be the target repository "
-            f"root or overlap the docs directory '{target_docs_dir}'\n"
+            f"root, equal the docs directory '{target_docs_dir}', or contain it\n"
         )
         return 1
 
