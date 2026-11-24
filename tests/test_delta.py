@@ -759,9 +759,7 @@ def test_failed_relocation_restores_docs_so_retry_does_not_double_shift(tmp_path
     capsys.readouterr()
 
     # Shift A.run (2 -> 7) and B.run (7 -> 12) by inserting 5 leading lines.
-    (repo / "src" / "app.py").write_text(
-        "\n\n\n\n\n" + TWO_RUN_SOURCE, encoding="utf-8"
-    )
+    (repo / "src" / "app.py").write_text("\n\n\n\n\n" + TWO_RUN_SOURCE, encoding="utf-8")
     _commit(repo, "shift both run methods by 5")
 
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_VALIDATION_FAILED
@@ -979,9 +977,7 @@ def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys
     assert "[^1]: `src/app.py:5` — `start`" in design_path.read_text(encoding="utf-8")
 
     # Large shift (+6): old line 5 is completely outside new span 9..12.
-    (repo / "src" / "app.py").write_text(
-        "\n\n\n\n\n\n\n\n" + source, encoding="utf-8"
-    )
+    (repo / "src" / "app.py").write_text("\n\n\n\n\n\n\n\n" + source, encoding="utf-8")
     _commit(repo, "shift by 6")
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
     capsys.readouterr()

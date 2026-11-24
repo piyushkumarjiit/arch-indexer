@@ -39,7 +39,7 @@ arch-indexer/
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
 │   ├── storage/
 │   │   ├── db.py                    # SQLite schema & streaming SCIP/AST ingestion
-│   │   └── state.py                 # Snapshot hashes, symbol hashes, delta calculation
+│   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph/
 │   │   ├── builder.py               # Deterministic graph.json builder
 │   │   └── mermaid.py               # Deterministic Mermaid diagram generator
@@ -340,7 +340,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected (or first run). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, or `assemble` failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer is not present in the local cache. |
 
 ---
@@ -509,7 +509,7 @@ Execute sequentially against real repositories, gating each stage on passing `ch
 
 2. **Committing volatile cache files "only alongside a docs update" (Correction 5)**:
    - *Position*: Never commit `index.db`, raw `.scip` files, or binary caches into the target repository—even alongside a docs update. Keep all SQLite and temporary caches strictly in `<cache>/repos/<id>/`.
-   - *Reason*: SQLite files are opaque binaries that bloat git history on every doc update and produce unresolvable merge conflicts across branches. If cross-machine incremental delta detection is later desired in git, only a small, deterministically sorted JSON state file (`state.json` containing file/symbol hashes) should ever be considered for opt-in commit, never `index.db`.
+   - *Reason*: SQLite files are opaque binaries that bloat git history on every doc update and produce unresolvable merge conflicts across branches. If cross-machine incremental delta detection is later desired in git, only a small, deterministically sorted JSON state file (`state.json` containing file and symbol signatures) should ever be considered for opt-in commit, never `index.db`.
 
 3. **Unconstrained code-generated Mermaid diagrams on ~1,000-file repos (Owner Goal 2)**:
    - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`--max-diagram-nodes 35`, `--max-diagram-edges 60`) are enforced.

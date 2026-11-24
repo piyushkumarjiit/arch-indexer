@@ -372,8 +372,7 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
         for path in delta.modified_files
         if path in moved_paths
         and previous.files[path].get("content_sha256")
-        and previous.files[path].get("content_sha256")
-        == current.files[path].get("content_sha256")
+        and previous.files[path].get("content_sha256") == current.files[path].get("content_sha256")
     )
 
     return delta
