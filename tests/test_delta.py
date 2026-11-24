@@ -1023,3 +1023,117 @@ def test_decorator_change_is_reported_as_modified_not_move_only(tmp_path: Path, 
     assert [symbol["fqname"] for symbol in delta["modified_symbols"]] == ["app.start"]
     reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
     assert reasons["1-architecture-overview"] == ["modified_file"]
+
+
+def test_exempt_and_case_insensitive_section_markers_preserve_overview_and_diagrams(
+    tmp_path: Path, capsys
+):
+    """Skeleton sections marked :START:exempt or mixed-case must be parsed and impacted."""
+    from arch_indexer.skeletons import load_skeleton
+
+    design_sections = parse_doc_sections(load_skeleton("DESIGN.md"), "docs/DESIGN.md")
+    assert [s.section_id for s in design_sections] == [
+        "design-sec1",
+        "design-sec2",
+        "design-sec3",
+        "design-sec4",
+        "design-sec5",
+        "design-sec6",
+        "design-sec7",
+        "design-sec8",
+        "design-references",
+    ]
+    assert set(design_sections[0].diagram_hashes) == {"module-overview"}
+
+    guide_sections = parse_doc_sections(load_skeleton("USER_GUIDE.md"), "docs/USER_GUIDE.md")
+    assert [s.section_id for s in guide_sections] == [
+        "guide-sec1",
+        "guide-sec2",
+        "guide-sec3",
+        "guide-references",
+    ]
+
+    repo = _make_repo(tmp_path)
+    design_doc = (
+        "# Technical Design Document\n\n"
+        "<!-- section:design-sec1:start:exempt -->\n"
+        "## 1. Architecture Overview\n\n"
+        "Starts via `start`[^1].\n\n"
+        "<!-- AUTO-DIAGRAM:module-overview:START -->\n"
+        "```mermaid\n"
+        "flowchart LR\n"
+        "    app --> util\n"
+        "```\n"
+        "<!-- AUTO-DIAGRAM:module-overview:END -->\n"
+        "<!-- section:design-sec1:end -->\n\n"
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Helper lives in `helper`[^2].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-references:START:exempt -->\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `start`\n"
+        "[^2]: `src/util.py:1` — `helper`\n"
+        "<!-- SECTION:design-references:END -->\n"
+    )
+    guide_doc = (
+        "# User Guide\n\n"
+        "<!-- SECTION:guide-sec1:START:exempt -->\n"
+        "## 1. System Overview\n\n"
+        "Run `start`[^1].\n"
+        "<!-- SECTION:guide-sec1:END -->\n\n"
+        "<!-- SECTION:guide-sec2:START -->\n"
+        "## 2. User Roles & Permissions\n\n"
+        "No citations.\n"
+        "<!-- SECTION:guide-sec2:END -->\n\n"
+        "<!-- SECTION:guide-references:START:exempt -->\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `start`\n"
+        "<!-- SECTION:guide-references:END -->\n"
+    )
+    design_path = repo / "docs" / "DESIGN.md"
+    guide_path = repo / "docs" / "USER_GUIDE.md"
+    design_path.write_text(design_doc, encoding="utf-8")
+    guide_path.write_text(guide_doc, encoding="utf-8")
+    _commit(repo, "use skeleton markers")
+
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    first_run_ids = {(e["doc"], e["section_id"]) for e in _impacted(cache)["sections"]}
+    assert ("docs/DESIGN.md", "design-sec1") in first_run_ids
+    assert ("docs/DESIGN.md", "design-references") in first_run_ids
+    assert ("docs/USER_GUIDE.md", "guide-sec1") in first_run_ids
+    assert ("docs/USER_GUIDE.md", "guide-references") in first_run_ids
+    assert (
+        "module-overview"
+        in _load(cache, "state.json")["diagram_hashes"]["docs/DESIGN.md"]["design-sec1"]
+    )
+
+    design_path.write_text(
+        design_doc.replace("app --> util", "app --> worker"),
+        encoding="utf-8",
+    )
+    _commit(repo, "update overview diagram")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    reasons = {
+        (e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]
+    }
+    assert reasons[("docs/DESIGN.md", "design-sec1")] == ["diagram_changed"]
+
+    (repo / "src" / "app.py").write_text(
+        APP_SOURCE.replace('return "start"', 'return "boot"'),
+        encoding="utf-8",
+    )
+    _commit(repo, "modify app.start")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    reasons = {
+        (e["doc"], e["section_id"]): e["reasons"] for e in _impacted(cache)["sections"]
+    }
+    assert reasons[("docs/DESIGN.md", "design-sec1")] == ["modified_file"]
+    assert reasons[("docs/USER_GUIDE.md", "guide-sec1")] == ["modified_file"]
+    assert ("docs/DESIGN.md", "design-references") not in reasons
+    assert ("docs/USER_GUIDE.md", "guide-references") not in reasons

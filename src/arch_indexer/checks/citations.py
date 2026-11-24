@@ -553,8 +553,14 @@ def run_check_citations(
 # --- Document section parsing, diagram hashes and zero-token citation relocation ---
 
 # Section markers written by the docs assembler: <!-- SECTION:<id>:START --> / :END
-SECTION_LINE_START_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):START\s*-->\s*$")
-SECTION_LINE_END_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):END\s*-->\s*$")
+SECTION_LINE_START_RE = re.compile(
+    r"^\s*<!--\s*SECTION:(?P<id>[^:>\s]+):START(?::[^>\s]+)?\s*-->\s*$",
+    re.IGNORECASE,
+)
+SECTION_LINE_END_RE = re.compile(
+    r"^\s*<!--\s*SECTION:(?P<id>[^:>\s]+):END\s*-->\s*$",
+    re.IGNORECASE,
+)
 # Auto-generated diagram slot (spec section 6.2)
 AUTO_DIAGRAM_BLOCK_RE = re.compile(
     r"<!--\s*AUTO-DIAGRAM:(?P<id>[^:\s]+):START\s*-->(?P<body>.*?)"
