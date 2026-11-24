@@ -268,7 +268,7 @@ Data stores and external sinks are detected deterministically from known ORM/DB/
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
 - **Module Dependency Diagram** (`diagram:module-overview`): `flowchart LR` of modules, data stores, and external sinks.
 - **Per-Entrypoint / Per-Domain Flow Diagrams** (`diagram:flow-<domain>`): `flowchart TD` tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`.
-- **Readability budgets** (essential for ~1,000-file repos): configurable `--max-diagram-nodes` (default `35`) and `--max-diagram-edges` (default `60`). When a graph exceeds the budget, the generator deterministically collapses internal helper nodes to module-level aggregates and adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
+- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a graph exceeds a budget, the generator deterministically collapses internal helper nodes to module-level aggregates and adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
   <!-- AUTO-DIAGRAM:module-overview:START -->
@@ -386,7 +386,7 @@ Every footnote reference uses a strict machine-parseable format:
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
 - Verifies valid diagram declaration header (`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram-v2`).
 - Verifies non-empty body, balanced `subgraph`/`end` blocks, balanced quotes and bracket delimiters (`[...]`, `(...)`, `{...}`), valid node ID characters, and well-formed edge arrows (`-->`, `-.->`, `==>`, `-- text -->`).
-- Verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of `graph.json` (detecting accidental manual or LLM edits to generated diagrams).
+- Verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of `graph.json`, and that every diagram `graph.json` produces has a block in `docs/DESIGN.md` (detecting accidental manual or LLM edits to generated diagrams, and missing generated diagrams).
 - Exits **`3`** on any violation.
 
 ---
@@ -512,5 +512,5 @@ Execute sequentially against real repositories, gating each stage on passing `ch
    - *Reason*: SQLite files are opaque binaries that bloat git history on every doc update and produce unresolvable merge conflicts across branches. If cross-machine incremental delta detection is later desired in git, only a small, deterministically sorted JSON state file (`state.json` containing file and symbol signatures) should ever be considered for opt-in commit, never `index.db`.
 
 3. **Unconstrained code-generated Mermaid diagrams on ~1,000-file repos (Owner Goal 2)**:
-   - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`--max-diagram-nodes 35`, `--max-diagram-edges 60`) are enforced.
+   - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`35` nodes, `60` edges) are enforced.
    - *Reason*: Rendering a raw unaggregated call graph for a 1,000-file multi-module Java + TS repo into Mermaid produces unreadable diagrams that fail to communicate architecture. Code-generated Mermaid should show bounded module-level and focused entrypoint-to-sink slices, deferring full-graph exploration to `docs/flow-viewer.html`.
