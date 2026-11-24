@@ -138,6 +138,19 @@ def parse_scip_symbol(symbol_str: str) -> tuple[str, str, str, str]:
     return simple_name, fqname, kind, last_suffix
 
 
+_STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`(?:[^`\\]|\\.)*`")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/")
+_LINE_COMMENT = {"python": "#", "java": "//", "typescript": "//"}
+
+
+def _code_only(stripped: str, language: str) -> str:
+    code = _BLOCK_COMMENT.sub("", _STRING_LITERAL.sub("", stripped))
+    comment = _LINE_COMMENT.get(language)
+    if comment:
+        code = code.split(comment, 1)[0]
+    return code
+
+
 def _starts_import(stripped: str, language: str) -> bool:
     if language == "python":
         if re.match(r"import\b", stripped):
@@ -160,9 +173,10 @@ def _import_line_numbers(file_lines: list[str], language: str) -> set[int]:
         if depth == 0 and not continued and not _starts_import(stripped, language):
             continue
         lines.add(line_no)
-        depth += sum(stripped.count(ch) for ch in "([{")
-        depth -= sum(stripped.count(ch) for ch in ")]}")
-        continued = stripped.endswith("\\")
+        code = _code_only(stripped, language)
+        depth += sum(code.count(ch) for ch in "([{")
+        depth -= sum(code.count(ch) for ch in ")]}")
+        continued = code.rstrip().endswith("\\")
         if depth <= 0:
             depth = 0
     return lines
@@ -425,20 +439,6 @@ def _scip_module_prefix(language: str, rel_path: str) -> str:
     return ""
 
 
-def _emitter_module_prefix(
-    unit: IndexUnit, rel_path: str, root_cache: dict[tuple[str, ...], bool] | None = None
-) -> str:
-    """Return the module namespace the language's SCIP emitter uses for a file."""
-    prefix = _scip_module_prefix(unit.language, rel_path)
-    if unit.language == "python":
-        from arch_indexer.plugins.python_plugin import _module_info
-
-        project = _module_info(unit.root_dir, rel_path, root_cache)[3].replace("/", ".")
-        if project and prefix.startswith(project + "."):
-            return prefix[len(project) + 1 :]
-    return prefix
-
-
 def _align_fqname(fqname: str, renames: list[tuple[str, str]]) -> str:
     """Replace the longest matching SCIP module prefix with the plugin module name."""
     for prefix, module in renames:
@@ -566,10 +566,9 @@ def _parse_scip_payload(
     repo_fqnames: set[str] = set()
     repo_modules: set[str] = set()
     if symbol_context:
-        root_cache: dict[tuple[str, ...], bool] = {}
         for file_rec in symbol_context.get("file_records", {}).get(unit.language, []):
             module = file_rec.get("module", "")
-            prefix = _emitter_module_prefix(unit, file_rec.get("path", ""), root_cache)
+            prefix = _scip_module_prefix(unit.language, file_rec.get("path", ""))
             if prefix and module and prefix != module:
                 renames.setdefault(prefix, module)
         repo_fqnames.update(symbol_context.get("fqnames", {}).get(unit.language, set()))

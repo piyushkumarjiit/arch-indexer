@@ -471,7 +471,7 @@ def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
         files=[manage],
     )
     root_module = "scip-python python pkg 0.1.0 `manage`/"
-    user_sym = "scip-python python pkg 0.1.0 `src.auth.models`/User#"
+    user_sym = "scip-python python pkg 0.1.0 `backend.src.auth.models`/User#"
     scip_index = scip_pb2.Index(
         documents=[
             scip_pb2.Document(
@@ -514,6 +514,58 @@ def test_tier1_references_align_to_nested_project_root_modules(tmp_path: Path):
 
     assert {r["symbol_fqname"] for r in res.references} == {"backend.auth.models.User"}
     assert res.unresolved_refs == []
+
+
+def test_tier1_import_comments_do_not_label_later_references(tmp_path: Path):
+    """An unbalanced bracket in an import comment does not label later lines imports."""
+    repo = tmp_path / "repo"
+    (repo / "auth").mkdir(parents=True)
+    (repo / "auth" / "models.py").write_text("class User:\n    pass\n")
+    main = repo / "main.py"
+    main.write_text("from auth.models import User  # (legacy path\n\nUser()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[main],
+    )
+    main_module = "scip-python python pkg 0.1.0 `main`/"
+    user_sym = "scip-python python pkg 0.1.0 `auth.models`/User#"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="main.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=main_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 24, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[2, 0, 0],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "import_comment.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
+    assert (1, "import") in ref_kinds
+    assert (3, "type") in ref_kinds
 
 
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
