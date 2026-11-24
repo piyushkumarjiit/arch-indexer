@@ -41,7 +41,7 @@ When network access is available, install required language indexers into the lo
 ```bash
 arch-indexer toolchain ensure --repo <repo>
 ```
-*Note: `toolchain ensure` is the ONLY command permitted network access. Optional status inspection: `arch-indexer toolchain status --repo <repo>`.*
+*Note: toolchain installation is the only operation permitted network access; it happens here, and also automatically inside `index` unless `--offline` is passed (step 1b runs `--offline`, so no network access occurs there). Optional status inspection: `arch-indexer toolchain status --repo <repo>`.*
 
 #### 1b. Index Repository & Detect Delta (Offline)
 Run offline deterministic indexing with automatic citation line-shift repair:
