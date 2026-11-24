@@ -378,7 +378,7 @@ Every footnote reference uses a strict machine-parseable format:
    - Verify `file_path` exists in `<repo>`.
    - Verify `1 <= line <= total_lines`.
    - Verify `symbol` matches either (a) a symbol in `index.db` spanning or starting at `line` (or `start_line == line`), or (b) the literal token `symbol` appears on `line` of `file_path` (for infra/config lines).
-3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`) and exit **`3`** on any failure.
+3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
@@ -418,7 +418,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 >   - design-sec2
 > ---
 > ```
-> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the skeleton: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` preserves and refills them on every run.
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the skeleton: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` preserves and refills them on every run.
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:
@@ -431,7 +431,7 @@ The thin skill instructs Firstmate to run the following 4 steps:
 
 2. **Step 2 — Dispatch Bounded Section Workers (Parallel, Isolated Branches)**
    - Dispatch up to `K` parallel Firstmate workers (one per packet in `work-plan.json`, capped by concurrency limit).
-   - Each worker operates in its own isolated checkout/branch and writes **only** its assigned disjoint draft file `docs/.drafts/<packet_id>.md`—never `docs/DESIGN.md` or `docs/USER_GUIDE.md`.
+   - Each worker operates in its own isolated checkout/branch and writes **only** its assigned disjoint draft file `docs/.drafts/<packet_id>.md`—never `docs/DESIGN.md` or `docs/USER_GUIDE.md`. Each draft follows the draft-file contract in §9.2 (YAML front-matter, `SECTION` markers, no `SLICE` or `AUTO-DIAGRAM` markers).
    - Worker rules:
      - Read only its packet JSON, `master-index.json`, `index-delta.json`, and existing section text (if patching).
      - Use `arch-indexer query <repo> ...` and targeted line-range file reads; never load entire large files indiscriminately.
@@ -445,9 +445,9 @@ The thin skill instructs Firstmate to run the following 4 steps:
      2. Runs `arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs`, which deterministically:
         - Creates `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton when the document does not exist yet.
         - Patches only the updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (preserving untouched sections on incremental runs).
-        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots.
+        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots (from a `--diagrams <json>` mapping, when supplied).
         - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
-        - Writes/updates `docs/graph.json` and `docs/flow-viewer.html`.
+        - Writes `docs/graph.json` and `docs/flow-viewer.html` (graph export is a separate slice, not yet performed by `assemble`).
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates.
         - Deletes `docs/.drafts/` only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
      3. Commits only `docs/DESIGN.md`, `docs/USER_GUIDE.md`, `docs/graph.json`, and `docs/flow-viewer.html`.
