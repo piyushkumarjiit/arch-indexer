@@ -1241,11 +1241,12 @@ class PythonPlugin(LanguagePlugin):
         parsed_by_path: dict[str, tuple[str, bytes, Node]],
         resolver: _Resolver,
     ) -> None:
-        """Record mounts from every non-test Python file, once per repository layout.
+        """Record mounts from every non-test Python file, once per repository content state.
 
         A mount may live in a different unit (e.g. ``main.py`` mounting a router from
         another package or chunk), so the scan covers the whole repository and its
-        result is cached across the units of a single index run.
+        result is cached across the units of a single index run, keyed by each file's
+        path and SHA-256 so edited mount files invalidate the cache.
         """
         records = {r["path"]: r for r in [*all_file_records, *file_records]}
         key = (
