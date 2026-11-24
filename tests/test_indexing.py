@@ -89,6 +89,47 @@ def test_python_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert len(sym_map["hello"]["body_sha256"]) == 64
 
 
+def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Path):
+    """Tier 1 ingest records imports of packages absent from the index (Spec 4.2/4.3).
+
+    The ``python_imports`` fixture is real ``scip-python 0.6.8`` output (with the
+    absolute ``Metadata.project_root`` removed for portability) for
+    ``src/pyimp/client.py``, which imports the third-party modules ``requests`` and
+    ``yaml`` (neither installed). scip-python emits those module references as
+    namespace symbols with ReadAccess roles, not Import roles.
+    """
+    repo_dir = FIXTURES_DIR / "python_imports"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "pyimp" / "client.py"],
+    )
+
+    test_scip = tmp_path / "test.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit)
+    assert res.success is True
+    assert res.tier == IndexingTier.TIER1
+
+    imports = {
+        (u["file_path"], u["line"], u["raw_symbol"])
+        for u in res.unresolved_refs
+        if u["line"] <= 2
+    }
+    assert imports == {
+        ("src/pyimp/client.py", 1, "requests"),
+        ("src/pyimp/client.py", 2, "yaml"),
+    }
+    assert all(u["language"] == "python" for u in res.unresolved_refs)
+
+    # Symbols defined by the index are resolved, not recorded as unresolved.
+    unresolved_symbols = {u["raw_symbol"] for u in res.unresolved_refs}
+    assert "src.pyimp.client.fetch.url" not in unresolved_symbols
+
+
 def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     """Verify TypeScript SCIP fixture ingest with exact lines."""
     fixture_scip = FIXTURES_DIR / "ts" / "index.scip"

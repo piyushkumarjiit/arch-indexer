@@ -511,15 +511,19 @@ def _parse_scip_payload(
                     )
 
                 is_external = sym_str in external_symbols or sym_str not in defined_symbols
-                if ref_kind == "import" and is_external:
-                    unresolved_key = (rel_path, start_line, fqname)
+                if is_external:
+                    # scip-python emits imported modules as external namespace symbols
+                    # (`requests/__init__:`) with ReadAccess roles, so classify unresolved
+                    # refs by symbol resolution rather than by derived ref kind.
+                    raw_symbol = fqname.removesuffix(".__init__") if last_suffix == ":" else fqname
+                    unresolved_key = (rel_path, start_line, raw_symbol)
                     if unresolved_key not in seen_unresolved:
                         seen_unresolved.add(unresolved_key)
                         unresolved_refs.append(
                             {
                                 "file_path": rel_path,
                                 "line": start_line,
-                                "raw_symbol": fqname,
+                                "raw_symbol": raw_symbol,
                                 "language": unit.language,
                             }
                         )
