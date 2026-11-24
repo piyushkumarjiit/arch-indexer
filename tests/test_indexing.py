@@ -929,14 +929,14 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
                 language="Python",
                 symbols=[
                     scip_pb2.SymbolInformation(
-                        symbol="scip-python python pkg 0.1.0 `src.service`/read_item().",
+                        symbol="scip-python python pkg 0.1.0 `service`/read_item().",
                         display_name="read_item",
                         kind=scip_pb2.SymbolInformation.Kind.Function,
                     ),
                 ],
                 occurrences=[
                     scip_pb2.Occurrence(
-                        symbol="scip-python python pkg 0.1.0 `src.service`/read_item().",
+                        symbol="scip-python python pkg 0.1.0 `service`/read_item().",
                         symbol_roles=scip_pb2.SymbolRole.Definition,
                         range=[12, 4, 13],
                         enclosing_range=[12, 0, 15, 0],
