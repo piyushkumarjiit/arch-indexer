@@ -158,7 +158,7 @@ Each language implements a uniform interface:
 ### 4.3 Tier Recording & Unresolved References
 Every indexed file row in `index.db` records:
 - `tier`: `"scip"` or `"tree-sitter"`
-- `fallback_reason`: `null` or short deterministic code (`"maven_unresolved_artifact"`, `"missing_node_modules"`, `"oom_limit"`, `"timeout"`, `"tool_unavailable"`)
+- `fallback_reason`: `null` or short deterministic code (`"maven_unresolved_artifact"`, `"missing_node_modules"`, `"oom_limit"`, `"timeout"`, `"tool_unavailable"`, `"build_failure"`)
 
 Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing.
 

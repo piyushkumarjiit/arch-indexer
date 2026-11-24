@@ -115,9 +115,7 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     assert res.tier == IndexingTier.TIER1
 
     imports = {
-        (u["file_path"], u["line"], u["raw_symbol"])
-        for u in res.unresolved_refs
-        if u["line"] <= 2
+        (u["file_path"], u["line"], u["raw_symbol"]) for u in res.unresolved_refs if u["line"] <= 2
     }
     assert imports == {
         ("src/pyimp/client.py", 1, "requests"),
