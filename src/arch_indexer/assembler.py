@@ -713,26 +713,3 @@ def assemble(
         stdout.write("Assembly succeeded.\n")
 
     return 0
-
-
-def run_assemble(
-    repo: str | Path,
-    drafts_dir: str | Path,
-    docs_dir: str = DEFAULT_DOCS_DIR,
-    diagrams: str | Path | None = None,
-    remove_slices: Sequence[str] | None = None,
-    cache_dir: str | Path | None = None,
-    out: TextIO | None = None,
-    err: TextIO | None = None,
-) -> int:
-    """CLI execution handler for assemble."""
-    return assemble(
-        repo=repo,
-        drafts_dir=drafts_dir,
-        docs_dir=docs_dir,
-        diagrams=diagrams,
-        remove_slices=remove_slices,
-        cache_dir=cache_dir,
-        out=out,
-        err=err,
-    )

@@ -5,7 +5,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
-from arch_indexer.assembler import run_assemble
+from arch_indexer.assembler import assemble
 from arch_indexer.checks.citations import run_check_citations
 from arch_indexer.checks.mermaid import run_check_mermaid
 from arch_indexer.config import (
@@ -312,7 +312,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     elif args.command == "assemble":
         try:
-            return run_assemble(
+            return assemble(
                 repo=args.repo,
                 drafts_dir=args.drafts_dir,
                 docs_dir=args.docs_dir,
