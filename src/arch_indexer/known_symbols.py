@@ -6,7 +6,7 @@ lower-case fully-qualified name equals the pattern or ends with ``.<pattern>``,
 so ``db.session.execute`` matches ``session.execute`` and
 ``sqlalchemy.create_engine`` matches ``create_engine``. The names in
 ``GLOBAL_CALLABLE_SYMBOLS`` denote language-global callables instead, so they
-match only the exact name: builtin ``open`` is a sink but ``PIL.Image.open`` is
+match only the exact name: bare ``axios`` is a sink but ``app.client.axios`` is
 not. Patterns are intentionally specific: a wrong class is more harmful than an
 unlabelled edge.
 """
@@ -70,7 +70,6 @@ DATA_STORE_CLIENT_SYMBOLS: tuple[str, ...] = (
     "pika.BlockingConnection",
     "aio_pika.connect_robust",
     # Filesystem persistence
-    "open",
     "fs.writeFile",
     "fs.writeFileSync",
     "fs.readFile",
@@ -95,7 +94,6 @@ EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
     "httpx.delete",
     "httpx.request",
     "urllib.request.urlopen",
-    "fetch",
     "axios",
     "axios.get",
     "axios.post",
@@ -103,7 +101,6 @@ EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
     "axios.patch",
     "axios.delete",
     "axios.request",
-    "got",
     "RestTemplate",
     "WebClient",
     "HttpClient",
@@ -126,7 +123,7 @@ EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
 DATA_STORE = "datastore"
 EXTERNAL_SINK = "external-sink"
 
-GLOBAL_CALLABLE_SYMBOLS: frozenset[str] = frozenset({"axios", "fetch", "got", "open"})
+GLOBAL_CALLABLE_SYMBOLS: frozenset[str] = frozenset({"axios"})
 
 
 def _matches(fqname: str, pattern: str) -> bool:

@@ -421,7 +421,7 @@ def fetch():
     ]
 
 
-def test_flow_trace_bare_sink_patterns_match_only_exact_names(tmp_path: Path, capsys):
+def test_flow_trace_drops_bare_open_fetch_got_and_matches_exact_axios(tmp_path: Path, capsys):
     repo = tmp_path / "repo"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "__init__.py").write_text("")
@@ -437,7 +437,11 @@ app = FastAPI()
 @app.get("/archive")
 def unpack():
     tarfile.open("a.tar")
-    return open("b.txt")
+    open("b.txt")
+    fetch("https://example.test")
+    got("https://example.test")
+    client.axios("https://example.test")
+    return axios("https://example.test")
 """
     )
     cache = tmp_path / "cache"
@@ -452,7 +456,11 @@ def unpack():
     assert out.strip().splitlines() == [
         "0 app/main.py:9 app.main.unpack",
         "1 app/main.py:10 app.main.unpack -> tarfile.open",
-        "1 app/main.py:11 [datastore] app.main.unpack -> open",
+        "1 app/main.py:11 app.main.unpack -> open",
+        "1 app/main.py:12 app.main.unpack -> fetch",
+        "1 app/main.py:13 app.main.unpack -> got",
+        "1 app/main.py:14 app.main.unpack -> client.axios",
+        "1 app/main.py:15 [external-sink] app.main.unpack -> axios",
     ]
 
 
