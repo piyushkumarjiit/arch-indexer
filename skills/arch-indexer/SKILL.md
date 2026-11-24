@@ -156,7 +156,7 @@ The assembly command automatically:
    arch-indexer check-citations <repo> --docs-dir docs
    arch-indexer check-mermaid <repo> --docs-dir docs
    ```
-7. Deletes `docs/.drafts/` only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
+7. Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
 
 #### 3d. Gate Verification & Targeted Fixes
 - If `assemble` exits `0`: proceed to commit (Step 3e).
