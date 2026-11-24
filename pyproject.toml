@@ -31,7 +31,7 @@ arch-indexer = "arch_indexer.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-arch_indexer = ["toolchain.toml"]
+arch_indexer = ["toolchain.toml", "viewer/assets/*"]
 
 [tool.ruff]
 line-length = 100

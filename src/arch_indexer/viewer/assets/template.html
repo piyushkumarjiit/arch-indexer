@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Flow Viewer</title>
+  <style>
+/* {{VIEWER_CSS}} */
+  </style>
+</head>
+<body>
+  <!-- Top Navbar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span>ARCH</span>
+        <span class="brand-badge">Viewer</span>
+      </div>
+      <span class="repo-name" id="repo-title">Loading...</span>
+    </div>
+
+    <div class="topbar-center">
+      <div class="search-box">
+        <span>🔍</span>
+        <input type="text" id="search-input" placeholder="Search routes, services, files..." autocomplete="off">
+      </div>
+      <div class="search-dropdown" id="search-dropdown"></div>
+    </div>
+
+    <div class="topbar-right">
+      <button class="btn" id="btn-load-file">📂 Load graph.json</button>
+      <input type="file" id="file-input" accept=".json,application/json" style="display:none">
+    </div>
+  </header>
+
+  <!-- Breadcrumb Navigation Bar -->
+  <div class="breadcrumb-bar">
+    <div class="breadcrumbs" id="breadcrumbs">
+      <div class="crumb active">System</div>
+    </div>
+    <div class="zoom-level-badge" id="zoom-level-badge">system</div>
+  </div>
+
+  <!-- App Body Layout -->
+  <div class="app-body">
+    <!-- Filter Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Modules</div>
+        <div class="filter-group" id="filter-modules"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Node Kinds</div>
+        <div class="filter-group" id="filter-kinds"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Indexing Tiers</div>
+        <div class="filter-group" id="filter-tiers"></div>
+      </div>
+    </aside>
+
+    <!-- Canvas SVG Viewport -->
+    <main class="canvas-area">
+      <svg id="canvas-svg" class="graph-svg">
+        <g id="viewport"></g>
+      </svg>
+
+      <!-- Zoom / Pan Controls -->
+      <div class="canvas-controls">
+        <button class="control-btn" id="btn-zoom-in" title="Zoom In">+</button>
+        <button class="control-btn" id="btn-zoom-out" title="Zoom Out">&minus;</button>
+        <button class="control-btn" id="btn-zoom-reset" title="Reset View">&#x2318;</button>
+      </div>
+
+      <!-- Guided Trace Walkthrough Bar -->
+      <div class="trace-bar" id="trace-bar">
+        <div class="trace-info">
+          <span class="trace-badge">Trace Mode</span>
+          <span class="trace-step-text" id="trace-step-text">Tracing flow...</span>
+        </div>
+        <div class="trace-actions">
+          <button class="btn" id="btn-prev-step">&larr; Prev Step</button>
+          <button class="btn btn-primary" id="btn-next-step">Next Step &rarr;</button>
+          <button class="btn" id="btn-exit-trace">&times; Exit Trace</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Side Inspector Panel -->
+    <aside class="inspector-panel" id="inspector-panel">
+      <div class="inspector-header">
+        <span class="inspector-title">Inspector</span>
+        <button class="close-btn" id="btn-close-inspector">&times;</button>
+      </div>
+      <div class="inspector-content" id="inspector-content">
+        <div style="color:var(--text-muted);font-size:13px;">Select a node or edge to inspect details.</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Embedded Architecture Graph Data -->
+  <script id="arch-graph-data" type="application/json">{{GRAPH_DATA}}</script>
+
+  <!-- Inlined Viewer Scripts -->
+  <script>
+/* {{VIEWER_LOGIC_JS}} */
+  </script>
+  <script>
+/* {{VIEWER_JS}} */
+  </script>
+</body>
+</html>

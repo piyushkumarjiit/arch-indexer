@@ -43,7 +43,7 @@ arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
 
 `index` discovers Python, TypeScript/JavaScript and Java/Maven units with `tree-sitter` plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line summary. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
 
-Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detection, `state.json`, graph export and the viewer are not implemented yet, so `--force-full`, `--docs-dir` and `--auto-relocate-citations` are accepted but have no effect. Because `state.json` is never written, every `index` run is a first run and exits `2` (`DELTA_DETECTED`) after writing `index.db`. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
+Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detection, `state.json` and graph export are not implemented yet, so `--force-full`, `--docs-dir` and `--auto-relocate-citations` are accepted but have no effect. Because `state.json` is never written, every `index` run is a first run and exits `2` (`DELTA_DETECTED`) after writing `index.db`. `--offline --strict-tier1` exits `4` when the repository has Python, TypeScript or Java units, because no Tier 1 indexer is available; `--strict-tier1` without `--offline` falls back to Tier 2.
 
 `ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning and that language falls back to Tier 2 tree-sitter indexing. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
 
@@ -51,8 +51,22 @@ Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detect
 arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 ```
 
+### Flow viewer
+
+This slice also implements the standalone interactive architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`). It renders a single-file, fully self-contained offline HTML document for the `docs/flow-viewer.html` artifact, with hierarchical drill-down navigation (system -> module -> file group -> file -> symbol/endpoint), layered deterministic layout by kind, guided flow tracing from entrypoints to data stores and external sinks, pan/zoom, and client-side filtering and search. The CLI wiring to write this artifact from `arch-indexer index` is not yet implemented, so call the renderer directly with a graph payload as defined in [section 6.1 of the spec](docs/SPEC.md):
+
+```python
+from pathlib import Path
+
+from arch_indexer.viewer import render_viewer
+
+Path("docs/flow-viewer.html").write_text(render_viewer(graph), encoding="utf-8")
+```
+
+The renderer embeds `graph` into the page and also exposes a "Load `graph.json`" file picker, so the same HTML can open any standalone graph without a web server. See [section 6.3 of the spec](docs/SPEC.md) for the full viewer contract.
+
 The `query`, `plan`, and `assemble` commands are not implemented yet: they print an error and exit `1`.
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`) and Tier 2 `tree-sitter` indexing (`index`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands it specifies beyond these slices are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.
