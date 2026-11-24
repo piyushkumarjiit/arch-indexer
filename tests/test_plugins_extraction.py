@@ -2199,7 +2199,8 @@ def test_python_dependency_call_refs_and_inline_security_fqname(tmp_path: Path):
         and r["file_path"] == "app/api.py"
         and r["symbol_fqname"] == "app.security.require_admin"
     ]
-    assert admin_refs == [(9, 39, "app.security.require_admin")]
+    # exactly one ref, anchored at the ``Depends(...)`` call in the framework mount
+    assert admin_refs == [(9, 45, "app.security.require_admin")]
     inline_refs = [
         (r["line"], r["symbol_fqname"])
         for r in res.references

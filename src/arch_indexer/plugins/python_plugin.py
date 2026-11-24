@@ -750,6 +750,12 @@ class _Resolver:
     def get_effective_prefixes_and_deps(
         self, target: _Target, visited: frozenset[_Target] = frozenset()
     ) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Resolve a router's prefixes and dependencies through its mount chain.
+
+        Flask's ``register_blueprint(url_prefix=...)`` overrides the blueprint's own
+        ``url_prefix`` (only an omitted value falls back to it), whereas FastAPI's
+        ``include_router(prefix=...)`` prepends to ``APIRouter(prefix=...)``.
+        """
         if target in visited or target[0] != "internal":
             return [], []
 
@@ -1324,6 +1330,9 @@ class PythonPlugin(LanguagePlugin):
             rel_path: (module_name, source_bytes, root_node)
             for _, rel_path, module_name, _, _, _, source_bytes, root_node in parsed_files
         }
+        # A mount may live in a different unit (e.g. ``main.py`` mounting a router from
+        # another package or chunk), so scan every non-test Python file. Test code must
+        # never contribute production routes or auth.
         scan_records = sorted(
             {r["path"]: r for r in [*file_records, *all_file_records]}.values(),
             key=lambda r: r["path"],
