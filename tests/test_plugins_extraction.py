@@ -2257,6 +2257,35 @@ def test_python_argparse_resolves_aliases_scopes_and_non_argparse(tmp_path: Path
     assert cli_files == {"tool/aliased_cli.py", "tool/attr_cli.py"}
 
 
+def test_python_argparse_reassigned_parser_variable_detected(tmp_path: Path):
+    """Reassigning the parser variable via ``p = p.parse_args()`` still detects the CLI."""
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    (tool_dir / "__init__.py").write_text("")
+    (tool_dir / "parser.py").write_text(
+        "from argparse import ArgumentParser as AP\n\n"
+        "def build_parser():\n"
+        "    return AP()\n"
+    )
+    (tool_dir / "reassign_cli.py").write_text(
+        "from tool.parser import build_parser\n\n"
+        "def main():\n"
+        "    p = build_parser()\n"
+        "    p = p.parse_args()\n"
+        "    return p\n"
+    )
+    unit = IndexUnit(
+        unit_id="python:tool",
+        name="tool",
+        language="python",
+        root_dir=tmp_path,
+        files=sorted(tool_dir.glob("*.py")),
+    )
+    res = PythonPlugin().index_unit_tier2(unit)
+    cli_files = {e["file_path"] for e in res.entrypoints if e["kind"] == "cli"}
+    assert cli_files == {"tool/reassign_cli.py"}
+
+
 def test_python_reused_plugin_invalidates_mount_cache_on_content_change(tmp_path: Path):
     """Reusing a PythonPlugin after editing a mount file emits updated route and auth."""
     (tmp_path / "routes").mkdir()

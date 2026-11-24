@@ -442,7 +442,7 @@ def _enclosing_local_bindings(call_node: Node, source_bytes: bytes) -> dict[str,
         curr = stack.pop()
         if curr.type in ("function_definition", "class_definition", "lambda"):
             continue
-        if curr.type == "assignment" and curr.start_byte < call_node.start_byte:
+        if curr.type == "assignment" and curr.end_byte <= call_node.start_byte:
             assignments.append(curr)
         stack.extend(curr.children)
     assignments.sort(key=lambda n: n.start_byte)
