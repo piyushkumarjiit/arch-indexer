@@ -124,7 +124,8 @@ def parse_scip_symbol(symbol_str: str) -> tuple[str, str, str, str]:
     last_suffix = descs[-1][1] if descs else ""
 
     if last_suffix.endswith(")."):
-        kind = "method"
+        parent_suffix = descs[-2][1] if len(descs) >= 2 else ""
+        kind = "method" if parent_suffix == "#" else "function"
     elif last_suffix == "#":
         kind = "class"
     elif last_suffix in ("/", ":"):

@@ -33,7 +33,17 @@ def test_scip_symbol_parsing():
     simple, fq, kind, _ = parse_scip_symbol("scip-python python pypi 0.1.0 `src.app`/hello().")
     assert simple == "hello"
     assert fq == "src.app.hello"
-    assert kind == "method"
+    assert kind == "function"
+
+    simple, fq, kind, _ = parse_scip_symbol(
+        "scip-python python pypi 0.1.0 `src.app`/Greeter#greet()."
+    )
+    assert (simple, fq, kind) == ("greet", "src.app.Greeter.greet", "method")
+
+    simple, fq, kind, _ = parse_scip_symbol(
+        "scip-python python pypi 0.1.0 `src.app`/outer().inner()."
+    )
+    assert (simple, fq, kind) == ("inner", "src.app.outer.inner", "function")
 
     simple, fq, kind, _ = parse_scip_symbol(
         "semanticdb maven maven/com.example/demo 1.0.0 com/example/App#main()."
@@ -86,6 +96,7 @@ def test_python_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert "hello" in sym_map
     assert sym_map["hello"]["fqname"] == "src.app.hello"
     assert sym_map["hello"]["start_line"] == 1
+    assert sym_map["hello"]["kind"] == "function"
     assert len(sym_map["hello"]["body_sha256"]) == 64
     assert sym_map["__init__"]["kind"] == "module"
 
@@ -276,6 +287,7 @@ def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert sym_map["App"]["kind"] == "class"
     assert "main" in sym_map
     assert sym_map["main"]["start_line"] == 2
+    assert sym_map["main"]["kind"] == "method"
 
     # Check references
     ref_map = {(r["symbol_fqname"], r["ref_kind"]): r for r in res.references}
