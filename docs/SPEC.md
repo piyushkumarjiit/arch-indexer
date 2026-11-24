@@ -397,7 +397,7 @@ No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses 
 
 ### 9.2 Bounded Worker Sharding (`arch-indexer plan`)
 To prevent any single worker from handling a 200k-line repository, `arch-indexer plan` reads `impacted-sections.json`, `master-index.json`, and `graph.json`, and emits `work-plan.json` containing bounded **work packets**:
-- Each packet targets a disjoint subset of impacted sections and/or module slices (e.g., `design-sec2-mod-billing`, `design-sec2-mod-orders`, `design-sec6-security`, `guide-sec3-admin`).
+- Each packet targets a disjoint subset of impacted sections and/or module slices (e.g., the packets `design-sec2-mod-billing` and `design-sec2-mod-orders` both draft canonical section `design-sec2`, and `guide-sec3-admin` drafts `guide-sec3`; the packet id names the slice, while `section_ids` names the canonical section).
 - Budgets per packet (configurable):
   - Default max **15,000 source lines** across assigned modules
   - Default max **800 indexed symbols**
