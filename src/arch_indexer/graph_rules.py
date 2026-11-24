@@ -7,6 +7,8 @@ export stays deterministic and easy to extend without touching graph logic.
 
 from __future__ import annotations
 
+import re
+
 # token fragment -> (boundary kind, canonical id, display label)
 DATA_STORE_RULES: dict[str, tuple[str, str, str]] = {
     "asyncpg": ("sql", "postgres", "PostgreSQL"),
@@ -101,19 +103,22 @@ TERRAFORM_RULES: dict[str, tuple[str, str, str]] = {
 }
 
 
-def _matches(fragment: str, lowered: str) -> bool:
+def _matches(fragment: str, lowered: str, *, allow_prefix: bool, split_words: bool) -> bool:
     """Match a rule fragment against dotted identifiers without short-fragment noise.
 
     Multi-part fragments match as a dotted subsequence; single-part fragments
-    must equal (or, when long enough, prefix) one dot/hyphen separated segment,
-    so ``ses`` never matches ``session``.
+    must equal one dotted segment, so ``ses`` never matches ``session`` and a
+    sink rule never matches part of a snake_case identifier. Data store rules
+    also accept underscore/hyphen word parts and, when long enough, a prefix of
+    a segment; sink rules require the whole package segment.
     """
     if "." in fragment:
         return fragment in lowered
-    for segment in lowered.replace("-", ".").replace("_", ".").split("."):
+    separators = r"[._-]" if split_words else r"[.-]"
+    for segment in re.split(separators, lowered):
         if segment == fragment:
             return True
-        if len(fragment) >= 4 and segment.startswith(fragment):
+        if allow_prefix and len(fragment) >= 4 and segment.startswith(fragment):
             return True
     return False
 
@@ -143,11 +148,11 @@ def classify_token(token: str) -> tuple[str, str, str, str] | None:
     """
     lowered = token.lower()
     for fragment in sorted(DATA_STORE_RULES):
-        if _matches(fragment, lowered):
+        if _matches(fragment, lowered, allow_prefix=True, split_words=True):
             kind, canonical, label = DATA_STORE_RULES[fragment]
             return ("datastore", kind, canonical, label)
     for fragment in sorted(EXTERNAL_SINK_RULES):
-        if _matches(fragment, lowered):
+        if _matches(fragment, lowered, allow_prefix=False, split_words=False):
             kind, canonical, label = EXTERNAL_SINK_RULES[fragment]
             return ("sink", kind, canonical, label)
     return None
@@ -157,7 +162,7 @@ def classify_image(image: str) -> tuple[str, str, str] | None:
     """Classify a container image name as a data store (image name is lowest priority)."""
     lowered = image.lower().split("@", 1)[0].split(":", 1)[0]
     for fragment in sorted(DATA_STORE_RULES):
-        if _matches(fragment, lowered):
+        if _matches(fragment, lowered, allow_prefix=True, split_words=True):
             return DATA_STORE_RULES[fragment]
     return None
 

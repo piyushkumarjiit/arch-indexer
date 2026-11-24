@@ -405,7 +405,7 @@ def test_auto_diagram_hook_failure_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(
         mermaid_mod,
         "verify_auto_diagram",
-        lambda diagram_id, mermaid_code, repo_path, graph_path=None: (
+        lambda diagram_id, mermaid_code, graph: (
             False,
             "Diagram does not match graph.json hash",
         ),

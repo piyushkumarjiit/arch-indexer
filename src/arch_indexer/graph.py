@@ -32,6 +32,8 @@ MAX_SERVICE_NODES = 5000
 
 # Source roots that should not become a module name on their own.
 _SOURCE_ROOTS = frozenset({"src", "lib", "app", "apps", "pkg", "packages", "services", "modules"})
+# Reverse-domain prefixes that Java packages share with every other package.
+_REVERSE_DOMAIN_TLDS = frozenset({"com", "org", "net", "io", "dev", "edu", "gov", "co"})
 
 
 def git_head(repo_path: str | Path) -> str | None:
@@ -55,9 +57,15 @@ def module_key(module: str, language: str) -> str:
     parts = [part for part in module.split(".") if part]
     if not parts:
         return "root"
-    if language == "java" and len(parts) >= 2:
-        return ".".join(parts[:2])
-    return parts[0]
+    if language == "java" and len(parts) >= 2 and parts[0] in _REVERSE_DOMAIN_TLDS:
+        parts = parts[2:] or parts[-1:]
+    while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
+        parts = parts[1:]
+    if language == "python" and len(parts) >= 3:
+        parts = parts[1:]
+        while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
+            parts = parts[1:]
+    return parts[0] if parts else "root"
 
 
 def _common_dir(paths: list[str]) -> str:
@@ -220,6 +228,15 @@ def _boundary_id(boundary: str, canonical: str) -> str:
     return ("ds:" if boundary == "datastore" else "ext:") + canonical
 
 
+def _external_root(symbol: str) -> str:
+    """Package prefix that identifies a symbol as coming from an external import."""
+    parts = symbol.split(".")
+    head = parts[0].lower()
+    if head in _REVERSE_DOMAIN_TLDS and len(parts) > 1:
+        return ".".join(parts[:2]).lower()
+    return head
+
+
 def _collect_boundaries(
     ref_rows: list[dict[str, Any]],
     unresolved_rows: list[dict[str, Any]],
@@ -253,8 +270,10 @@ def _collect_boundaries(
                 }
             )
 
+    external_roots = {_external_root(row["raw_symbol"]) for row in unresolved_rows}
     for row in ref_rows:
-        consider(row["symbol_fqname"], row["file_path"], row["line"])
+        if _external_root(row["symbol_fqname"]) in external_roots:
+            consider(row["symbol_fqname"], row["file_path"], row["line"])
     for row in unresolved_rows:
         consider(row["raw_symbol"], row["file_path"], row["line"])
     return boundaries, candidates

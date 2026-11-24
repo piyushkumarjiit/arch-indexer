@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import re
 import shutil
 from pathlib import Path
@@ -20,12 +19,13 @@ from arch_indexer.config import (
     DEFAULT_MAX_DIAGRAM_EDGES,
     DEFAULT_MAX_DIAGRAM_NODES,
 )
-from arch_indexer.graph import build_graph, load_graph
+from arch_indexer.graph import build_graph, load_graph, module_key
 from arch_indexer.mermaid_gen import (
     MODULE_OVERVIEW_ID,
     diagram_ids,
     generate_diagram,
     generate_diagrams,
+    mermaid_id,
     render_auto_diagram_block,
 )
 from arch_indexer.store import IndexStore
@@ -294,17 +294,210 @@ def test_module_overview_aggregates_module_edges(tmp_path):
     code = generate_diagram(graph, MODULE_OVERVIEW_ID)
     assert code is not None
     assert "mod_alpha" in code and "mod_beta" in code
-    assert "mod_alpha -->|calls| mod_beta" in code
+    assert f"{mermaid_id('mod:alpha')} -->|calls| {mermaid_id('mod:beta')}" in code
 
 
-def test_build_graph_from_store_matches_exported_graph(tmp_path):
-    repo = _copy_fixture("python_routes", tmp_path)
-    assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
-    graph = load_graph(repo / "docs" / "graph.json")
-    cache = next((tmp_path / "cache" / "repos").glob("*/index.db"))
-    with IndexStore(cache) as store:
-        rebuilt = build_graph(store, repo)
-    assert json.dumps(rebuilt, sort_keys=True) == json.dumps(graph, sort_keys=True)
+def test_module_key_groups_by_module_directory():
+    # Oracle: a module key names the module directory, so container roots
+    # (source roots, the Python project package, the Java reverse-domain prefix)
+    # never become the module for every file of a repository.
+    assert module_key("src.orders.service", "typescript") == "orders"
+    assert module_key("src.auth.login", "typescript") == "auth"
+    assert module_key("com.acme.orders", "java") == "orders"
+    assert module_key("com.acme.billing", "java") == "billing"
+    assert module_key("backend.app.orders.routes", "python") == "orders"
+    assert module_key("backend.app.users", "python") == "users"
+    assert module_key("app.main", "python") == "main"
+    assert module_key("", "python") == "root"
+
+
+def test_mermaid_ids_are_injective():
+    # Oracle: two graph ids that differ only in punctuation must stay distinct
+    # nodes in Mermaid, otherwise the renderer merges them and their edges.
+    distinct = [
+        "ep:GET:/users",
+        "ep:GET:/users/",
+        "ep:GET:/users/{id}",
+        "ep:GET:/users/:id",
+        "sym:a.b_c",
+        "sym:a_b.c",
+    ]
+    ids = [mermaid_id(raw) for raw in distinct]
+    assert len(set(ids)) == len(distinct)
+    assert mermaid_id("ep:GET:/users") == mermaid_id("ep:GET:/users")
+
+
+def test_build_graph_from_store_has_spec_semantics(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = tmp_path / "store" / "index.db"
+    with IndexStore(db_path) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "backend/app/orders/routes.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 30,
+                    "module": "backend.app.orders.routes",
+                    "tier": "scip",
+                },
+                {
+                    "path": "backend/app/users.py",
+                    "language": "python",
+                    "sha256": "b" * 64,
+                    "line_count": 10,
+                    "module": "backend.app.users",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "backend.app.orders.routes.create_order",
+                    "name": "create_order",
+                    "kind": "function",
+                    "file_path": "backend/app/orders/routes.py",
+                    "start_line": 10,
+                    "end_line": 30,
+                    "body_sha256": "c" * 64,
+                },
+                {
+                    "fqname": "backend.app.orders.routes.load_order",
+                    "name": "load_order",
+                    "kind": "function",
+                    "file_path": "backend/app/orders/routes.py",
+                    "start_line": 5,
+                    "end_line": 8,
+                    "body_sha256": "d" * 64,
+                },
+                {
+                    "fqname": "backend.app.users.fetch_user",
+                    "name": "fetch_user",
+                    "kind": "function",
+                    "file_path": "backend/app/users.py",
+                    "start_line": 1,
+                    "end_line": 5,
+                    "body_sha256": "e" * 64,
+                },
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "create_order",
+                    "method": "POST",
+                    "route_or_trigger": "/orders",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 10,
+                    "symbol_fqname": "backend.app.orders.routes.create_order",
+                    "auth_symbols_json": '["require_role"]',
+                }
+            ]
+        )
+        store.insert_references(
+            [
+                {
+                    "symbol_fqname": "backend.app.orders.routes.load_order",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 12,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "sqlite3.connect",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 14,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "cur.fetchall",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 16,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "backend.app.users.fetch_user",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 18,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "app.github_sync.run",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 19,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+                {
+                    "symbol_fqname": "requests.post",
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 20,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+            ]
+        )
+        store.insert_unresolved_refs(
+            [
+                {
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 2,
+                    "raw_symbol": "sqlite3",
+                    "language": "python",
+                },
+                {
+                    "file_path": "backend/app/orders/routes.py",
+                    "line": 3,
+                    "raw_symbol": "requests",
+                    "language": "python",
+                },
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    assert graph["tier_summary"] == {"scip_files": 1, "treesitter_files": 1}
+    assert {module["id"] for module in graph["modules"]} == {"mod:orders", "mod:users"}
+
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert set(nodes) == {
+        "ep:POST:/orders",
+        "sym:backend.app.orders.routes.load_order",
+        "sym:backend.app.users.fetch_user",
+    }
+    entry = nodes["ep:POST:/orders"]
+    assert entry["kind"] == "entrypoint"
+    assert entry["module_id"] == "mod:orders"
+    assert entry["metadata"]["auth"] == ["require_role"]
+    assert entry["tier"] == "scip"
+
+    assert {(store["id"], store["kind"]) for store in graph["data_stores"]} == {
+        ("ds:sqlite", "sql")
+    }
+    assert [(sink["id"], sink["kind"]) for sink in graph["external_sinks"]] == [
+        ("ext:http", "http_api")
+    ]
+    assert graph["data_stores"][0]["evidence"] == [
+        "backend/app/orders/routes.py:14",
+        "backend/app/orders/routes.py:2",
+    ]
+
+    # Oracle: SPEC 6.1 flow edges. A cursor method (cur.fetchall) and a
+    # repository-internal helper are not external HTTP calls, so they produce
+    # no sink edge; sqlite3.connect is a datastore read and requests.post is an
+    # outbound HTTP request.
+    assert {(edge["source"], edge["target"], edge["kind"]) for edge in graph["edges"]} == {
+        ("ep:POST:/orders", "sym:backend.app.orders.routes.load_order", "calls"),
+        ("ep:POST:/orders", "ds:sqlite", "reads"),
+        ("ep:POST:/orders", "sym:backend.app.users.fetch_user", "calls"),
+        ("ep:POST:/orders", "ext:http", "http_request"),
+    }
+    assert graph["unresolved_refs_count"] == 2
 
 
 def test_mermaid_tolerates_empty_and_dangling_graphs():
