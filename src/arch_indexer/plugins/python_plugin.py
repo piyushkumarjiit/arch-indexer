@@ -383,6 +383,7 @@ class _FunctionFacts:
     dependencies: list[tuple[str, str]] = field(default_factory=list)
     # names used in parameter annotations; may be ``Annotated`` dependency aliases
     annotations: list[str] = field(default_factory=list)
+    # callee texts of calls in the body; used to follow parser builder functions
     calls: list[str] = field(default_factory=list)
 
 
@@ -405,8 +406,11 @@ class _ModuleFacts:
     aliases: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # every other module-level definition (classes)
     other_names: set[str] = field(default_factory=set)
+    # module-level class name -> base class texts (security scheme subclass detection)
     classes: dict[str, list[str]] = field(default_factory=dict)
+    # ``router = APIRouter(prefix=...)`` -> literal prefix (``url_prefix`` for Flask)
     router_prefixes: dict[str, str] = field(default_factory=dict)
+    # ``router = APIRouter(dependencies=[...])`` -> ``(marker, dependency_text)``
     router_dependencies: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
 
@@ -520,7 +524,7 @@ def _gather_module_facts(
     is_package: bool,
     project: str,
 ) -> _ModuleFacts:
-    """Collect the bindings, variables and functions a module defines."""
+    """Collect the imports, variables, functions, classes and router facts a module defines."""
     facts = _ModuleFacts(module, importable, is_package, project)
     stack: list[tuple[Node, bool]] = [(root, True)]
     while stack:
@@ -605,6 +609,7 @@ def _gather_module_facts(
 # Resolution targets: ("internal", module, name), ("module", module, ""),
 # ("external", dotted, "").
 _Target = tuple[str, str, str]
+# (parent router target, mount attribute, literal prefix, mount-level dependencies)
 _MountRecord = tuple[_Target | None, str, str | None, list[tuple[str, str, str]]]
 
 
@@ -725,6 +730,7 @@ class _Resolver:
         prefix: str | None,
         deps: list[tuple[str, str, str]],
     ) -> None:
+        """Record that ``parent_target`` mounts ``target`` with an optional ``prefix`` and deps."""
         mounts = self.mounts.setdefault(target, [])
         entry = (parent_target, mount_kind, prefix, deps)
         if entry not in mounts:
@@ -1577,7 +1583,13 @@ class PythonPlugin(LanguagePlugin):
         record_ref: bool = True,
         record_mount: bool = True,
     ) -> None:
-        """Record ``app.include_router(r)``/``register_blueprint(bp)`` as an edge and mount."""
+        """Record ``app.include_router(r)``/``register_blueprint(bp)`` with selectable effects.
+
+        ``record_ref`` adds the readability edge and dependency ``call`` refs for the
+        analyzing unit, while ``record_mount`` records the parent/prefix/deps relation
+        used to resolve a router's effective routes and auth; the two call sites pass
+        exactly one of them.
+        """
         receiver, _, attr = fn_text.rpartition(".")
         if attr not in ROUTER_MOUNT_ATTRS or not receiver:
             return
