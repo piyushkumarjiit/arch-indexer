@@ -635,6 +635,43 @@ def _get_enclosing_range(
     return fallback_start, fallback_end
 
 
+def _has_enclosing_range(occ: Occurrence) -> bool:
+    return (
+        bool(occ.enclosing_range)
+        or occ.HasField("single_line_enclosing_range")
+        or occ.HasField("multi_line_enclosing_range")
+    )
+
+
+def _definition_start_positions(doc: Document) -> list[tuple[int, int]]:
+    starts: set[tuple[int, int]] = set()
+    for occ in doc.occurrences:
+        if not occ.symbol or occ.symbol.startswith("local "):
+            continue
+        if not occ.symbol_roles & SymbolRole.Definition:
+            continue
+        start_line, col, _ = _get_occ_range(occ)
+        starts.add((start_line, col))
+    return sorted(starts)
+
+
+def _fallback_definition_end(
+    file_lines: list[str], start_line: int, starts: list[tuple[int, int]]
+) -> int:
+    if not (1 <= start_line <= len(file_lines)):
+        return start_line
+    current_line = file_lines[start_line - 1]
+    current_indent = len(current_line) - len(current_line.lstrip())
+    for line_no, _ in starts:
+        if line_no <= start_line or line_no > len(file_lines):
+            continue
+        next_line = file_lines[line_no - 1]
+        next_indent = len(next_line) - len(next_line.lstrip())
+        if next_indent <= current_indent:
+            return max(start_line, line_no - 1)
+    return len(file_lines)
+
+
 def _parse_project_root(project_root: str | Path | None) -> Path | None:
     if not project_root:
         return None
@@ -946,6 +983,7 @@ def _parse_scip_payload(
 
         import_info = _import_info(file_lines, unit.language)
         local_aliases = _local_import_aliases(doc, file_lines, import_info, module)
+        definition_starts = _definition_start_positions(doc)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
         for occ in doc.occurrences:
@@ -1004,17 +1042,30 @@ def _parse_scip_payload(
                         ]
                         if containing:
                             tier2_meta = max(containing, key=lambda c: c["start_line"])
+                if tier2_meta and tier2_meta.get("end_line"):
+                    enc_end = max(enc_end, tier2_meta["end_line"])
+                if kind != "module" and tier2_meta is None and not _has_enclosing_range(occ):
+                    enc_end = max(
+                        enc_end, _fallback_definition_end(file_lines, start_line, definition_starts)
+                    )
+                if file_lines and 1 <= start_line <= len(file_lines):
+                    enc_end = min(max(enc_end, start_line), len(file_lines))
                 if (
                     tier2_meta
                     and tier2_meta.get("body_sha256")
                     and tier2_meta.get("name") == display_name
                 ):
                     body_sha256 = tier2_meta["body_sha256"]
-                elif file_lines and 1 <= enc_start <= len(file_lines):
-                    body_text = "\n".join(file_lines[enc_start - 1 : min(enc_end, len(file_lines))])
-                    body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
                 else:
-                    body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
+                    hash_start = enc_start if 1 <= enc_start <= len(file_lines) else start_line
+                    if file_lines and 1 <= hash_start <= len(file_lines):
+                        hash_end = max(enc_end, hash_start)
+                        body_text = "\n".join(
+                            file_lines[hash_start - 1 : min(hash_end, len(file_lines))]
+                        )
+                        body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+                    else:
+                        body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind

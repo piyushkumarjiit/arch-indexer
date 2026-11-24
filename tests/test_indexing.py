@@ -248,6 +248,66 @@ def test_tier1_symbols_reuse_tier2_body_hash(tmp_path: Path):
     assert tier1_hello["body_sha256"] == tier2_hello["body_sha256"]
 
 
+def test_tier1_unmatched_symbols_hash_their_body_span(tmp_path: Path):
+    """Symbols without SCIP enclosing ranges hash through the following declaration."""
+    handler_sym = "scip-typescript npm ts-fixture 1.0.0 src/`handler.ts`/handler."
+    other_sym = "scip-typescript npm ts-fixture 1.0.0 src/`handler.ts`/other."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/handler.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=handler_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 16, 23],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=other_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[3, 16, 21],
+                    ),
+                ],
+            )
+        ]
+    )
+    scip_bytes = scip_index.SerializeToString()
+
+    def ingest_body(body_line: str, name: str) -> dict[str, dict]:
+        repo = tmp_path / name
+        (repo / "src").mkdir(parents=True)
+        handler = repo / "src" / "handler.ts"
+        handler.write_text(
+            "export function handler(req) {\n"
+            f"  {body_line}\n"
+            "}\n"
+            "export function other() {\n"
+            "  return 1;\n"
+            "}\n"
+        )
+        unit = IndexUnit(
+            unit_id="typescript:root",
+            name="root",
+            language="typescript",
+            root_dir=repo,
+            files=[handler],
+        )
+        scip_path = repo / "index.scip"
+        scip_path.write_bytes(scip_bytes)
+        res = ingest_scip(scip_path, unit)
+        return {s["name"]: s for s in res.symbols}
+
+    first = ingest_body("return req.url;", "first")
+    second = ingest_body("return req.path;", "second")
+
+    assert first["handler"]["end_line"] == 3
+    assert second["handler"]["end_line"] == 3
+    assert first["handler"]["body_sha256"] != second["handler"]["body_sha256"]
+    assert first["other"]["end_line"] == 6
+    assert first["other"]["body_sha256"] == second["other"]["body_sha256"]
+
+
 def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     """Verify TypeScript SCIP fixture ingest with exact lines."""
     fixture_scip = FIXTURES_DIR / "ts" / "index.scip"
