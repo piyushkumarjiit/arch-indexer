@@ -12,7 +12,7 @@ from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def test_python_plugin_extraction():
+def test_python_plugin_extraction(tmp_path: Path):
     plugin = PythonPlugin()
     service_file = FIXTURES_DIR / "entrypoints" / "service.py"
     unit = IndexUnit(
@@ -24,7 +24,7 @@ def test_python_plugin_extraction():
     )
 
     # 1. Tier 1 returns FallbackSignal
-    sig = plugin.index_unit_tier1(unit, {})
+    sig = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
     assert isinstance(sig, FallbackSignal)
     assert sig.reason == "tool_unavailable"
 
@@ -238,7 +238,7 @@ def main(argv=None):
     assert cli_files == ["builder.py", "direct.py", "stored.py"]
 
 
-def test_typescript_plugin_extraction():
+def test_typescript_plugin_extraction(tmp_path: Path):
     plugin = TypeScriptPlugin()
     server_file = FIXTURES_DIR / "entrypoints" / "server.ts"
     unit = IndexUnit(
@@ -249,7 +249,7 @@ def test_typescript_plugin_extraction():
         files=[server_file],
     )
 
-    sig = plugin.index_unit_tier1(unit, {})
+    sig = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
     assert isinstance(sig, FallbackSignal)
     assert sig.reason == "tool_unavailable"
 
@@ -315,7 +315,7 @@ router.delete('/users/:id', deleteHandler);
         assert http_eps["/users/:id"]["method"] == "DELETE"
 
 
-def test_java_plugin_extraction():
+def test_java_plugin_extraction(tmp_path: Path):
     plugin = JavaPlugin()
     controller_file = FIXTURES_DIR / "entrypoints" / "UserController.java"
     unit = IndexUnit(
@@ -326,7 +326,7 @@ def test_java_plugin_extraction():
         files=[controller_file],
     )
 
-    sig = plugin.index_unit_tier1(unit, {})
+    sig = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
     assert isinstance(sig, FallbackSignal)
     assert sig.reason == "tool_unavailable"
 

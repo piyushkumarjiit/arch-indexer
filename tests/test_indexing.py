@@ -671,6 +671,66 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
         ]
 
 
+def test_tier1_entrypoint_alignment_uses_tier2_handler_line(tmp_path: Path):
+    """Route handlers registered far from their definition align to the SCIP fqname."""
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    src.mkdir(parents=True)
+    routes = src / "routes.ts"
+    body = ["export const listUsers = async (req, res) => res.json([]);"]
+    body.extend([""] * 16)
+    body.append("app.get('/users', listUsers);")
+    routes.write_text("\n".join(body) + "\n")
+
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=repo,
+        files=[routes],
+    )
+    tier2 = TypeScriptPlugin().index_unit_tier2(unit)
+    assert len(tier2.entrypoints) == 1
+    assert tier2.entrypoints[0]["line"] == 18
+    assert tier2.entrypoints[0]["symbol_fqname"] == "src.routes.listUsers"
+
+    sym = "scip-typescript npm ts-fixture 1.0.0 src/`routes.ts`/listUsers."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/routes.ts",
+                language="TypeScript",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=sym,
+                        display_name="listUsers",
+                        kind=scip_pb2.SymbolInformation.Kind.Constant,
+                    )
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 13, 1],
+                        enclosing_range=[0, 0, 1, 0],
+                    )
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "routes.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(
+        test_scip,
+        unit,
+        entrypoints=tier2.entrypoints,
+        tier2_symbols=tier2.symbols,
+    )
+    assert res.entrypoints[0]["symbol_fqname"] == "src.routes.ts.listUsers"
+    assert {s["name"]: s["kind"] for s in res.symbols}["listUsers"] == "function"
+
+
 def test_tier1_symbols_inherit_tier2_visibility(tmp_path: Path):
     """Tier 1 symbol rows keep the Tier 2 visibility that SCIP cannot express."""
     repo = tmp_path / "repo"

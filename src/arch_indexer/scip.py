@@ -535,6 +535,9 @@ def _parse_scip_payload(
                 tier2_meta = tier2_by_key.get(
                     (rel_path, start_line, display_name)
                 ) or tier2_by_line.get((rel_path, start_line))
+                tier2_kind = (tier2_meta or {}).get("kind")
+                if kind == "variable" and tier2_kind in ("function", "method"):
+                    kind = tier2_kind
 
                 symbols.append(
                     {
@@ -591,10 +594,14 @@ def _parse_scip_payload(
         sym_by_line: dict[tuple[str, int], str] = {}
         sym_by_name_in_file: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for s in symbols:
+            sym_by_exact.setdefault((s["file_path"], s["start_line"], s["name"]), s["fqname"])
             if s["kind"] in ("function", "method"):
-                sym_by_exact.setdefault((s["file_path"], s["start_line"], s["name"]), s["fqname"])
                 sym_by_line.setdefault((s["file_path"], s["start_line"]), s["fqname"])
                 sym_by_name_in_file.setdefault((s["file_path"], s["name"]), []).append(s)
+
+        tier2_start_by_name: dict[tuple[str, str], int] = {}
+        for sym in tier2_symbols or ():
+            tier2_start_by_name.setdefault((sym["file_path"], sym["name"]), sym["start_line"])
 
         for ep in entrypoints:
             ep_copy = dict(ep)
@@ -602,6 +609,12 @@ def _parse_scip_payload(
             line = ep_copy.get("line", 0)
             name = ep_copy.get("name", "")
             matched_fq = sym_by_exact.get((fp, line, name)) or sym_by_line.get((fp, line))
+            if matched_fq is None:
+                tier2_start = tier2_start_by_name.get((fp, name))
+                if tier2_start is not None:
+                    matched_fq = sym_by_exact.get((fp, tier2_start, name)) or sym_by_line.get(
+                        (fp, tier2_start)
+                    )
             if matched_fq is None:
                 for s in sym_by_name_in_file.get((fp, name), ()):
                     if (
