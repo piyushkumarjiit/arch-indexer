@@ -423,6 +423,53 @@ def _relative_import_module(
     return ".".join(part for part in (base, fqname) if part)
 
 
+def _relative_module_bindings(
+    doc: Document,
+    file_lines: list[str],
+    info: _ImportInfo,
+    module: str,
+    rel_path: str,
+) -> dict[str, str]:
+    """Map names bound to modules by Python relative imports to stored module fqnames."""
+    imported_names: dict[int, dict[str, str]] = {}
+    bindings: dict[str, str] = {}
+    for occ in doc.occurrences:
+        if not occ.symbol or occ.symbol.startswith("local "):
+            continue
+        if occ.symbol_roles & SymbolRole.Definition:
+            continue
+        start_line, col, _ = _get_occ_range(occ)
+        if not _in_import_span(start_line, col, info.spans):
+            continue
+        statement = info.lines.get(start_line)
+        if statement is None:
+            continue
+        _, fqname, _, suffix = parse_scip_symbol(occ.symbol)
+        if suffix not in ("/", ":"):
+            continue
+        qualified = _relative_import_module(
+            file_lines, info, start_line, module, rel_path, fqname, suffix
+        )
+        if not qualified:
+            continue
+        if statement not in imported_names:
+            text = _import_statement_text(file_lines, info, statement)
+            match = re.match(r"from\s+\.[.\w]*\s+import\s+(.*)", text)
+            names = _split_import_names(match.group(1)) if match else []
+            imported_names[statement] = {
+                name: alias for name, alias in names if name and not name.startswith(".")
+            }
+        target = _module_fqname(qualified, suffix)
+        source = _occ_source_text(file_lines, occ).strip().lstrip(".")
+        if source not in imported_names[statement]:
+            continue
+        bindings[source] = target
+        alias = imported_names[statement][source]
+        if alias:
+            bindings[alias] = target
+    return bindings
+
+
 def _preceding_statement_module(
     modules: list[tuple[int, int, str]], start_line: int, col: int
 ) -> str:
@@ -1048,6 +1095,11 @@ def _parse_scip_payload(
 
         import_info = _import_info(file_lines, unit.language)
         local_aliases = _local_import_aliases(doc, file_lines, import_info, module)
+        relative_modules = (
+            _relative_module_bindings(doc, file_lines, import_info, module, rel_path)
+            if unit.language == "python"
+            else {}
+        )
         definition_starts = _definition_start_positions(doc)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
@@ -1080,6 +1132,10 @@ def _parse_scip_payload(
                     )
                     if relative_fqname:
                         fqname = relative_fqname
+                elif unit.language == "python" and last_suffix in ("/", ":"):
+                    bound_module = relative_modules.get(_module_fqname(fqname, last_suffix))
+                    if bound_module:
+                        fqname = bound_module
             if simple_name == "<clinit>" or last_suffix in ("()", "[]"):
                 continue
             if (

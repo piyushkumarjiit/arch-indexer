@@ -2881,6 +2881,184 @@ def test_scip_python_relative_import_module_resolves_to_stored_module(tmp_path: 
     assert "pyapp.services" not in unresolved_symbols
 
 
+def test_scip_python_relative_imported_module_usage_is_not_external(tmp_path: Path):
+    """A module bound by ``from . import X`` stays internal at its usage site (Spec 4.3).
+
+    scip-python 0.6.8 emits the same prefix-dropped module symbol (``core/__init__:``)
+    both on the import statement and at the usage site, so the usage must be resolved
+    against the relative import instead of being recorded as an external symbol.
+    """
+    repo = tmp_path / "repo"
+    pkg = repo / "src" / "pyapp"
+    nested = pkg / "a"
+    nested.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[project]\nname = "pyapp"\nversion = "0.1.0"\n')
+    init = pkg / "__init__.py"
+    init.write_text("")
+    core = pkg / "core.py"
+    core.write_text("class Engine:\n    pass\n")
+    baseutil = pkg / "baseutil.py"
+    baseutil.write_text("def shared(value):\n    return value\n")
+    nested_init = nested / "__init__.py"
+    nested_init.write_text("")
+    client = pkg / "client.py"
+    client.write_text("from . import core\n\n\ndef engine():\n    return core.Engine()\n")
+    mod = nested / "mod.py"
+    mod.write_text("from .. import baseutil\n\n\ndef use(x):\n    return baseutil.shared(x)\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[init, core, baseutil, nested_init, client, mod],
+    )
+    symbol_context = {
+        "fqnames": {
+            "python": {
+                "pyapp.core.Engine",
+                "pyapp.baseutil.shared",
+                "pyapp.client.engine",
+                "pyapp.a.mod.use",
+            }
+        },
+        "modules": {
+            "python": {
+                "pyapp",
+                "pyapp.core",
+                "pyapp.baseutil",
+                "pyapp.a",
+                "pyapp.a.mod",
+                "pyapp.client",
+            }
+        },
+    }
+    relative_core = "scip-python python pyapp 0.1.0 core/__init__:"
+    relative_baseutil = "scip-python python pyapp 0.1.0 baseutil/__init__:"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/pyapp/core.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.core`/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="src/pyapp/baseutil.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.baseutil`/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="src/pyapp/client.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.client`/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 6],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_core,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 14, 18],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.client`/engine().",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[3, 4, 10],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_core,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[4, 11, 15],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.core`/Engine#",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[4, 16, 22],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="src/pyapp/a/mod.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.a.mod`/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 5, 7],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_baseutil,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 15, 23],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.a.mod`/use().",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[3, 4, 7],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=relative_baseutil,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[4, 11, 19],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pyapp 0.1.0 `src.pyapp.baseutil`/shared().",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[4, 20, 26],
+                    ),
+                ],
+            ),
+        ]
+    )
+    test_scip = tmp_path / "relative_module_usage.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, symbol_context=symbol_context)
+
+    ref_map = {
+        (r["file_path"], r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references
+    }
+    assert ref_map[("src/pyapp/client.py", 5, "pyapp.core")] == "read"
+    assert ref_map[("src/pyapp/client.py", 5, "pyapp.core.Engine")] == "call"
+    assert ref_map[("src/pyapp/a/mod.py", 5, "pyapp.baseutil")] == "read"
+    assert (
+        "src/pyapp/client.py",
+        5,
+        "core",
+    ) not in ref_map
+    assert (
+        "src/pyapp/a/mod.py",
+        5,
+        "baseutil",
+    ) not in ref_map
+    unresolved = {(u["file_path"], u["line"], u["raw_symbol"]) for u in res.unresolved_refs}
+    assert ("src/pyapp/client.py", 5, "core") not in unresolved
+    assert ("src/pyapp/a/mod.py", 5, "baseutil") not in unresolved
+
+
 def test_scip_python_local_symbol_without_scip_module_symbol(tmp_path: Path):
     """When scip-python omits external module symbol, source line derives import."""
     repo = tmp_path / "repo"
