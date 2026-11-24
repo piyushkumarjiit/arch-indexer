@@ -710,6 +710,77 @@ def test_assemble_rejects_drafted_prose_no_section_owns(tmp_path, body):
     assert not (repo / "docs" / "DESIGN.md").exists()
 
 
+@pytest.mark.parametrize(
+    ("section_ids", "body"),
+    [
+        pytest.param(
+            ["design-sec2"],
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\nComponent prose[^1].\n"
+            "<!-- SECTION:design-sec3:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="unclosed-start-with-mismatched-end",
+        ),
+        pytest.param(
+            ["design-sec2"],
+            "<!-- SECTION:design-sec3:START -->\n"
+            "## 2. Components & Modules\n\nComponent prose[^1].\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="unclosed-wrong-section-start",
+        ),
+        pytest.param(
+            ["design-sec2"],
+            "## 2. Components & Modules\n\nComponent prose[^1].\n"
+            "<!-- SECTION:design-sec3:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="stray-end-marker-in-markerless-draft",
+        ),
+        pytest.param(
+            ["design-sec2"],
+            "<!-- SECTION:design-sec2:START -->\n"
+            "## 2. Components & Modules\n\nComponent prose[^1].\n"
+            "<!-- SECTION:design-sec3:END -->\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="stray-end-marker-inside-section",
+        ),
+        pytest.param(
+            ["design-sec2", "design-sec3"],
+            "<!-- SECTION:design-sec2:START -->\n"
+            "Component prose[^1].\n"
+            "<!-- SECTION:design-sec3:START -->\n"
+            "Flow prose[^1].\n"
+            "<!-- SECTION:design-sec3:END -->\n"
+            "<!-- SECTION:design-sec2:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="nested-section-markers",
+        ),
+        pytest.param(
+            ["design-sec2", "design-sec3"],
+            "<!-- SECTION:design-sec2:START -->\n"
+            "Component prose[^1].\n"
+            "<!-- SECTION:design-sec3:START -->\n"
+            "Flow prose[^1].\n"
+            "<!-- SECTION:design-sec2:END -->\n"
+            "<!-- SECTION:design-sec3:END -->\n\n"
+            "[^1]: `src/app.py:1` — `alpha`\n",
+            id="overlapping-section-markers",
+        ),
+    ],
+)
+def test_assemble_rejects_unclosed_stray_or_nested_section_markers(tmp_path, section_ids, body):
+    """Malformed SECTION markers fail with exit 3, keep drafts, and never leak into docs."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(drafts, "bad-markers.md", "bad-markers", section_ids, body)
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "SECTION" in err.getvalue()
+    assert (drafts / "bad-markers.md").is_file()
+    assert not (repo / "docs" / "DESIGN.md").exists()
+
+
 def test_assemble_incremental_slice_redraft_preserves_sibling_slices(tmp_path):
     """Re-drafting one module slice keeps the sibling slices and their citations (SPEC 9.2/9.3)."""
     repo, drafts = _repo_with_app(tmp_path)

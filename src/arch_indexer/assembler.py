@@ -33,6 +33,7 @@ SLICE_BLOCK_RE = re.compile(
     r"(?P<end><!--\s*SLICE:(?P=id):END\s*-->)",
     re.DOTALL | re.IGNORECASE,
 )
+SECTION_MARKER_RE = re.compile(r"<!--\s*SECTION:", re.IGNORECASE)
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
 AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
 MERMAID_FENCE_RE = re.compile(r"^\s*(?:```|~~~)\s*mermaid\b", re.IGNORECASE | re.MULTILINE)
@@ -191,13 +192,14 @@ def parse_draft_file(path: Path) -> DraftPacket:
             re.IGNORECASE,
         )
         end_match = end_marker.search(rewritten_body, m.end())
-        if end_match:
-            found_any_section_marker = True
-            marker_spans.append((m.start(), end_match.end()))
-            if sec_id in sections:
-                duplicate_marker_ids.append(sec_id)
-            sec_content = rewritten_body[m.end() : end_match.start()].strip()
-            sections[sec_id] = sec_content
+        if end_match is None:
+            raise DraftFormatError(f"unclosed SECTION marker '{sec_id}'")
+        found_any_section_marker = True
+        marker_spans.append((m.start(), end_match.end()))
+        if sec_id in sections:
+            duplicate_marker_ids.append(sec_id)
+        sec_content = rewritten_body[m.end() : end_match.start()].strip()
+        sections[sec_id] = sec_content
 
     if not found_any_section_marker and len(section_ids) == 1:
         sections[section_ids[0]] = rewritten_body.strip()
@@ -210,6 +212,9 @@ def parse_draft_file(path: Path) -> DraftPacket:
         )
     if not section_ids:
         raise DraftFormatError("section_ids must declare at least one section")
+    for sec_id, sec_content in sections.items():
+        if SECTION_MARKER_RE.search(sec_content):
+            raise DraftFormatError(f"section '{sec_id}' contains stray or nested SECTION markers")
     if found_any_section_marker:
         outside_markers: list[str] = []
         cursor = 0
