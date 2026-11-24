@@ -551,6 +551,73 @@ def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert ref_map[("java.lang.String", "type")]["col"] == 43
 
 
+def test_tier1_default_package_java_keeps_plugin_fqnames(tmp_path: Path):
+    """Default-package Java rows keep the unprefixed names the Tier 2 path stores."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java"
+    java_dir.mkdir(parents=True)
+    app = java_dir / "App.java"
+    app.write_text(
+        "public class App {\n    public static void main(String[] args) {}\n}\n"
+    )
+    unit = IndexUnit("java:root", "root", "java", repo, files=[app])
+
+    app_sym = "semanticdb maven . . App#"
+    main_sym = "semanticdb maven . . App#main()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/App.java",
+                language="Java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=app_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 13, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=main_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[1, 23, 1],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=app_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[1, 0, 1],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "default_package.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    tier2 = IndexResult(
+        unit_id="java:root",
+        tier=IndexingTier.TIER2,
+        success=True,
+        files=[
+            {
+                "path": "src/main/java/App.java",
+                "language": "java",
+                "sha256": "0" * 64,
+                "line_count": 3,
+                "module": "root",
+                "tier": "tree-sitter",
+                "fallback_reason": "tool_unavailable",
+            }
+        ],
+    )
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    assert res.files[0]["module"] == "root"
+    assert {(s["name"], s["fqname"]) for s in res.symbols} == {
+        ("App", "App"),
+        ("main", "App.main"),
+    }
+    assert {r["symbol_fqname"] for r in res.references} == {"App"}
+
+
 # 2. Temporary file deletion
 def test_temp_scip_file_deleted_after_successful_ingest(tmp_path: Path):
     """Verify that temporary .scip file is deleted immediately after ingest."""

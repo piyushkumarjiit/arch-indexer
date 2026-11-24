@@ -350,19 +350,6 @@ def _doc_fqnames(doc: Document) -> list[str]:
     return [fqname for fqname in fqnames if fqname]
 
 
-def _common_fqname_prefix(fqnames: list[str]) -> str:
-    parts_list = [fqname.split(".") for fqname in fqnames if "." in fqname]
-    if not parts_list:
-        return ""
-    common_len = 0
-    for segments in zip(*parts_list, strict=False):
-        if len(set(segments)) != 1:
-            break
-        common_len += 1
-    common_len = min(common_len, min(len(parts) for parts in parts_list) - 1)
-    return ".".join(parts_list[0][:common_len])
-
-
 def _doc_module_prefix(doc: Document) -> str:
     """Return the SCIP module fqname shared by the document's defined symbols."""
     candidates: list[str] = []
@@ -393,12 +380,6 @@ def _doc_module_prefix(doc: Document) -> str:
     ]
     if matching:
         return max(matching, key=lambda candidate: (len(candidate), candidate))
-
-    common = _common_fqname_prefix(defined)
-    if common:
-        return common
-    if candidates:
-        return max(candidates, key=lambda candidate: (len(candidate), candidate))
     return ""
 
 
