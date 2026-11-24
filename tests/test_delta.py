@@ -208,7 +208,7 @@ def test_move_only_delta_without_flag_reports_delta(tmp_path: Path, capsys):
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
 
-    (repo / "src" / "app.py").write_text("# leading comment\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + APP_SOURCE, encoding="utf-8")
     _commit(repo, "shift symbols")
 
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
@@ -225,7 +225,7 @@ def test_move_only_delta_relocates_citations_and_exits_ok(tmp_path: Path, capsys
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
 
-    (repo / "src" / "app.py").write_text("# leading comment\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + APP_SOURCE, encoding="utf-8")
     _commit(repo, "shift symbols")
 
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
@@ -247,6 +247,33 @@ def test_move_only_delta_relocates_citations_and_exits_ok(tmp_path: Path, capsys
 
     # Verification gate passes after the zero-token repair.
     assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
+def test_top_level_code_edit_blocks_move_only_relocation(tmp_path: Path, capsys):
+    """A top-level statement edit must not be swallowed as a pure symbol line shift."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (repo / "src" / "app.py").write_text(
+        "from .admin import router\n\napp.include_router(router)\n\n" + APP_SOURCE,
+        encoding="utf-8",
+    )
+    _commit(repo, "wire admin routes above the functions")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    delta = _load(cache, "index-delta.json")
+    assert delta["modified_files"] == ["src/app.py"]
+    assert {symbol["name"] for symbol in delta["moved_symbols"]} == {"start", "stop"}
+    assert delta["modified_symbols"] == []
+
+    design = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:1` — `start`" in design
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["1-architecture-overview"] == ["modified_file"]
 
 
 def test_added_and_deleted_files_purge_index_and_impact_sections(tmp_path: Path, capsys):
@@ -546,7 +573,7 @@ def test_failed_relocation_keeps_previous_state_and_retries_moves(tmp_path: Path
     capsys.readouterr()
     state_before = (_repo_cache(cache) / "state.json").read_text(encoding="utf-8")
 
-    (repo / "src" / "app.py").write_text("# leading comment\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + APP_SOURCE, encoding="utf-8")
     _commit(repo, "shift symbols")
 
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_VALIDATION_FAILED
@@ -573,9 +600,9 @@ def test_relocation_matches_cited_line_not_symbol_name(tmp_path: Path, capsys):
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
 
-    # Insert a line between A.run and B: only B's symbols move.
+    # Insert lines between A.run and B: only B's symbols move.
     (repo / "src" / "app.py").write_text(
-        TWO_RUN_SOURCE.replace("return 1\n", "return 1\n\n# gap\n"), encoding="utf-8"
+        TWO_RUN_SOURCE.replace("return 1\n", "return 1\n\n\n"), encoding="utf-8"
     )
     _commit(repo, "shift only B")
 
@@ -685,7 +712,7 @@ def test_failed_relocation_restores_docs_so_retry_does_not_double_shift(tmp_path
 
     # Shift A.run (2 -> 7) and B.run (7 -> 12) by inserting 5 leading lines.
     (repo / "src" / "app.py").write_text(
-        "# 1\n# 2\n# 3\n# 4\n# 5\n" + TWO_RUN_SOURCE, encoding="utf-8"
+        "\n\n\n\n\n" + TWO_RUN_SOURCE, encoding="utf-8"
     )
     _commit(repo, "shift both run methods by 5")
 
@@ -724,7 +751,7 @@ def test_auto_relocate_with_diagram_or_missing_doc_returns_delta(tmp_path: Path,
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
     capsys.readouterr()
 
-    (repo / "src" / "app.py").write_text("# shift\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + APP_SOURCE, encoding="utf-8")
     design_path.write_text(
         design_path.read_text(encoding="utf-8").replace("app --> util", "app --> util --> db"),
         encoding="utf-8",
@@ -739,7 +766,7 @@ def test_auto_relocate_with_diagram_or_missing_doc_returns_delta(tmp_path: Path,
 
     # Also verify a missing canonical doc still reports section_missing after relocation.
     (repo / "docs" / "USER_GUIDE.md").unlink()
-    (repo / "src" / "app.py").write_text("# shift1\n# shift2\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n\n" + APP_SOURCE, encoding="utf-8")
     _commit(repo, "drop guide and shift lines")
 
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
@@ -790,7 +817,7 @@ def test_non_symbol_modified_files_impact_sections_and_block_move_only(tmp_path:
     capsys.readouterr()
 
     (repo / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 9090\n", encoding="utf-8")
-    (repo / "src" / "app.py").write_text("# comment\n\n" + APP_SOURCE, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + APP_SOURCE, encoding="utf-8")
     _commit(repo, "change dockerfile and shift app")
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
     capsys.readouterr()
@@ -897,7 +924,7 @@ def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys
     capsys.readouterr()
 
     # Small shift (+2): old line 3 would still be inside new span 3..6 without relocation.
-    (repo / "src" / "app.py").write_text("# a\n# b\n" + source, encoding="utf-8")
+    (repo / "src" / "app.py").write_text("\n\n" + source, encoding="utf-8")
     _commit(repo, "shift by 2")
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
     capsys.readouterr()
@@ -905,7 +932,7 @@ def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys
 
     # Large shift (+6): old line 5 is completely outside new span 9..12.
     (repo / "src" / "app.py").write_text(
-        "# 1\n# 2\n# 3\n# 4\n# 5\n# 6\n# a\n# b\n" + source, encoding="utf-8"
+        "\n\n\n\n\n\n\n\n" + source, encoding="utf-8"
     )
     _commit(repo, "shift by 6")
     assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK

@@ -182,7 +182,7 @@ def run_index(
         print(store.format_summary())
 
         # Spec 5.1: snapshot the freshly indexed tables and diff them against state.json.
-        current = RepoSnapshot.from_store(store)
+        current = RepoSnapshot.from_store(store, target_repo)
         previous_state = read_json(cache_paths.state_json)
         previous = None if force_full else RepoSnapshot.from_state(previous_state)
         delta = compute_delta(previous, current)

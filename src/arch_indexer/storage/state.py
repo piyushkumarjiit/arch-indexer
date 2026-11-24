@@ -7,6 +7,7 @@ together with the module-to-section map and the hashes of generated diagram bloc
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -91,6 +92,18 @@ def _group_symbols(symbols: Iterable[dict[str, Any]]) -> dict[str, tuple[dict[st
     return {key: tuple(records) for key, records in grouped.items()}
 
 
+def _file_skeleton_sha256(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """Hash the non-blank content outside every symbol span, ignoring line positions."""
+    lines = text.splitlines()
+    covered: set[int] = set()
+    for start, end in spans:
+        covered.update(range(max(start - 1, 0), min(end, len(lines))))
+    content = "\n".join(
+        line for index, line in enumerate(lines) if index not in covered and line.strip()
+    )
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class RepoSnapshot:
     """File hashes and symbol signatures at one point in time."""
@@ -99,10 +112,29 @@ class RepoSnapshot:
     symbols: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
     @classmethod
-    def from_store(cls, store: Any) -> RepoSnapshot:
+    def from_store(cls, store: Any, repo_path: str | Path | None = None) -> RepoSnapshot:
         """Build a snapshot from the freshly indexed SQLite tables."""
         files = {record["path"]: record for record in store.get_file_records()}
-        return cls(files=files, symbols=_group_symbols(store.get_symbol_records()))
+        snapshot = cls(files=files, symbols=_group_symbols(store.get_symbol_records()))
+        if repo_path is not None:
+            snapshot.record_skeletons(repo_path)
+        return snapshot
+
+    def record_skeletons(self, repo_path: str | Path) -> None:
+        """Record a content signature for lines outside every symbol span of each file."""
+        spans_by_file: dict[str, list[tuple[int, int]]] = {}
+        for records in self.symbols.values():
+            for record in records:
+                spans_by_file.setdefault(record["file_path"], []).append(
+                    (int(record["start_line"]), int(record["end_line"]))
+                )
+        root = Path(repo_path)
+        for path, record in self.files.items():
+            try:
+                text = (root / path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            record["skeleton_sha256"] = _file_skeleton_sha256(text, spans_by_file.get(path, ()))
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any] | None) -> RepoSnapshot | None:
@@ -163,6 +195,7 @@ class Delta:
     modified_symbols: list[dict[str, Any]] = field(default_factory=list)
     moved_symbols: list[dict[str, Any]] = field(default_factory=list)
     deleted_symbols: list[dict[str, Any]] = field(default_factory=list)
+    purely_moved_files: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """True when nothing changed at all (docs are up to date, exit 0)."""
@@ -178,10 +211,9 @@ class Delta:
 
     def is_move_only(self) -> bool:
         """True when the only change is line shifts of otherwise unchanged symbols (spec 5.4)."""
-        moved_files = {symbol["file_path"] for symbol in self.moved_symbols}
         return (
             bool(self.moved_symbols)
-            and set(self.modified_files) <= moved_files
+            and set(self.modified_files) <= set(self.purely_moved_files)
             and not (
                 self.added_files
                 or self.deleted_files
@@ -296,6 +328,16 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
             delta.added_symbols.append(_symbol_record(new_symbol))
         for old_symbol in previous_records[pairs:]:
             delta.deleted_symbols.append(_symbol_record(old_symbol))
+
+    moved_paths = {symbol["file_path"] for symbol in delta.moved_symbols}
+    delta.purely_moved_files = sorted(
+        path
+        for path in delta.modified_files
+        if path in moved_paths
+        and previous.files[path].get("skeleton_sha256")
+        and previous.files[path].get("skeleton_sha256")
+        == current.files[path].get("skeleton_sha256")
+    )
 
     return delta
 
@@ -466,10 +508,12 @@ def compute_impacted_sections(
 
     added_symbol_files = {symbol["file_path"] for symbol in delta.added_symbols}
     modified_symbol_files = {symbol["file_path"] for symbol in delta.modified_symbols}
-    moved_symbol_files = {symbol["file_path"] for symbol in delta.moved_symbols}
     deleted_symbol_files = {symbol["file_path"] for symbol in delta.deleted_symbols}
     purely_moved_files = (
-        moved_symbol_files - added_symbol_files - modified_symbol_files - deleted_symbol_files
+        set(delta.purely_moved_files)
+        - added_symbol_files
+        - modified_symbol_files
+        - deleted_symbol_files
     )
     changed_files = (
         deleted_files
