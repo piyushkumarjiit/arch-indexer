@@ -797,11 +797,10 @@ def _mask_lines(lines: Sequence[str], *, mask_comments: bool = True) -> list[str
 
 
 def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
-    """Blank out fenced code blocks and HTML comments while preserving line structure.
+    """Blank out fenced code blocks and HTML comments while preserving line numbering.
 
-    The returned lines have the same length as the input and every character inside a
-    fence or comment is replaced by a space, so column offsets stay valid for rewriting
-    the original line.
+    Fenced lines become empty strings; HTML comment characters become spaces, so a
+    footnote definition outside them keeps its column offsets for in-place rewriting.
     """
     return _mask_lines(lines, mask_comments=True)
 

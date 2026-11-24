@@ -242,7 +242,7 @@ class Delta:
     purely_moved_files: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        """True when nothing changed at all (docs are up to date, exit 0)."""
+        """True when no file or symbol changed."""
         return not (
             self.added_files
             or self.modified_files
