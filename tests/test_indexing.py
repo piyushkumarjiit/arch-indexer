@@ -201,6 +201,51 @@ def test_python_scip_fixture_distinguishes_calls_and_types(tmp_path: Path):
     assert ref_kinds[(9, "builtins.str")] == "type"
 
 
+def test_python_scip_fixture_records_calls_through_imported_aliases(tmp_path: Path):
+    """Calls to ``from``-imported names resolve through the SCIP local alias."""
+    repo_dir = FIXTURES_DIR / "python_imports"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "pyimp" / "client.py"],
+    )
+    tier2 = PythonPlugin().index_unit_tier2(unit)
+    assert any(ref["ref_kind"] == "call" and ref["line"] == 10 for ref in tier2.references)
+
+    test_scip = tmp_path / "aliases.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_kinds[(2, "yaml.safe_load")] == "import"
+    assert ref_kinds[(10, "yaml.safe_load")] == "call"
+
+
+def test_tier1_symbols_reuse_tier2_body_hash(tmp_path: Path):
+    """Tier 1 symbol hashes match Tier 2 so a tier flip is not a modified symbol."""
+    repo_dir = FIXTURES_DIR / "python"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "app.py"],
+    )
+    tier2 = PythonPlugin().index_unit_tier2(unit)
+    tier2_hello = next(s for s in tier2.symbols if s["name"] == "hello")
+
+    test_scip = tmp_path / "body_hash.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    tier1_hello = next(s for s in res.symbols if s["name"] == "hello")
+    assert tier1_hello["body_sha256"] == tier2_hello["body_sha256"]
+
+
 def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     """Verify TypeScript SCIP fixture ingest with exact lines."""
     fixture_scip = FIXTURES_DIR / "ts" / "index.scip"
@@ -1451,6 +1496,65 @@ def test_tier1_annotated_java_symbols_inherit_tier2_metadata(tmp_path: Path):
         "@RestController",
         '@RequestMapping("/api/v1")',
     ]
+
+
+def test_tier1_class_instantiation_uses_tier2_call_kind(tmp_path: Path):
+    """Class-descriptor references at Tier 2 call positions are labelled ``call``."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    app = repo / "src" / "app.py"
+    app.write_text("class User:\n    pass\n\n\ndef make():\n    return User()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    tier2 = PythonPlugin().index_unit_tier2(unit)
+    assert any(ref["ref_kind"] == "call" and ref["line"] == 6 for ref in tier2.references)
+
+    module_sym = "scip-python python pkg 0.1.0 `src.app`/"
+    user_sym = "scip-python python pkg 0.1.0 `src.app`/User#"
+    make_sym = "scip-python python pkg 0.1.0 `src.app`/make()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 6, 10],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=make_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 4, 8],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=user_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[5, 11, 15],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "instantiation.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_kinds[(6, "app.User")] == "call"
 
 
 def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):

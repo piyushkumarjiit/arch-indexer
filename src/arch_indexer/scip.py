@@ -163,16 +163,19 @@ def _starts_import(stripped: str, language: str) -> bool:
     return False
 
 
-def _import_line_numbers(file_lines: list[str], language: str) -> set[int]:
-    """Return the 1-based lines occupied by import statements."""
-    lines: set[int] = set()
+def _import_line_numbers(file_lines: list[str], language: str) -> dict[int, int]:
+    """Map each 1-based import line to the first line of its import statement."""
+    lines: dict[int, int] = {}
     depth = 0
     continued = False
+    statement_start = 0
     for line_no, raw in enumerate(file_lines, start=1):
         stripped = raw.strip()
-        if depth == 0 and not continued and not _starts_import(stripped, language):
-            continue
-        lines.add(line_no)
+        if depth == 0 and not continued:
+            if not _starts_import(stripped, language):
+                continue
+            statement_start = line_no
+        lines[line_no] = statement_start
         code = _code_only(stripped, language)
         depth += sum(code.count(ch) for ch in "([{")
         depth -= sum(code.count(ch) for ch in ")]}")
@@ -180,6 +183,71 @@ def _import_line_numbers(file_lines: list[str], language: str) -> set[int]:
         if depth <= 0:
             depth = 0
     return lines
+
+
+def _occ_source_text(file_lines: list[str], occ: Occurrence) -> str:
+    ranges = occ.range
+    if len(ranges) >= 4:
+        start_line, start_col, end_line, end_col = (
+            ranges[0] + 1,
+            ranges[1],
+            ranges[2] + 1,
+            ranges[3],
+        )
+    elif len(ranges) == 3:
+        start_line, start_col, end_line, end_col = (
+            ranges[0] + 1,
+            ranges[1],
+            ranges[0] + 1,
+            ranges[2],
+        )
+    else:
+        return ""
+    if not (1 <= start_line <= len(file_lines) and 1 <= end_line <= len(file_lines)):
+        return ""
+    if start_line == end_line:
+        return file_lines[start_line - 1][start_col:end_col].strip()
+    parts = [file_lines[start_line - 1][start_col:], *file_lines[start_line : end_line - 1]]
+    parts.append(file_lines[end_line - 1][:end_col])
+    return "\n".join(parts).strip()
+
+
+def _local_import_aliases(
+    doc: Document, file_lines: list[str], import_lines: dict[int, int]
+) -> dict[str, str]:
+    """Map document-local import aliases to the fqname Tier 2 records for them."""
+    modules_by_statement: dict[int, str] = {}
+    locals_by_statement: dict[int, list[Occurrence]] = {}
+    for occ in doc.occurrences:
+        if not occ.symbol:
+            continue
+        start_line, _, _ = _get_occ_range(occ)
+        statement = import_lines.get(start_line)
+        if statement is None:
+            continue
+        if occ.symbol.startswith("local "):
+            locals_by_statement.setdefault(statement, []).append(occ)
+            continue
+        if occ.symbol_roles & SymbolRole.Definition:
+            continue
+        _, fqname, _, suffix = parse_scip_symbol(occ.symbol)
+        if suffix in ("/", ":") and fqname:
+            module = _module_fqname(fqname, suffix)
+            if len(module) > len(modules_by_statement.get(statement, "")):
+                modules_by_statement[statement] = module
+
+    aliases: dict[str, str] = {}
+    for statement, occurrences in locals_by_statement.items():
+        module = modules_by_statement.get(statement, "")
+        if not module:
+            continue
+        stripped = file_lines[statement - 1].strip() if statement <= len(file_lines) else ""
+        from_import = stripped.startswith("from ")
+        for occ in occurrences:
+            alias = _occ_source_text(file_lines, occ)
+            if alias:
+                aliases[occ.symbol] = f"{module}.{alias}" if from_import else module
+    return aliases
 
 
 def derive_ref_kind(occ: Occurrence, last_suffix: str = "", *, is_import: bool = False) -> str:
@@ -567,6 +635,9 @@ def _parse_scip_payload(
 
     module_by_path = {f["path"]: f["module"] for f in tier2_result.files} if tier2_result else None
     tier2_symbols = tier2_result.symbols if tier2_result else []
+    tier2_ref_kinds: dict[tuple[str, int, int], str] = {}
+    for ref in tier2_result.references if tier2_result else []:
+        tier2_ref_kinds.setdefault((ref["file_path"], ref["line"], ref["col"]), ref["ref_kind"])
     renames: dict[str, str] = {}
     repo_fqnames: set[str] = set()
     repo_modules: set[str] = set()
@@ -638,18 +709,30 @@ def _parse_scip_payload(
         )
 
         import_lines = _import_line_numbers(file_lines, unit.language)
+        local_aliases = _local_import_aliases(doc, file_lines, import_lines)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
         for occ in doc.occurrences:
             sym_str = occ.symbol
-            if not sym_str or sym_str.startswith("local "):
+            if not sym_str:
+                continue
+            is_local = sym_str.startswith("local ")
+            if is_local and sym_str not in local_aliases:
                 continue
 
             start_line, col, end_line = _get_occ_range(occ)
-            simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
+            is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
+            if is_local:
+                if is_definition:
+                    continue
+                fqname = local_aliases[sym_str]
+                simple_name = fqname.rsplit(".", 1)[-1]
+                inferred_kind = "variable"
+                last_suffix = ""
+            else:
+                simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
             if simple_name == "<clinit>" or last_suffix in ("()", "[]"):
                 continue
-            is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
             if (
                 not is_definition
                 and last_suffix == "/"
@@ -670,12 +753,6 @@ def _parse_scip_payload(
                 )
 
                 enc_start, enc_end = _get_enclosing_range(occ, start_line, end_line)
-                if file_lines and 1 <= enc_start <= len(file_lines):
-                    body_text = "\n".join(file_lines[enc_start - 1 : min(enc_end, len(file_lines))])
-                    body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
-                else:
-                    body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
-
                 tier2_meta = None
                 if kind != "module":
                     tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
@@ -689,6 +766,17 @@ def _parse_scip_payload(
                         ]
                         if containing:
                             tier2_meta = max(containing, key=lambda c: c["start_line"])
+                if (
+                    tier2_meta
+                    and tier2_meta.get("body_sha256")
+                    and tier2_meta.get("name") == display_name
+                ):
+                    body_sha256 = tier2_meta["body_sha256"]
+                elif file_lines and 1 <= enc_start <= len(file_lines):
+                    body_text = "\n".join(file_lines[enc_start - 1 : min(enc_end, len(file_lines))])
+                    body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+                else:
+                    body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind
@@ -707,7 +795,12 @@ def _parse_scip_payload(
                     }
                 )
             else:
-                ref_kind = derive_ref_kind(occ, last_suffix, is_import=start_line in import_lines)
+                is_import_line = start_line in import_lines
+                ref_kind = derive_ref_kind(occ, last_suffix, is_import=is_import_line)
+                if not is_import_line:
+                    tier2_ref_kind = tier2_ref_kinds.get((rel_path, start_line, col))
+                    if tier2_ref_kind == "call" and (is_local or last_suffix == "#"):
+                        ref_kind = "call"
                 ref_fqname = _module_fqname(fqname, last_suffix)
                 ref_key = (rel_path, start_line, col, ref_fqname, ref_kind)
                 if ref_key not in seen_refs:
@@ -722,7 +815,7 @@ def _parse_scip_payload(
                         }
                     )
 
-                if sym_str not in defined_symbols:
+                if not is_local and sym_str not in defined_symbols:
                     # scip-python emits imported modules as external namespace symbols
                     # (`requests/__init__:`) with ReadAccess roles, so classify unresolved
                     # refs by symbol resolution rather than by derived ref kind.
