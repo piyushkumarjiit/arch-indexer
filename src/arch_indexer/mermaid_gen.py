@@ -175,8 +175,11 @@ def _module_overview(graph: dict[str, Any], max_nodes: int, max_edges: int) -> s
     lines = ["flowchart LR"]
     if notes:
         lines.append("  " + _budget_note("; ".join(notes), max_nodes, max_edges))
-    for entity_id in sorted(kept):
-        lines.append(_declaration(entity_id, label_for(entity_id)))
+    if kept:
+        for entity_id in sorted(kept):
+            lines.append(_declaration(entity_id, label_for(entity_id)))
+    else:
+        lines.append(_declaration("system_empty", "No indexed components"))
     for source, target in sorted(pairs):
         kinds = ",".join(sorted(pair_kinds[(source, target)]))
         lines.append(f"  {mermaid_id(source)} -->|{kinds}| {mermaid_id(target)}")

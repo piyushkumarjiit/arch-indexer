@@ -420,7 +420,6 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
         )
 
     nodes = entrypoint_nodes + service_nodes
-    node_modules = {node["id"]: node["module_id"] for node in nodes}
 
     edge_map: dict[tuple[Any, ...], dict[str, Any]] = {}
 
@@ -460,28 +459,6 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
                 "tier": tier_by_file.get(candidate["file"], "tree-sitter"),
             }
         )
-
-    module_edges: dict[tuple[str, str], dict[str, Any]] = {}
-    for edge in edge_map.values():
-        if edge["kind"] != "calls":
-            continue
-        source_module = node_modules.get(edge["source"])
-        target_module = node_modules.get(edge["target"])
-        if not source_module or not target_module or source_module == target_module:
-            continue
-        module_edges.setdefault(
-            (source_module, target_module),
-            {
-                "source": source_module,
-                "target": target_module,
-                "kind": "depends_on",
-                "file": edge["file"],
-                "line": edge["line"],
-                "tier": edge["tier"],
-            },
-        )
-    for edge in module_edges.values():
-        add_edge(edge)
 
     edges = sorted(
         edge_map.values(),

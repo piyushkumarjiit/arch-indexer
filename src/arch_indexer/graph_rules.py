@@ -133,7 +133,6 @@ _WRITE_VERBS = (
     "upsert",
     "write",
 )
-_READ_VERBS = ("count", "exists", "fetch", "find", "get", "load", "read", "scan", "select")
 
 
 def classify_token(token: str) -> tuple[str, str, str, str] | None:
@@ -174,8 +173,6 @@ def edge_kind_for_token(token: str, *, boundary_kind: str) -> str:
         return "http_request"
     lowered = token.lower()
     if boundary_kind == "queue":
-        if any(verb in lowered for verb in ("publish", "produce", "send", "emit", "enqueue")):
-            return "publishes"
         return "publishes"
     if any(verb in lowered for verb in _WRITE_VERBS):
         return "writes"

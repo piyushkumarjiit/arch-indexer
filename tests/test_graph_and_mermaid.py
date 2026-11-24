@@ -294,7 +294,7 @@ def test_module_overview_aggregates_module_edges(tmp_path):
     code = generate_diagram(graph, MODULE_OVERVIEW_ID)
     assert code is not None
     assert "mod_alpha" in code and "mod_beta" in code
-    assert "depends_on" in code
+    assert "mod_alpha -->|calls| mod_beta" in code
 
 
 def test_build_graph_from_store_matches_exported_graph(tmp_path):
