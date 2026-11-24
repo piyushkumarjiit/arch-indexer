@@ -1,8 +1,6 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from arch_indexer.cli import (
     EXIT_DELTA_DETECTED,
     EXIT_ERROR,
@@ -221,29 +219,22 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
     assert "<cache>/runtimes/" in captured.out
 
 
-@pytest.mark.parametrize(
-    "cmd_args,expected_cmd",
-    [
-        (
-            [
-                "plan",
-                "some/repo",
-                "--max-lines-per-worker",
-                "10000",
-                "--max-symbols-per-worker",
-                "500",
-                "--max-sections-per-worker",
-                "2",
-            ],
+def test_cli_plan_nonexistent_repo_exits_error(capsys):
+    code = main(
+        [
             "plan",
-        ),
-    ],
-)
-def test_not_implemented_commands_exit_error(cmd_args, expected_cmd, capsys):
-    code = main(cmd_args)
+            "nonexistent/repo",
+            "--max-lines-per-worker",
+            "10000",
+            "--max-symbols-per-worker",
+            "500",
+            "--max-sections-per-worker",
+            "2",
+        ]
+    )
     assert code == EXIT_ERROR
     captured = capsys.readouterr()
-    assert f"Command '{expected_cmd}' is not implemented yet" in captured.err
+    assert "Target repository does not exist" in captured.err
 
 
 def test_cli_check_citations_dispatch(tmp_path):

@@ -11,6 +11,7 @@ from arch_indexer.checks.citations import (
 )
 from arch_indexer.config import DEFAULT_CHUNK_FILES, RepoCachePaths
 from arch_indexer.graph import build_graph, export_graph_artifacts
+from arch_indexer.planner import build_master_index
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexUnit,
@@ -195,6 +196,7 @@ def run_index(
         # Spec 5.3: deleted files are purged from every table. The index was just rebuilt
         # from disk, but purging keeps the guarantee explicit and idempotent.
         store.purge_files(delta.deleted_files)
+        master_index = build_master_index(store, target_repo)
 
     module_by_file = {
         path: record["module"] for path, record in current.files.items() if record.get("module")
@@ -210,6 +212,7 @@ def run_index(
 
     write_json(cache_paths.index_delta_json, delta.to_payload(cache_paths.repo_id))
     write_json(cache_paths.impacted_sections_json, report.to_payload(delta, docs_dir=docs_dir))
+    write_json(cache_paths.master_index_json, master_index)
 
     print(delta.format_summary())
     if report.sections:

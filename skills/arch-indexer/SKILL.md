@@ -10,7 +10,7 @@ metadata:
 
 Orchestrator instructions for executing the 4-step conflict-free documentation workflow.
 
-> **Implementation status**: `plan` is not implemented yet, so the planning step below describes the target workflow rather than a runnable one. The indexing, graph export and assembly steps are implemented. See the current limits in the repository [README](../../README.md).
+> **Implementation status**: The toolchain, indexing, graph export, planning, assembly, and validation steps are implemented. See the current limits in the repository [README](../../README.md).
 
 ## Orchestration Invariants
 
