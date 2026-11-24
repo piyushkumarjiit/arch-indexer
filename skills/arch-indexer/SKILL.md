@@ -44,9 +44,9 @@ arch-indexer toolchain ensure --repo <repo>
 #### 1b. Index Repository & Detect Delta (Offline)
 Run offline deterministic indexing with automatic citation line-shift repair:
 ```bash
-arch-indexer index <repo> --auto-relocate-citations
+arch-indexer index <repo> --offline --auto-relocate-citations
 ```
-*Optional flags: `--offline`, `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--chunk-files 250`, `--docs-dir docs`.*
+*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--chunk-files 250`, `--docs-dir docs`.*
 
 Evaluate exit code:
 - **`0` (`EXIT_NO_CHANGES`)**: Repository is unchanged. Stop immediately; report documentation is up to date.

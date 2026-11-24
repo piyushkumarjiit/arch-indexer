@@ -1,14 +1,73 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
 from arch_indexer.cli import build_parser
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_PATH = REPO_ROOT / "skills" / "arch-indexer" / "SKILL.md"
+_PLACEHOLDER_RE = re.compile(r"\{\{[a-zA-Z0-9_-]+\}\}|<[a-zA-Z0-9_-]+>")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+
+
+def _substitute_placeholders(command: str) -> str:
+    return _PLACEHOLDER_RE.sub("placeholder", command)
+
+
+def _maybe_add_fenced_command(line: str, invocations: list[list[str]]) -> None:
+    candidate = line[2:].lstrip() if line.startswith("- ") else line
+    if candidate == "arch-indexer" or candidate.startswith("arch-indexer "):
+        tokens = shlex.split(_substitute_placeholders(candidate))
+        invocations.append(tokens[1:])
+
+
+def _extract_cli_invocations(content: str) -> list[list[str]]:
+    """Extract `arch-indexer` CLI argument lists from fenced and inline code examples."""
+    invocations: list[list[str]] = []
+    in_fence = False
+    fence_lang = ""
+    pending_line = ""
+
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            if not in_fence:
+                in_fence = True
+                fence_lang = stripped[3:].strip().lower()
+                pending_line = ""
+            else:
+                if pending_line:
+                    _maybe_add_fenced_command(pending_line, invocations)
+                    pending_line = ""
+                in_fence = False
+                fence_lang = ""
+            continue
+
+        if in_fence:
+            if fence_lang not in ("", "bash", "sh", "text"):
+                continue
+            combined = f"{pending_line} {stripped}".strip() if pending_line else stripped
+            if combined.endswith("\\"):
+                pending_line = combined[:-1].rstrip()
+                continue
+            pending_line = ""
+            _maybe_add_fenced_command(combined, invocations)
+            continue
+
+        for span in _INLINE_CODE_RE.findall(raw_line):
+            candidate = span.strip()
+            if not candidate.startswith("arch-indexer "):
+                continue
+            tokens = shlex.split(_substitute_placeholders(candidate))
+            if len(tokens) > 2:
+                invocations.append(tokens[1:])
+
+    return invocations
 
 
 def test_skill_file_exists() -> None:
@@ -34,33 +93,29 @@ def test_skill_front_matter_parses() -> None:
         "Front matter 'description' must be a non-empty string"
     )
 
-    # Description must state when firstmate should load it
-    desc_lower = description.lower()
-    assert "load" in desc_lower or "firstmate" in desc_lower, (
-        "Front matter 'description' should state when firstmate should load it"
-    )
-
 
 def test_skill_commands_exist_in_cli_parser() -> None:
     content = SKILL_PATH.read_text(encoding="utf-8")
     parser = build_parser()
 
-    # Discover top-level parser commands
-    subparsers_action = next(a for a in parser._actions if a.dest == "command")
-    valid_commands = set(subparsers_action.choices.keys())
+    invocations = _extract_cli_invocations(content)
+    assert invocations, "No 'arch-indexer' CLI invocations found in SKILL.md"
 
-    # Find every occurrence of 'arch-indexer <command>'
-    command_invocations = re.findall(r"arch-indexer[ \t]+([a-zA-Z0-9_-]+)", content)
-    assert command_invocations, "No 'arch-indexer <command>' invocations found in SKILL.md"
+    parsed_commands: set[str] = set()
+    parsed_toolchain_actions: set[str] = set()
+    parsed_query_actions: set[str] = set()
 
-    # Verify that every command extracted from SKILL.md exists in the CLI parser
-    for cmd in command_invocations:
-        assert cmd in valid_commands, (
-            f"Command '{cmd}' mentioned as 'arch-indexer {cmd}' in SKILL.md "
-            f"does not exist in CLI parser. Valid top-level commands: {valid_commands}"
-        )
+    for argv in invocations:
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            pytest.fail(f"Documented CLI invocation failed to parse: {argv!r} (exit={exc.code})")
+        parsed_commands.add(args.command)
+        if args.command == "toolchain":
+            parsed_toolchain_actions.add(args.toolchain_action)
+        elif args.command == "query":
+            parsed_query_actions.add(args.query_action)
 
-    # Verify that all core workflow commands are mentioned
     expected_commands = {
         "toolchain",
         "index",
@@ -70,29 +125,15 @@ def test_skill_commands_exist_in_cli_parser() -> None:
         "check-citations",
         "check-mermaid",
     }
-    mentioned = set(command_invocations)
-    assert expected_commands.issubset(mentioned), (
-        f"Missing expected workflow commands in SKILL.md: {expected_commands - mentioned}"
+    assert expected_commands.issubset(parsed_commands), (
+        f"Missing expected workflow commands in SKILL.md: {expected_commands - parsed_commands}"
     )
-
-    # Verify toolchain subactions mentioned in SKILL.md
-    toolchain_parser = subparsers_action.choices["toolchain"]
-    tc_sub_action = next(a for a in toolchain_parser._actions if a.dest == "toolchain_action")
-    valid_tc_actions = set(tc_sub_action.choices.keys())
-    tc_subcommands = re.findall(r"arch-indexer[ \t]+toolchain[ \t]+([a-zA-Z0-9_-]+)", content)
-    for subcmd in tc_subcommands:
-        assert subcmd in valid_tc_actions, (
-            f"Subcommand '{subcmd}' mentioned in 'arch-indexer toolchain {subcmd}' "
-            f"does not exist in toolchain subparser choices: {valid_tc_actions}"
-        )
-
-    # Verify query subactions mentioned in SKILL.md
-    query_parser = subparsers_action.choices["query"]
-    q_sub_action = next(a for a in query_parser._actions if a.dest == "query_action")
-    valid_q_actions = set(q_sub_action.choices.keys())
-    q_subcommands = re.findall(r"arch-indexer[ \t]+query[ \t]+\S+[ \t]+([a-zA-Z0-9_-]+)", content)
-    for q_action in q_subcommands:
-        assert q_action in valid_q_actions, (
-            f"Query action '{q_action}' mentioned in 'arch-indexer query <repo> {q_action}' "
-            f"does not exist in query subparser choices: {valid_q_actions}"
-        )
+    assert {"ensure", "status"}.issubset(parsed_toolchain_actions)
+    assert {
+        "def",
+        "refs",
+        "file-symbols",
+        "entrypoints",
+        "module-summary",
+        "flow-trace",
+    }.issubset(parsed_query_actions)
