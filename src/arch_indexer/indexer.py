@@ -214,9 +214,17 @@ def run_index(
     # only advanced after the relocation passes check-citations, so a failure (exit 3) keeps
     # the previous snapshot and the next run still sees the moves.
     if auto_relocate_citations and not delta.is_first_run and delta.is_move_only():
+        original_docs = {
+            doc_rel: (target_repo / doc_rel).read_bytes()
+            for doc_rel in doc_texts
+            if (target_repo / doc_rel).is_file()
+        }
         relocated = relocate_citations(target_repo, moved_symbol_moves(delta), docs_dir=docs_dir)
         errors, _notes = check_citations(repo=target_repo, docs_dir=docs_dir, cache_dir=cache_dir)
         if errors:
+            for doc_rel in relocated:
+                if doc_rel in original_docs:
+                    (target_repo / doc_rel).write_bytes(original_docs[doc_rel])
             for error in errors:
                 sys.stderr.write(f"{error.format_line()}\n")
             sys.stderr.write("Error: citation relocation did not resolve every citation failure\n")
@@ -242,6 +250,12 @@ def run_index(
             f"Relocated citations in {len(relocated)} document(s): "
             f"{', '.join(relocated) if relocated else 'none'}"
         )
+        if repaired.sections or repaired.missing_sections:
+            write_json(
+                cache_paths.impacted_sections_json,
+                repaired.to_payload(delta, docs_dir=docs_dir),
+            )
+            return EXIT_DELTA_DETECTED
         return EXIT_OK
 
     write_json(
@@ -257,6 +271,6 @@ def run_index(
     # Impacted sections alone (e.g. a changed AUTO-DIAGRAM block) also need workers.
     if delta.is_first_run:
         return EXIT_DELTA_DETECTED
-    if delta.is_empty() and not report.sections:
+    if delta.is_empty() and not report.sections and not report.missing_sections:
         return EXIT_OK
     return EXIT_DELTA_DETECTED

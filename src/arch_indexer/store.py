@@ -325,7 +325,8 @@ class IndexStore:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT fqname, name, kind, file_path, start_line, end_line, body_sha256
+            SELECT fqname, name, kind, file_path, start_line, end_line, body_sha256,
+                   visibility, decorators_json
             FROM symbols
             ORDER BY file_path, start_line, end_line, fqname, kind
             """

@@ -178,12 +178,17 @@ class Delta:
 
     def is_move_only(self) -> bool:
         """True when the only change is line shifts of unchanged symbol bodies (spec 5.4)."""
-        return bool(self.moved_symbols) and not (
-            self.added_files
-            or self.deleted_files
-            or self.added_symbols
-            or self.modified_symbols
-            or self.deleted_symbols
+        moved_files = {symbol["file_path"] for symbol in self.moved_symbols}
+        return (
+            bool(self.moved_symbols)
+            and set(self.modified_files) <= moved_files
+            and not (
+                self.added_files
+                or self.deleted_files
+                or self.added_symbols
+                or self.modified_symbols
+                or self.deleted_symbols
+            )
         )
 
     def to_payload(self, repo_id: str) -> dict[str, Any]:
@@ -238,6 +243,14 @@ def _symbol_record(source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _symbol_changed(old_symbol: Mapping[str, Any], new_symbol: Mapping[str, Any]) -> bool:
+    return (
+        new_symbol.get("body_sha256") != old_symbol.get("body_sha256")
+        or new_symbol.get("visibility") != old_symbol.get("visibility")
+        or new_symbol.get("decorators_json") != old_symbol.get("decorators_json")
+    )
+
+
 def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta:
     """Compare the previous snapshot with the current one (spec 5.1).
 
@@ -264,13 +277,14 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
         for index in range(pairs):
             new_symbol = current_records[index]
             old_symbol = previous_records[index]
-            if new_symbol.get("body_sha256") != old_symbol.get("body_sha256"):
+            if _symbol_changed(old_symbol, new_symbol):
                 record = _symbol_record(new_symbol)
                 record["previous_start_line"] = int(old_symbol["start_line"])
                 delta.modified_symbols.append(record)
             elif int(new_symbol["start_line"]) != int(old_symbol["start_line"]):
                 record = _symbol_record(new_symbol)
                 record["from_line"] = int(old_symbol["start_line"])
+                record["from_end_line"] = int(old_symbol.get("end_line", old_symbol["start_line"]))
                 record["to_line"] = record["start_line"]
                 delta.moved_symbols.append(record)
         for new_symbol in current_records[pairs:]:
@@ -284,18 +298,21 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
 def moved_symbol_moves(
     delta: Delta,
 ) -> dict[tuple[str, int], tuple[tuple[int, str, str], ...]]:
-    """Map (file_path, previous_line) to every (new_line, name, fqname) moved from there.
+    """Map (file_path, previous_line) to every (new_line, name, fqname) shifted from there.
 
-    Keying by the previously recorded start line (rather than by symbol name) keeps a
-    line shift attributable to the exact symbol the footnote cited; the citation checker
-    later disambiguates by name when several symbols shared that line.
+    Expands each moved symbol across its previous [from_line, from_end_line] span so
+    citations pointing to any line inside the symbol relocate by (to_line - from_line);
+    the citation checker later disambiguates by symbol name when candidates share a line.
     """
     grouped: dict[tuple[str, int], list[tuple[int, str, str]]] = {}
     for symbol in delta.moved_symbols:
-        key = (symbol["file_path"], int(symbol["from_line"]))
-        grouped.setdefault(key, []).append(
-            (int(symbol["to_line"]), symbol["name"], symbol["fqname"])
-        )
+        from_line = int(symbol["from_line"])
+        from_end_line = max(from_line, int(symbol.get("from_end_line", from_line)))
+        shift = int(symbol["to_line"]) - from_line
+        for line in range(from_line, from_end_line + 1):
+            grouped.setdefault((symbol["file_path"], line), []).append(
+                (line + shift, symbol["name"], symbol["fqname"])
+            )
     return {
         key: tuple(sorted(value, key=lambda entry: (entry[1], entry[2], entry[0])))
         for key, value in grouped.items()
@@ -442,10 +459,19 @@ def compute_impacted_sections(
             entry["reasons"] = [IMPACT_SECTION_MISSING]
             report.sections.append(entry)
 
+    added_symbol_files = {symbol["file_path"] for symbol in delta.added_symbols}
     modified_symbol_files = {symbol["file_path"] for symbol in delta.modified_symbols}
+    moved_symbol_files = {symbol["file_path"] for symbol in delta.moved_symbols}
     deleted_symbol_files = {symbol["file_path"] for symbol in delta.deleted_symbols}
-    changed_files = deleted_files | (set(delta.modified_files) & modified_symbol_files)
-    changed_files |= deleted_symbol_files
+    purely_moved_files = (
+        moved_symbol_files - added_symbol_files - modified_symbol_files - deleted_symbol_files
+    )
+    changed_files = (
+        deleted_files
+        | deleted_symbol_files
+        | modified_symbol_files
+        | (set(delta.modified_files) - purely_moved_files)
+    )
 
     added_modules: set[str] = set()
     for path in delta.added_files:
@@ -457,6 +483,24 @@ def compute_impacted_sections(
         if module:
             added_modules.add(module)
 
+    previous_modules_by_section: dict[str, set[str]] = {}
+    raw_module_sections = (previous_state or {}).get("module_sections")
+    if isinstance(raw_module_sections, Mapping):
+        for module, section_keys in raw_module_sections.items():
+            if not isinstance(section_keys, Sequence) or isinstance(section_keys, (str, bytes)):
+                continue
+            for section_key in section_keys:
+                previous_modules_by_section.setdefault(str(section_key), set()).update(
+                    module_with_parents(str(module))
+                )
+
+    previous_module_by_file: dict[str, str] = {}
+    raw_previous_files = (previous_state or {}).get("files")
+    if isinstance(raw_previous_files, Mapping):
+        for path, record in raw_previous_files.items():
+            if isinstance(record, Mapping) and record.get("module"):
+                previous_module_by_file[str(path)] = str(record["module"])
+
     previous_hashes = (previous_state or {}).get("diagram_hashes") or {}
     impacted_modules: set[str] = set()
     for section in parsed:
@@ -466,7 +510,12 @@ def compute_impacted_sections(
             reasons.add(IMPACT_DELETED_FILE)
         if section_files & (changed_files - deleted_files):
             reasons.add(IMPACT_MODIFIED_FILE)
-        section_modules = _section_modules(section, module_by_file)
+        section_key = f"{section.doc}#{section.section_id}"
+        section_modules = (
+            _section_modules(section, module_by_file)
+            | _section_modules(section, previous_module_by_file)
+            | previous_modules_by_section.get(section_key, set())
+        )
         # A section covers an added module when it covers that module or any parent of it.
         matched_modules = {
             module for module in added_modules if module_with_parents(module) & section_modules
@@ -486,8 +535,6 @@ def compute_impacted_sections(
             report.sections.append(_impact_entry(section, reasons, section_modules))
 
     for module in sorted(added_modules - impacted_modules):
-        if any(module_sections.get(candidate) for candidate in module_with_parents(module)):
-            continue
         report.missing_sections.append(
             {
                 "doc": f"{docs_dir}/DESIGN.md",

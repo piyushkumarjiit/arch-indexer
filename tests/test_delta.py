@@ -651,3 +651,272 @@ def test_relocation_ignores_fenced_and_commented_footnotes():
     assert "[^9]: `src/app.py:1` — `start`" in updated
     assert "[^8]: `src/app.py:1` — `start`" in updated
     assert "[^1]: `src/app.py:3` — `start`" in updated
+
+
+def test_failed_relocation_restores_docs_so_retry_does_not_double_shift(tmp_path: Path, capsys):
+    """Exit 3 must restore docs on disk so retrying after a fix does not double-shift lines."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "docs").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text(TWO_RUN_SOURCE, encoding="utf-8")
+    broken_doc = TWO_RUN_DOC.replace(
+        "B runs second[^2].",
+        "B runs second[^2] and ghost[^3].",
+    ).replace(
+        "[^2]: `src/app.py:7` — `B.run`",
+        "[^2]: `src/app.py:7` — `B.run`\n[^3]: `src/app.py:1` — `ghost`",
+    )
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(broken_doc, encoding="utf-8")
+    _init_git_repo(repo)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    # Shift A.run (2 -> 7) and B.run (7 -> 12) by inserting 5 leading lines.
+    (repo / "src" / "app.py").write_text(
+        "# 1\n# 2\n# 3\n# 4\n# 5\n" + TWO_RUN_SOURCE, encoding="utf-8"
+    )
+    _commit(repo, "shift both run methods by 5")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_VALIDATION_FAILED
+    capsys.readouterr()
+    assert design_path.read_text(encoding="utf-8") == broken_doc
+
+    # Fix only the unrelated broken citation and retry relocation.
+    design_path.write_text(TWO_RUN_DOC, encoding="utf-8")
+    _commit(repo, "remove broken ghost citation")
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+
+    relocated = design_path.read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:7` — `run`" in relocated
+    assert "[^2]: `src/app.py:12` — `B.run`" in relocated
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
+def test_auto_relocate_with_diagram_or_missing_doc_returns_delta(tmp_path: Path, capsys):
+    """Move-only code shifts must not swallow diagram_changed or section_missing impacts."""
+    repo = _make_repo(tmp_path)
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        DESIGN_DOC.replace(
+            "The service starts through `start`[^1].",
+            "The service starts through `start`[^1].\n\n"
+            "<!-- AUTO-DIAGRAM:module-overview:START -->\n"
+            "```mermaid\nflowchart LR\n  app --> util\n```\n"
+            "<!-- AUTO-DIAGRAM:module-overview:END -->",
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "include diagram")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (repo / "src" / "app.py").write_text("# shift\n\n" + APP_SOURCE, encoding="utf-8")
+    design_path.write_text(
+        design_path.read_text(encoding="utf-8").replace("app --> util", "app --> util --> db"),
+        encoding="utf-8",
+    )
+    _commit(repo, "shift lines and edit diagram")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert "[^1]: `src/app.py:3` — `start`" in design_path.read_text(encoding="utf-8")
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons == {"1-architecture-overview": ["diagram_changed"]}
+
+    # Also verify a missing canonical doc still reports section_missing after relocation.
+    (repo / "docs" / "USER_GUIDE.md").unlink()
+    (repo / "src" / "app.py").write_text("# shift1\n# shift2\n\n" + APP_SOURCE, encoding="utf-8")
+    _commit(repo, "drop guide and shift lines")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert "[^1]: `src/app.py:4` — `start`" in design_path.read_text(encoding="utf-8")
+    guide_entries = [
+        entry for entry in _impacted(cache)["sections"] if entry["doc"] == "docs/USER_GUIDE.md"
+    ]
+    assert guide_entries
+    assert all(entry["reasons"] == ["section_missing"] for entry in guide_entries)
+
+
+def test_non_symbol_modified_files_impact_sections_and_block_move_only(tmp_path: Path, capsys):
+    """Infra and other non-symbol file edits must impact citing sections and block move-only."""
+    repo = _make_repo(tmp_path)
+    (repo / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 8000\n", encoding="utf-8")
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        DESIGN_DOC.replace(
+            "Utility behaviour lives in `helper`[^2].",
+            "Utility behaviour lives in `helper`[^2] and port `EXPOSE 8000`[^3].",
+        ).replace(
+            "[^2]: `src/util.py:1` — `helper`",
+            "[^2]: `src/util.py:1` — `helper`\n[^3]: `Dockerfile:2` — `EXPOSE 8000`",
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "add dockerfile citation")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    # Editing Dockerfile alone must mark the citing section modified_file.
+    (repo / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 9000\n", encoding="utf-8")
+    _commit(repo, "change exposed port")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["2-components-modules"] == ["modified_file"]
+
+    # Editing Dockerfile alongside a line shift must not be treated as move-only.
+    design_path.write_text(
+        design_path.read_text(encoding="utf-8").replace("EXPOSE 8000", "EXPOSE 9000"),
+        encoding="utf-8",
+    )
+    _commit(repo, "sync dockerfile citation")
+    assert _index(repo, cache) == EXIT_OK
+    capsys.readouterr()
+
+    (repo / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 9090\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("# comment\n\n" + APP_SOURCE, encoding="utf-8")
+    _commit(repo, "change dockerfile and shift app")
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert "[^1]: `src/app.py:1` — `start`" in design_path.read_text(encoding="utf-8")
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["2-components-modules"] == ["modified_file"]
+
+
+def test_parse_doc_sections_ignores_fenced_markers_headings_and_diagrams():
+    """Fenced headings, section markers, and diagram examples must not corrupt section parsing."""
+    unmarked = (
+        "# Guide\n\n"
+        "## 1. System Overview\n\n"
+        "```bash\n"
+        "## shell comment should not split section\n"
+        "echo ok\n"
+        "```\n\n"
+        "````markdown\n"
+        "<!-- SECTION:fake-sec:START -->\n"
+        "<!-- AUTO-DIAGRAM:fake-diag:START -->\n"
+        "```mermaid\nflowchart LR\n  x --> y\n```\n"
+        "<!-- AUTO-DIAGRAM:fake-diag:END -->\n"
+        "<!-- SECTION:fake-sec:END -->\n"
+        "````\n\n"
+        "Real prose cites `start`[^1].\n\n"
+        "<!-- AUTO-DIAGRAM:real-diag:START -->\n"
+        "```mermaid\nflowchart LR\n  a --> b\n```\n"
+        "<!-- AUTO-DIAGRAM:real-diag:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `start`\n"
+    )
+    sections = parse_doc_sections(unmarked, "docs/USER_GUIDE.md")
+    assert [s.section_id for s in sections] == ["1-system-overview", "references"]
+    assert sections[0].cited_symbols == (("src/app.py", 1, "start"),)
+    assert set(sections[0].diagram_hashes) == {"real-diag"}
+
+    marked = (
+        "<!-- SECTION:sec-1:START -->\n"
+        "<!-- # commented heading -->\n"
+        "```python\n# fenced heading\n```\n"
+        "## Real Heading\n\n"
+        "Body text.\n"
+        "<!-- SECTION:sec-1:END -->\n"
+    )
+    marked_sections = parse_doc_sections(marked, "docs/DESIGN.md")
+    assert len(marked_sections) == 1
+    assert marked_sections[0].heading == "Real Heading"
+
+
+def test_deleted_sole_module_file_uses_stored_module_sections(tmp_path: Path, capsys):
+    """Renaming the sole cited file in a module must still match via stored module_sections."""
+    repo = tmp_path / "pkg_repo"
+    package = repo / "src" / "pkg"
+    package.mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        "## 2. Components & Modules\n\nPkg lives in `alpha`[^1].\n\n"
+        "## References\n\n[^1]: `src/pkg/a.py:1` — `alpha`\n",
+        encoding="utf-8",
+    )
+    _init_git_repo(repo)
+    cache = tmp_path / "cache"
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    (package / "a.py").unlink()
+    (package / "b.py").write_text("def beta():\n    return 2\n", encoding="utf-8")
+    _commit(repo, "rename a.py to b.py")
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    report = _impacted(cache)
+    entries = {
+        (entry["doc"], entry["section_id"]): entry["reasons"] for entry in report["sections"]
+    }
+    assert entries[("docs/DESIGN.md", "2-components-modules")] == ["deleted_file", "module_added"]
+    assert report["missing_sections"] == []
+
+
+def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys):
+    """Citations inside a symbol's line span must relocate by the symbol's shift."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "docs").mkdir(parents=True)
+    source = "def start(flag):\n    if flag:\n        return 1\n    return 0\n"
+    (repo / "src" / "app.py").write_text(source, encoding="utf-8")
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        "# Design\n\n"
+        "## 1. Architecture Overview\n\n"
+        "Returns 1 on flag[^1].\n\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:3` — `start`\n",
+        encoding="utf-8",
+    )
+    _init_git_repo(repo)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    # Small shift (+2): old line 3 would still be inside new span 3..6 without relocation.
+    (repo / "src" / "app.py").write_text("# a\n# b\n" + source, encoding="utf-8")
+    _commit(repo, "shift by 2")
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+    assert "[^1]: `src/app.py:5` — `start`" in design_path.read_text(encoding="utf-8")
+
+    # Large shift (+6): old line 5 is completely outside new span 9..12.
+    (repo / "src" / "app.py").write_text(
+        "# 1\n# 2\n# 3\n# 4\n# 5\n# 6\n# a\n# b\n" + source, encoding="utf-8"
+    )
+    _commit(repo, "shift by 6")
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+    assert "[^1]: `src/app.py:11` — `start`" in design_path.read_text(encoding="utf-8")
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
+def test_decorator_change_is_reported_as_modified_not_move_only(tmp_path: Path, capsys):
+    """Adding a decorator without changing body_sha256 must not be swallowed as move-only."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    decorated = "@login_required\n" + APP_SOURCE
+    (repo / "src" / "app.py").write_text(decorated, encoding="utf-8")
+    _commit(repo, "add decorator to start")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    delta = _load(cache, "index-delta.json")
+    assert [symbol["fqname"] for symbol in delta["modified_symbols"]] == ["app.start"]
+    reasons = {entry["section_id"]: entry["reasons"] for entry in _impacted(cache)["sections"]}
+    assert reasons["1-architecture-overview"] == ["modified_file"]

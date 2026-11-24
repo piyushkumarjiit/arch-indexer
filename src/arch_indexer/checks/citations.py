@@ -85,22 +85,7 @@ def _split_lines(text: str) -> list[str]:
 
 def _strip_fenced_blocks_and_comments(text: str) -> str:
     """Strip fenced code blocks and HTML comments so prose references are cleanly parsed."""
-    # Strip HTML comments <!-- ... -->
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    # Replace contents of fenced code blocks with blank lines to preserve line count
-    lines = _split_lines(text)
-    cleaned: list[str] = []
-    in_fence = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            cleaned.append("")
-        elif in_fence:
-            cleaned.append("")
-        else:
-            cleaned.append(line)
-    return "\n".join(cleaned)
+    return "\n".join(_mask_lines(_split_lines(text), mask_comments=True))
 
 
 def symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
@@ -578,6 +563,7 @@ AUTO_DIAGRAM_BLOCK_RE = re.compile(
 )
 HEADING_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<heading>.+?)\s*$")
 H2_HEADING_RE = re.compile(r"^##\s+(?P<heading>.+?)\s*$")
+FENCE_OPEN_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
 
 def slugify_heading(text: str) -> str:
@@ -602,9 +588,22 @@ class DocSection:
 
 def compute_auto_diagram_hashes(text: str) -> dict[str, str]:
     """Map each AUTO-DIAGRAM id in text to the sha256 of its generated body."""
+    raw_lines = text.splitlines(keepends=True)
+    line_parts: list[tuple[str, str]] = []
+    for raw_line in raw_lines:
+        content = raw_line.rstrip("\r\n")
+        ending = raw_line[len(content) :]
+        line_parts.append((content, ending))
+    masked_bodies = _mask_lines([content for content, _ in line_parts], mask_comments=False)
+    masked_text = "".join(
+        (" " * len(content) if masked == "" and content else masked) + ending
+        for (content, ending), masked in zip(line_parts, masked_bodies, strict=True)
+    )
     return {
-        match.group("id"): hashlib.sha256(match.group("body").strip().encode("utf-8")).hexdigest()
-        for match in AUTO_DIAGRAM_BLOCK_RE.finditer(text)
+        match.group("id"): hashlib.sha256(
+            text[match.start("body") : match.end("body")].strip().encode("utf-8")
+        ).hexdigest()
+        for match in AUTO_DIAGRAM_BLOCK_RE.finditer(masked_text)
     }
 
 
@@ -654,14 +653,16 @@ def _section_line_ranges(lines: list[str]) -> list[tuple[str, str, int, int]]:
     level-two heading as the start of a section (spec 5.5).
     """
     seen: set[str] = set()
+    unfenced_lines = _mask_lines(lines, mask_comments=False)
+    masked_lines = _mask_lines(lines, mask_comments=True)
     starts = [
         (index + 1, match.group("id"))
-        for index, line in enumerate(lines)
+        for index, line in enumerate(unfenced_lines)
         if (match := SECTION_START_RE.match(line))
     ]
     if starts:
         end_lines: dict[str, int] = {}
-        for index, line in enumerate(lines):
+        for index, line in enumerate(unfenced_lines):
             match = SECTION_END_RE.match(line)
             if match:
                 end_lines.setdefault(match.group("id"), index + 1)
@@ -671,13 +672,13 @@ def _section_line_ranges(lines: list[str]) -> list[tuple[str, str, int, int]]:
             end_line = end_lines.get(raw_id, next_start - 1)
             if end_line < start_line:
                 end_line = start_line
-            heading = _first_heading(lines, start_line, end_line) or raw_id
+            heading = _first_heading(masked_lines, start_line, end_line) or raw_id
             ranges.append((_unique_section_id(raw_id, seen), heading, start_line, end_line))
         return ranges
 
     headings = [
         (index + 1, match.group("heading").strip())
-        for index, line in enumerate(lines)
+        for index, line in enumerate(masked_lines)
         if (match := H2_HEADING_RE.match(line))
     ]
     ranges = []
@@ -732,38 +733,47 @@ def parse_doc_sections(doc_text: str, doc_rel: str) -> list[DocSection]:
     return sections
 
 
-def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
-    """Blank out fenced code blocks and HTML comments while preserving line structure.
-
-    The returned lines have the same length as the input and every character inside a
-    fence or comment is replaced by a space, so column offsets stay valid for rewriting
-    the original line.
-    """
+def _mask_lines(lines: Sequence[str], *, mask_comments: bool = True) -> list[str]:
+    """Blank out fenced code blocks (and optionally HTML comments) while preserving line count."""
     masked: list[str] = []
     in_fence = False
+    fence_char = ""
+    fence_len = 0
     in_comment = False
     for line in lines:
         if in_fence:
-            if line.strip().startswith("```"):
+            stripped = line.strip()
+            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
                 in_fence = False
+                fence_char = ""
+                fence_len = 0
             masked.append("")
             continue
-        if not in_comment and line.strip().startswith("```"):
-            in_fence = True
-            masked.append("")
-            continue
+        if not in_comment:
+            fence_match = FENCE_OPEN_RE.match(line)
+            if fence_match:
+                fence = fence_match.group("fence")
+                info = fence_match.group("info")
+                if not (fence[0] == "`" and "`" in info):
+                    in_fence = True
+                    fence_char = fence[0]
+                    fence_len = len(fence)
+                    masked.append("")
+                    continue
         chars = list(line)
         index = 0
         while index < len(line):
             if in_comment:
                 end = line.find("-->", index)
                 if end == -1:
-                    for pos in range(index, len(line)):
-                        chars[pos] = " "
+                    if mask_comments:
+                        for pos in range(index, len(line)):
+                            chars[pos] = " "
                     index = len(line)
                 else:
-                    for pos in range(index, end + 3):
-                        chars[pos] = " "
+                    if mask_comments:
+                        for pos in range(index, end + 3):
+                            chars[pos] = " "
                     index = end + 3
                     in_comment = False
                 continue
@@ -772,16 +782,28 @@ def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
                 break
             end = line.find("-->", start + 4)
             if end == -1:
-                for pos in range(start, len(line)):
-                    chars[pos] = " "
+                if mask_comments:
+                    for pos in range(start, len(line)):
+                        chars[pos] = " "
                 in_comment = True
                 index = len(line)
             else:
-                for pos in range(start, end + 3):
-                    chars[pos] = " "
+                if mask_comments:
+                    for pos in range(start, end + 3):
+                        chars[pos] = " "
                 index = end + 3
         masked.append("".join(chars))
     return masked
+
+
+def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
+    """Blank out fenced code blocks and HTML comments while preserving line structure.
+
+    The returned lines have the same length as the input and every character inside a
+    fence or comment is replaced by a space, so column offsets stay valid for rewriting
+    the original line.
+    """
+    return _mask_lines(lines, mask_comments=True)
 
 
 def _resolve_move(
