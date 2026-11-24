@@ -553,8 +553,8 @@ def run_check_citations(
 # --- Document section parsing, diagram hashes and zero-token citation relocation ---
 
 # Section markers written by the docs assembler: <!-- SECTION:<id>:START --> / :END
-SECTION_START_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):START\s*-->\s*$")
-SECTION_END_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):END\s*-->\s*$")
+SECTION_LINE_START_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):START\s*-->\s*$")
+SECTION_LINE_END_RE = re.compile(r"^\s*<!--\s*SECTION:(?P<id>[^:\s]+):END\s*-->\s*$")
 # Auto-generated diagram slot (spec section 6.2)
 AUTO_DIAGRAM_BLOCK_RE = re.compile(
     r"<!--\s*AUTO-DIAGRAM:(?P<id>[^:\s]+):START\s*-->(?P<body>.*?)"
@@ -658,12 +658,12 @@ def _section_line_ranges(lines: list[str]) -> list[tuple[str, str, int, int]]:
     starts = [
         (index + 1, match.group("id"))
         for index, line in enumerate(unfenced_lines)
-        if (match := SECTION_START_RE.match(line))
+        if (match := SECTION_LINE_START_RE.match(line))
     ]
     if starts:
         end_lines: dict[str, int] = {}
         for index, line in enumerate(unfenced_lines):
-            match = SECTION_END_RE.match(line)
+            match = SECTION_LINE_END_RE.match(line)
             if match:
                 end_lines.setdefault(match.group("id"), index + 1)
         ranges: list[tuple[str, str, int, int]] = []
