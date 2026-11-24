@@ -484,7 +484,7 @@ def _parse_scip_payload(
                 if (occ.symbol_roles & SymbolRole.Definition) and occ.symbol:
                     doc_symbols.add(occ.symbol)
 
-    if not document_count:
+    if not document_count and tier2_result is None:
         raise ValueError(f"SCIP index file contains no documents: {scip_path}")
 
     root_resolved = unit.root_dir.resolve()
@@ -678,7 +678,7 @@ def _parse_scip_payload(
                             }
                         )
 
-    if unit.files and not files:
+    if unit.files and not files and tier2_result is None:
         raise ValueError(f"SCIP index yielded no matching documents for unit {unit.unit_id}")
 
     if renames:

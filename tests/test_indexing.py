@@ -557,9 +557,7 @@ def test_tier1_default_package_java_keeps_plugin_fqnames(tmp_path: Path):
     java_dir = repo / "src" / "main" / "java"
     java_dir.mkdir(parents=True)
     app = java_dir / "App.java"
-    app.write_text(
-        "public class App {\n    public static void main(String[] args) {}\n}\n"
-    )
+    app.write_text("public class App {\n    public static void main(String[] args) {}\n}\n")
     unit = IndexUnit("java:root", "root", "java", repo, files=[app])
 
     app_sym = "semanticdb maven . . App#"
@@ -1235,6 +1233,105 @@ def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Pa
     assert {u["raw_symbol"] for u in res.unresolved_refs if u["file_path"] == "src/b.py"} == {
         "requests"
     }
+
+
+@pytest.mark.parametrize(
+    "scip_other_doc",
+    [None, "src/main/java/com/example/App.java"],
+    ids=["metadata_only", "no_matching_document"],
+)
+def test_tier1_without_unit_coverage_indexes_unit_at_tier2(
+    tmp_path: Path, scip_other_doc: str | None
+):
+    """A Tier 1 .scip that omits every unit file yields partial coverage, not a build failure."""
+    repo = tmp_path / "repo"
+    test_dir = repo / "src" / "test" / "java" / "com" / "example"
+    test_dir.mkdir(parents=True)
+    app_test = test_dir / "AppTest.java"
+    app_test.write_text("package com.example;\n\nclass AppTest {}\n")
+    rel_path = "src/test/java/com/example/AppTest.java"
+    unit = IndexUnit("java:root", "root", "java", repo, files=[app_test])
+
+    tier2 = IndexResult(
+        unit_id="java:root",
+        tier=IndexingTier.TIER2,
+        success=True,
+        files=[
+            {
+                "path": rel_path,
+                "language": "java",
+                "sha256": "0" * 64,
+                "line_count": 3,
+                "module": "com.example",
+                "tier": "tree-sitter",
+                "fallback_reason": "tool_unavailable",
+            }
+        ],
+        symbols=[
+            {
+                "fqname": "com.example.AppTest",
+                "name": "AppTest",
+                "kind": "class",
+                "file_path": rel_path,
+                "start_line": 3,
+                "end_line": 3,
+                "body_sha256": "0" * 64,
+                "visibility": "public",
+                "decorators_json": "[]",
+            }
+        ],
+        references=[
+            {
+                "symbol_fqname": "org.junit.jupiter.api.Assertions",
+                "file_path": rel_path,
+                "line": 1,
+                "col": 0,
+                "ref_kind": "import",
+            }
+        ],
+        unresolved_refs=[
+            {
+                "file_path": rel_path,
+                "line": 1,
+                "raw_symbol": "org.junit.jupiter.api.Assertions",
+                "language": "java",
+            }
+        ],
+    )
+
+    documents = []
+    if scip_other_doc is not None:
+        documents.append(
+            scip_pb2.Document(
+                relative_path=scip_other_doc,
+                language="Java",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="semanticdb maven . . com/example/App#",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 13, 0],
+                    )
+                ],
+            )
+        )
+    scip_index = scip_pb2.Index(metadata=scip_pb2.Metadata(), documents=documents)
+    test_scip = tmp_path / "unit_coverage.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+
+    assert len(res.files) == 1
+    assert res.files[0]["path"] == rel_path
+    assert res.files[0]["tier"] == "tree-sitter"
+    assert res.files[0]["fallback_reason"] == "partial_scip_coverage"
+    assert {s["fqname"] for s in res.symbols} == {"com.example.AppTest"}
+    assert {r["symbol_fqname"] for r in res.references} == {"org.junit.jupiter.api.Assertions"}
+    assert {u["raw_symbol"] for u in res.unresolved_refs} == {"org.junit.jupiter.api.Assertions"}
+
+    no_fallback_scip = tmp_path / "unit_coverage_no_fallback.scip"
+    no_fallback_scip.write_bytes(scip_index.SerializeToString())
+    with pytest.raises(ValueError):
+        ingest_scip(no_fallback_scip, unit)
 
 
 # 7. Strict/offline exit 4 CLI tests
