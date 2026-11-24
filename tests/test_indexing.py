@@ -222,6 +222,8 @@ def test_python_scip_fixture_records_calls_through_imported_aliases(tmp_path: Pa
     ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
     assert ref_kinds[(2, "yaml.safe_load")] == "import"
     assert ref_kinds[(10, "yaml.safe_load")] == "call"
+    assert ref_kinds[(6, "requests.api.get")] == "call"
+    assert ref_kinds.get((6, "requests")) != "call"
 
 
 def test_tier1_symbols_reuse_tier2_body_hash(tmp_path: Path):
@@ -637,6 +639,69 @@ def test_tier1_import_comments_do_not_label_later_references(tmp_path: Path):
     ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
     assert (1, "import") in ref_kinds
     assert (3, "call") in ref_kinds
+
+
+def test_tier1_docstring_from_line_does_not_label_later_references(tmp_path: Path):
+    """Prose beginning with ``from`` inside a docstring is not an import statement."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text(
+        "def load(path):\n"
+        '    """Read a config file.\n'
+        "\n"
+        "    from the cache directory (see CachePaths, fall back to defaults\n"
+        "    when it is missing.\n"
+        '    """\n'
+        "    return parse(read(path))\n"
+    )
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    module_sym = "scip-python python pkg 0.1.0 `app`/"
+    load_sym = "scip-python python pkg 0.1.0 `app`/load()."
+    parse_sym = "scip-python python pkg 0.1.0 `app`/parse()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=load_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 4, 8],
+                        enclosing_range=[0, 0, 7, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=parse_sym,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[6, 11, 16],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "docstring.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+
+    ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_kinds[(7, "app.parse")] == "call"
+    assert (7, "app.parse") not in {
+        (r["line"], r["symbol_fqname"]) for r in res.references if r["ref_kind"] == "import"
+    }
 
 
 def test_tier1_repo_internal_field_references_are_not_unresolved(tmp_path: Path):
@@ -1618,6 +1683,64 @@ def test_tier1_module_symbol_does_not_inherit_sibling_metadata(tmp_path: Path):
     assert sym_map["_secret"]["visibility"] == "private"
 
 
+def test_tier1_same_line_field_does_not_inherit_class_metadata(tmp_path: Path):
+    """A field on the class declaration line does not borrow the class annotations."""
+    repo = tmp_path / "repo"
+    java_dir = repo / "src" / "main" / "java" / "com" / "example"
+    java_dir.mkdir(parents=True)
+    constants = java_dir / "Constants.java"
+    constants.write_text(
+        "package com.example;\n\n"
+        "@Deprecated public class Constants { private static int TIMEOUT = 5; }\n"
+    )
+
+    unit = IndexUnit("java:root", "root", "java", repo, files=[constants])
+    tier2 = JavaPlugin().index_unit_tier2(unit)
+    tier2_class = next(s for s in tier2.symbols if s["name"] == "Constants")
+    assert json.loads(tier2_class["decorators_json"]) == ["@Deprecated"]
+
+    class_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Constants#"
+    field_sym = "semanticdb maven maven/com.example/demo 1.0.0 com/example/Constants#TIMEOUT."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/main/java/com/example/Constants.java",
+                language="Java",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=class_sym,
+                        display_name="Constants",
+                        kind=scip_pb2.SymbolInformation.Kind.Class,
+                    ),
+                    scip_pb2.SymbolInformation(
+                        symbol=field_sym,
+                        display_name="TIMEOUT",
+                        kind=scip_pb2.SymbolInformation.Kind.Field,
+                    ),
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=class_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[2, 24, 33],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=field_sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[2, 60, 67],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "constants.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit, tier2_result=tier2)
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert json.loads(sym_map["TIMEOUT"]["decorators_json"]) == []
+
+
 def test_tier1_partial_scip_coverage_indexes_missing_files_at_tier2(tmp_path: Path):
     """Unit files the SCIP index omitted are still indexed, at Tier 2."""
     repo = tmp_path / "repo"
@@ -1794,7 +1917,8 @@ def test_strict_tier1_without_offline_falls_back(tmp_path: Path):
     cache = tmp_path / "cache"
     repo = FIXTURES_DIR / "python"
 
-    code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
+    with patch("arch_indexer.cli.ensure_toolchain"):
+        code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_DELTA_DETECTED
 
 
@@ -1838,7 +1962,7 @@ def test_scip_symbol_parsing_params_type_params_and_spaces():
 
     read_occ = scip_pb2.Occurrence(symbol_roles=int(scip_pb2.SymbolRole.ReadAccess))
     assert derive_ref_kind(read_occ, "().") == "call"
-    assert derive_ref_kind(read_occ, "#") == "type"
+    assert derive_ref_kind(read_occ, "#") == "read"
     assert derive_ref_kind(read_occ, "()") == "read"
 
     simple, fq, kind, suffix = parse_scip_symbol(
@@ -2099,11 +2223,26 @@ def test_derive_ref_kind_class_instantiation_vs_type_annotation():
     )
     assert derive_ref_kind(new_occ, "#", line_text="    new User()\n") == "call"
     # u: User type annotation
-    assert derive_ref_kind(read_occ, "#", line_text="def foo(u: User):\n") == "type"
+    annotation_occ = scip_pb2.Occurrence(
+        symbol="pkg/User#",
+        symbol_roles=int(scip_pb2.SymbolRole.ReadAccess),
+        range=[5, 11, 15],
+    )
+    assert derive_ref_kind(annotation_occ, "#", line_text="def foo(u: User):\n") == "type"
     # -> User return annotation
-    assert derive_ref_kind(read_occ, "#", line_text="def foo() -> User:\n") == "type"
-    # default when no usage text provided
-    assert derive_ref_kind(read_occ, "#") == "type"
+    return_occ = scip_pb2.Occurrence(
+        symbol="pkg/User#",
+        symbol_roles=int(scip_pb2.SymbolRole.ReadAccess),
+        range=[5, 13, 17],
+    )
+    assert derive_ref_kind(return_occ, "#", line_text="def foo() -> User:\n") == "type"
+    # User as a plain value is not a type reference
+    value_occ = scip_pb2.Occurrence(
+        symbol="pkg/User#",
+        symbol_roles=int(scip_pb2.SymbolRole.ReadAccess),
+        range=[5, 10, 14],
+    )
+    assert derive_ref_kind(value_occ, "#", line_text='x = {"k": User}\n') == "read"
 
 
 def test_scip_python_local_symbol_aliased_import_resolves_call(tmp_path: Path):
@@ -2139,7 +2278,7 @@ def test_scip_python_local_symbol_aliased_import_resolves_call(tmp_path: Path):
                     scip_pb2.Occurrence(
                         symbol="local 0",
                         symbol_roles=scip_pb2.SymbolRole.Definition,
-                        range=[0, 16, 35],
+                        range=[0, 26, 35],
                     ),
                     scip_pb2.Occurrence(
                         symbol="local 0",
@@ -2157,6 +2296,58 @@ def test_scip_python_local_symbol_aliased_import_resolves_call(tmp_path: Path):
     ref_map = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
     assert ref_map[(1, "pkg.helper")] == "import"
     assert ref_map[(3, "pkg.helper")] == "call"
+
+
+def test_scip_python_local_module_alias_keeps_attribute_chain(tmp_path: Path):
+    """`import pkg.mod as alias` keeps the imported module plus the attribute used."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text("import app.config as cfg\n\ndef load():\n    return cfg.load()\n")
+
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[app],
+    )
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="app.py",
+                language="Python",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 app/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="scip-python python pkg 0.1.0 app/config/__init__:",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 7, 17],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 21, 24],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol="local 0",
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[3, 11, 14],
+                    ),
+                ],
+            )
+        ]
+    )
+    test_scip = tmp_path / "test.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+
+    res = ingest_scip(test_scip, unit)
+    ref_fqnames = {(r["line"], r["symbol_fqname"]) for r in res.references}
+    assert (4, "app.config.load") in ref_fqnames
 
 
 def test_scip_python_local_symbol_without_scip_module_symbol(tmp_path: Path):

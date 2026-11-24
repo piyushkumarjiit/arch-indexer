@@ -155,7 +155,9 @@ def _starts_import(stripped: str, language: str) -> bool:
     if language == "python":
         if re.match(r"import\b", stripped):
             return True
-        return stripped.startswith("from ")
+        if not stripped.startswith("from "):
+            return False
+        return re.search(r"\bimport\b", stripped) is not None or stripped.rstrip().endswith("\\")
     if language == "typescript":
         return re.match(r"import(?![\w.(])", stripped) is not None
     if language == "java":
@@ -212,62 +214,106 @@ def _occ_source_text(file_lines: list[str], occ: Occurrence) -> str:
     return "\n".join(parts).strip()
 
 
+def _attribute_chain(file_lines: list[str], occ: Occurrence) -> str:
+    ranges = occ.range
+    if len(ranges) >= 4:
+        end_line_0, end_col = ranges[2], ranges[3]
+    elif len(ranges) == 3:
+        end_line_0, end_col = ranges[0], ranges[2]
+    else:
+        return ""
+    if not (0 <= end_line_0 < len(file_lines)):
+        return ""
+    match = re.match(r"(?:\.[A-Za-z_]\w*)+", file_lines[end_line_0][end_col:])
+    return match.group(0) if match else ""
+
+
+def _import_statement_text(
+    file_lines: list[str], import_lines: dict[int, int], statement: int
+) -> str:
+    parts = [
+        _code_only(file_lines[line_no - 1].strip(), "python")
+        for line_no in sorted(import_lines)
+        if import_lines[line_no] == statement and 1 <= line_no <= len(file_lines)
+    ]
+    return " ".join(parts).replace("\\", " ")
+
+
+def _split_import_names(raw: str) -> list[tuple[str, str]]:
+    names: list[tuple[str, str]] = []
+    for part in raw.replace("(", " ").replace(")", " ").split(","):
+        match = re.match(r"^\s*([.\w]+)(?:\s+as\s+([A-Za-z_]\w*))?\s*$", part)
+        if match:
+            names.append((match.group(1), match.group(2) or ""))
+    return names
+
+
+def _resolve_relative_module(module_token: str, current_module: str, rel_path: str) -> str:
+    level = len(module_token) - len(module_token.lstrip("."))
+    remainder = module_token[level:]
+    base_parts = current_module.split(".") if current_module else []
+    if not rel_path.endswith("__init__.py") and base_parts:
+        base_parts = base_parts[:-1]
+    for _ in range(max(level - 1, 0)):
+        if base_parts:
+            base_parts = base_parts[:-1]
+    if remainder:
+        base_parts.append(remainder)
+    return ".".join(base_parts)
+
+
 def _local_import_aliases(
-    doc: Document, file_lines: list[str], import_lines: dict[int, int]
+    doc: Document,
+    file_lines: list[str],
+    import_lines: dict[int, int],
+    module: str,
 ) -> dict[str, str]:
-    """Map document-local import aliases to the fqname Tier 2 records for them."""
-    modules_by_statement: dict[int, str] = {}
+    """Map document-local import bindings to the imported symbol or module."""
     locals_by_statement: dict[int, list[Occurrence]] = {}
     for occ in doc.occurrences:
-        if not occ.symbol:
+        if not occ.symbol.startswith("local "):
             continue
         start_line, _, _ = _get_occ_range(occ)
         statement = import_lines.get(start_line)
-        if statement is None:
-            continue
-        if occ.symbol.startswith("local "):
+        if statement is not None:
             locals_by_statement.setdefault(statement, []).append(occ)
-            continue
-        if occ.symbol_roles & SymbolRole.Definition:
-            continue
-        _, fqname, _, suffix = parse_scip_symbol(occ.symbol)
-        if suffix in ("/", ":") and fqname:
-            module = _module_fqname(fqname, suffix)
-            if len(module) > len(modules_by_statement.get(statement, "")):
-                modules_by_statement[statement] = module
-
-    # If scip didn't emit a module symbol for an import statement, parse module from source
-    for statement in locals_by_statement:
-        if not modules_by_statement.get(statement) and 1 <= statement <= len(file_lines):
-            line = file_lines[statement - 1].strip()
-            m = re.match(r"^from\s+([.\w]+)\s+import\b", line)
-            if m:
-                mod_name = m.group(1)
-                if mod_name.startswith("."):
-                    pkg = ""
-                    if "/" in doc.relative_path:
-                        pkg = doc.relative_path.rsplit("/", 1)[0].replace("/", ".")
-                    rel = mod_name.lstrip(".")
-                    mod_name = f"{pkg}.{rel}" if pkg and rel else (pkg or rel)
-                modules_by_statement[statement] = mod_name
-            else:
-                m = re.match(r"^import\s+([.\w]+)", line)
-                if m:
-                    modules_by_statement[statement] = m.group(1)
 
     aliases: dict[str, str] = {}
     for statement, occurrences in locals_by_statement.items():
-        module = modules_by_statement.get(statement, "")
-        if not module:
-            continue
-        stripped = file_lines[statement - 1].strip() if statement <= len(file_lines) else ""
-        from_import = stripped.startswith("from ")
+        text = _import_statement_text(file_lines, import_lines, statement)
+        from_match = re.match(r"from\s+([.\w]+)\s+import\s+(.*)", text)
+        if from_match:
+            module_token = from_match.group(1)
+            base = (
+                _resolve_relative_module(module_token, module, doc.relative_path)
+                if module_token.startswith(".")
+                else module_token
+            )
+            bindings: dict[str, str] = {}
+            for name, alias in _split_import_names(from_match.group(2)):
+                target = f"{base}.{name}" if base else name
+                bindings[alias or name] = target
+                bindings.setdefault(name, target)
+        else:
+            import_match = re.match(r"import\s+(.*)", text)
+            if not import_match:
+                continue
+            bindings = {}
+            for name, alias in _split_import_names(import_match.group(1)):
+                if alias:
+                    bindings[alias] = name
+                else:
+                    bindings[name] = name
+                    bindings.setdefault(name.split(".")[0], name.split(".")[0])
+
         for occ in occurrences:
-            alias = _occ_source_text(file_lines, occ)
-            if " as " in alias:
-                alias = alias.split(" as ")[0].strip()
-            if alias:
-                aliases[occ.symbol] = f"{module}.{alias}" if from_import else module
+            raw = _occ_source_text(file_lines, occ)
+            binding = raw.split(" as ")[-1].strip() if " as " in raw else raw
+            target = bindings.get(binding)
+            if target is None and binding:
+                target = bindings.get(binding.split(".", 1)[0])
+            if target:
+                aliases[occ.symbol] = target
     return aliases
 
 
@@ -294,42 +340,35 @@ def derive_ref_kind(
     ):
         return "call"
 
-    if (
-        syntax in (SyntaxKind.IdentifierType, SyntaxKind.IdentifierBuiltinType)
-        or tier2_ref_kind == "type"
-    ):
+    if syntax in (SyntaxKind.IdentifierType, SyntaxKind.IdentifierBuiltinType):
         return "type"
 
     is_local = occ.symbol.startswith("local ")
-    if last_suffix == "#" or is_local:
-        if line_text:
-            ranges = occ.range
-            start_col = ranges[1] if len(ranges) >= 2 else 0
-            end_col = (
-                ranges[2] if len(ranges) == 3 else (ranges[3] if len(ranges) >= 4 else start_col)
-            )
-            if end_col <= start_col and start_col < len(line_text):
-                m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", line_text[start_col:])
-                if m:
-                    end_col = start_col + m.end()
-            before_text = line_text[:start_col].rstrip()
-            after_text = line_text[end_col:].lstrip() if end_col <= len(line_text) else ""
-            if (
-                after_text.startswith("(")
-                or before_text.endswith("new")
-                or re.search(r"\bnew$", before_text)
-            ):
-                return "call"
-            if (
-                before_text.endswith(":")
-                or before_text.endswith("->")
-                or before_text.endswith("[")
-                or re.search(r"\bclass\s+\w+\s*\(", before_text)
-            ):
-                return "type"
-            if last_suffix == "#":
-                return "type"
-        elif last_suffix == "#":
+    if (last_suffix == "#" or is_local) and line_text:
+        ranges = occ.range
+        start_col = ranges[1] if len(ranges) >= 2 else 0
+        end_col = ranges[2] if len(ranges) == 3 else (ranges[3] if len(ranges) >= 4 else start_col)
+        if end_col <= start_col and start_col < len(line_text):
+            m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", line_text[start_col:])
+            if m:
+                end_col = start_col + m.end()
+        before_text = line_text[:start_col].rstrip()
+        after_text = line_text[end_col:].lstrip() if end_col <= len(line_text) else ""
+        if (
+            after_text.startswith("(")
+            or before_text.endswith("new")
+            or re.search(r"\bnew$", before_text)
+        ):
+            return "call"
+        annotation_colon = before_text.endswith(":") and before_text.count(
+            "{"
+        ) <= before_text.count("}")
+        if (
+            annotation_colon
+            or before_text.endswith("->")
+            or before_text.endswith("[")
+            or re.search(r"\bclass\s+\w+\s*\(", before_text)
+        ):
             return "type"
 
     return "read"
@@ -692,9 +731,11 @@ def _parse_scip_payload(
 
     module_by_path = {f["path"]: f["module"] for f in tier2_result.files} if tier2_result else None
     tier2_symbols = tier2_result.symbols if tier2_result else []
-    tier2_ref_kinds: dict[tuple[str, int, int], str] = {}
+    tier2_refs: dict[tuple[str, int, int], list[tuple[str, str]]] = {}
     for ref in tier2_result.references if tier2_result else []:
-        tier2_ref_kinds.setdefault((ref["file_path"], ref["line"], ref["col"]), ref["ref_kind"])
+        tier2_refs.setdefault((ref["file_path"], ref["line"], ref["col"]), []).append(
+            (ref["symbol_fqname"], ref["ref_kind"])
+        )
     renames: dict[str, str] = {}
     repo_fqnames: set[str] = set()
     repo_modules: set[str] = set()
@@ -708,18 +749,12 @@ def _parse_scip_payload(
         repo_modules.update(symbol_context.get("modules", {}).get(unit.language, set()))
 
     tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
-    tier2_by_line: dict[tuple[str, int], dict[str, Any]] = {}
     tier2_by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    tier2_line_counts: dict[tuple[str, int], int] = {}
     for sym in tier2_symbols:
         if "visibility" not in sym:
             continue
-        line_key = (sym["file_path"], sym["start_line"])
         tier2_by_key.setdefault((sym["file_path"], sym["start_line"], sym["name"]), sym)
-        tier2_by_line.setdefault(line_key, sym)
         tier2_by_name.setdefault((sym["file_path"], sym["name"]), []).append(sym)
-        tier2_line_counts[line_key] = tier2_line_counts.get(line_key, 0) + 1
-    tier2_by_line = {k: v for k, v in tier2_by_line.items() if tier2_line_counts[k] == 1}
 
     seen_refs: set[tuple[str, int, int, str, str]] = set()
     seen_unresolved: set[tuple[str, int, str]] = set()
@@ -753,6 +788,7 @@ def _parse_scip_payload(
         doc_prefix = _doc_module_prefix(doc) or _scip_module_prefix(unit.language, rel_path)
         if doc_prefix and module and doc_prefix != module:
             renames[doc_prefix] = module
+        doc_renames = sorted(renames.items(), key=lambda item: -len(item[0]))
         files.append(
             {
                 "path": rel_path,
@@ -766,7 +802,7 @@ def _parse_scip_payload(
         )
 
         import_lines = _import_line_numbers(file_lines, unit.language)
-        local_aliases = _local_import_aliases(doc, file_lines, import_lines)
+        local_aliases = _local_import_aliases(doc, file_lines, import_lines, module)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
 
         for occ in doc.occurrences:
@@ -784,6 +820,8 @@ def _parse_scip_payload(
                     continue
                 is_definition = False
                 fqname = local_aliases[sym_str]
+                if start_line not in import_lines:
+                    fqname += _attribute_chain(file_lines, occ)
                 simple_name = fqname.rsplit(".", 1)[-1]
                 inferred_kind = "variable"
                 last_suffix = ""
@@ -814,8 +852,6 @@ def _parse_scip_payload(
                 tier2_meta = None
                 if kind != "module":
                     tier2_meta = tier2_by_key.get((rel_path, start_line, display_name))
-                    if tier2_meta is None:
-                        tier2_meta = tier2_by_line.get((rel_path, start_line))
                     if tier2_meta is None:
                         containing = [
                             candidate
@@ -859,9 +895,14 @@ def _parse_scip_payload(
                     if file_lines and 1 <= start_line <= len(file_lines)
                     else ""
                 )
-                t2_kind = (
-                    None if is_import_line else tier2_ref_kinds.get((rel_path, start_line, col))
-                )
+                t2_kind = None
+                ref_fqname = _module_fqname(fqname, last_suffix)
+                if not is_import_line:
+                    aligned_fqname = _align_fqname(ref_fqname, doc_renames)
+                    for target, kind in tier2_refs.get((rel_path, start_line, col), ()):
+                        if target == aligned_fqname:
+                            t2_kind = kind
+                            break
                 ref_kind = derive_ref_kind(
                     occ,
                     last_suffix,
@@ -869,11 +910,6 @@ def _parse_scip_payload(
                     line_text=line_str,
                     tier2_ref_kind=t2_kind,
                 )
-                if not is_import_line and (ref_kind == "read" or not ref_kind):
-                    tier2_ref_kind = tier2_ref_kinds.get((rel_path, start_line, col))
-                    if tier2_ref_kind == "call" and (is_local or last_suffix == "#"):
-                        ref_kind = "call"
-                ref_fqname = _module_fqname(fqname, last_suffix)
                 ref_key = (rel_path, start_line, col, ref_fqname, ref_kind)
                 if ref_key not in seen_refs:
                     seen_refs.add(ref_key)
