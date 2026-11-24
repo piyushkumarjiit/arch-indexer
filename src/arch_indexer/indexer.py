@@ -156,7 +156,11 @@ def run_index(
     # required Tier 1 indexer is missing (plugins without one, e.g. infra, never fail).
     if offline and strict_tier1:
         for (plugin, unit), tier1_res in zip(all_units, tier1_results, strict=True):
-            if isinstance(tier1_res, FallbackSignal) and plugin.has_tier1_indexer:
+            if (
+                isinstance(tier1_res, FallbackSignal)
+                and plugin.has_tier1_indexer
+                and tier1_res.reason == "tool_unavailable"
+            ):
                 sys.stderr.write(
                     f"Error: Tier 1 indexer unavailable for unit {unit.unit_id} "
                     f"({tier1_res.reason}) and --offline --strict-tier1 was requested\n"

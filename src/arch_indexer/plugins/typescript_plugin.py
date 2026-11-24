@@ -358,7 +358,6 @@ class TypeScriptPlugin(LanguagePlugin):
                 "Cannot find module" in out
                 or "Cannot find type definition" in out
                 or "Could not find a declaration file" in out
-                or "node_modules" in out
             )
             if missing_dep_output or (
                 not _has_node_modules(unit) and not _is_ts_config_or_syntax_error(out)

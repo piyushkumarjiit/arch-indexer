@@ -769,3 +769,44 @@ def test_ts_monorepo_node_modules_and_tsconfig_error_classification(tmp_path: Pa
         res = plugin.index_unit_tier1(unit_no_nm, {"cache_dir": tmp_path})
         assert isinstance(res, FallbackSignal)
         assert res.reason == "build_failure"
+
+    with (
+        patch("arch_indexer.plugins.typescript_plugin.check_tool_status") as mock_status,
+        patch("shutil.which", return_value="/usr/bin/node"),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=1,
+                stderr=(
+                    "SyntaxError: Unexpected token\n"
+                    "    at /cache/tools/node/node_modules/@sourcegraph/scip-typescript/main.js:1"
+                ),
+                stdout="",
+            ),
+        ),
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
+        res = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
+        assert isinstance(res, FallbackSignal)
+        assert res.reason == "build_failure"
+
+
+def test_offline_strict_tier1_falls_back_on_runtime_failure(tmp_path: Path):
+    """--offline --strict-tier1 only exits 4 on tool_unavailable, not runtime fallbacks."""
+    cache = tmp_path / "cache"
+    repo = FIXTURES_DIR / "python"
+
+    with patch.object(
+        PythonPlugin,
+        "index_unit_tier1",
+        return_value=FallbackSignal(reason="oom_limit", message="Out of memory"),
+    ):
+        code = main(["index", str(repo), "--offline", "--strict-tier1", "--cache-dir", str(cache)])
+        assert code == EXIT_DELTA_DETECTED
+
+        db_path = next((cache / "repos").glob("*/index.db"))
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT tier, fallback_reason FROM files WHERE path='src/app.py'"
+            ).fetchone()
+            assert row == ("tree-sitter", "oom_limit")
