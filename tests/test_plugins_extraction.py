@@ -2328,3 +2328,83 @@ def test_python_reused_plugin_invalidates_mount_cache_on_content_change(tmp_path
     assert len(second_eps) == 1
     assert second_eps[0]["route_or_trigger"] == "/v2/items/{id}"
     assert json.loads(second_eps[0]["auth_symbols_json"]) == ["require_admin"]
+
+
+def test_python_multiple_router_and_blueprint_mounts_emit_all_routes_with_per_mount_auth(
+    tmp_path: Path,
+):
+    """Mounting a router or blueprint multiple times emits one entrypoint per mount path."""
+    res = _run_single_file(
+        PythonPlugin(),
+        tmp_path,
+        "app.py",
+        b"""
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.security import HTTPBearer
+from flask import Blueprint, Flask
+
+scheme = HTTPBearer()
+
+def require_admin(t=Depends(scheme)):
+    return t
+
+def require_v1(t=Depends(scheme)):
+    return t
+
+def require_child(t=Depends(scheme)):
+    return t
+
+def trace_only():
+    return None
+
+items_router = APIRouter(prefix="/items")
+
+@items_router.get("/{id}")
+def get_item(id: int, trace=Depends(trace_only)):
+    return id
+
+child_router = APIRouter()
+
+@child_router.get("/ping")
+def ping():
+    return "pong"
+
+parent_router = APIRouter()
+parent_router.include_router(child_router, prefix="/child", dependencies=[Depends(require_child)])
+
+fastapi_app = FastAPI()
+fastapi_app.include_router(items_router, prefix="/admin", dependencies=[Depends(require_admin)])
+fastapi_app.include_router(items_router, prefix="/public")
+fastapi_app.include_router(parent_router, prefix="/v1", dependencies=[Depends(require_v1)])
+fastapi_app.include_router(parent_router, prefix="/v2")
+
+users_bp = Blueprint("users", __name__, url_prefix="/users")
+
+@users_bp.route("/list")
+def list_users():
+    return []
+
+flask_app = Flask(__name__)
+flask_app.register_blueprint(users_bp)
+flask_app.register_blueprint(users_bp, url_prefix="/v2/users")
+""",
+    )
+    by_route = {
+        e["route_or_trigger"]: json.loads(e["auth_symbols_json"])
+        for e in res.entrypoints
+        if e["kind"] == "http"
+    }
+    assert by_route == {
+        "/admin/items/{id}": ["require_admin"],
+        "/public/items/{id}": [],
+        "/v1/child/ping": ["require_v1", "require_child"],
+        "/v2/child/ping": ["require_child"],
+        "/users/list": [],
+        "/v2/users/list": [],
+    }
+    trace_refs = [
+        r
+        for r in res.references
+        if r["ref_kind"] == "call" and r["symbol_fqname"].endswith("trace_only")
+    ]
+    assert len(trace_refs) == 1

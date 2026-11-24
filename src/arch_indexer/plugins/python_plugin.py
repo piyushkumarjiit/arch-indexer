@@ -749,15 +749,15 @@ class _Resolver:
 
     def get_effective_prefixes_and_deps(
         self, target: _Target, visited: frozenset[_Target] = frozenset()
-    ) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Resolve a router's prefixes and dependencies through its mount chain.
+    ) -> list[tuple[list[str], list[tuple[str, str, str]]]]:
+        """Resolve a router's prefixes and dependencies across all mount chains.
 
         Flask's ``register_blueprint(url_prefix=...)`` overrides the blueprint's own
         ``url_prefix`` (only an omitted value falls back to it), whereas FastAPI's
         ``include_router(prefix=...)`` prepends to ``APIRouter(prefix=...)``.
         """
         if target in visited or target[0] != "internal":
-            return [], []
+            return [([], [])]
 
         def_prefix = self.get_router_prefix(target)
         def_deps = self.get_router_dependencies(target)
@@ -765,39 +765,42 @@ class _Resolver:
         mount_list = self.mounts.get(target)
         if not mount_list:
             prefixes = [def_prefix] if def_prefix else []
-            return prefixes, def_deps
+            return [(prefixes, def_deps)]
 
-        parent_target, mount_kind, mount_prefix, mount_deps = mount_list[0]
-        parent_prefixes: list[str] = []
-        parent_deps: list[tuple[str, str, str]] = []
-        if parent_target is not None and parent_target[0] == "internal":
-            parent_prefixes, parent_deps = self.get_effective_prefixes_and_deps(
-                parent_target, visited | {target}
-            )
+        variants: list[tuple[list[str], list[tuple[str, str, str]]]] = []
+        for parent_target, mount_kind, mount_prefix, mount_deps in mount_list:
+            if parent_target is not None and parent_target[0] == "internal":
+                parent_variants = self.get_effective_prefixes_and_deps(
+                    parent_target, visited | {target}
+                )
+            else:
+                parent_variants = [([], [])]
 
-        prefixes = [*parent_prefixes]
-        if mount_kind == "register_blueprint":
-            effective = def_prefix if mount_prefix is None else mount_prefix
-            if effective:
-                prefixes.append(effective)
-        else:
-            if mount_prefix:
-                prefixes.append(mount_prefix)
-            if def_prefix:
-                prefixes.append(def_prefix)
+            for parent_prefixes, parent_deps in parent_variants:
+                prefixes = [*parent_prefixes]
+                if mount_kind == "register_blueprint":
+                    effective = def_prefix if mount_prefix is None else mount_prefix
+                    if effective:
+                        prefixes.append(effective)
+                else:
+                    if mount_prefix:
+                        prefixes.append(mount_prefix)
+                    if def_prefix:
+                        prefixes.append(def_prefix)
+                variants.append((prefixes, parent_deps + mount_deps + def_deps))
 
-        deps = parent_deps + mount_deps + def_deps
-        return prefixes, deps
+        return variants
 
-    def get_effective_route_path_and_deps(
+    def get_effective_route_paths_and_deps(
         self, module: str, receiver: str, route_path: str
-    ) -> tuple[str, list[tuple[str, str, str]]]:
+    ) -> list[tuple[str, list[tuple[str, str, str]]]]:
         target = self.resolve(module, receiver)
         if target is None or target[0] != "internal":
-            return route_path, []
-        prefixes, deps = self.get_effective_prefixes_and_deps(target)
-        full_path = _join_route_paths(*prefixes, route_path)
-        return full_path, deps
+            return [(route_path, [])]
+        return [
+            (_join_route_paths(*prefixes, route_path), deps)
+            for prefixes, deps in self.get_effective_prefixes_and_deps(target)
+        ]
 
     def is_security_scheme_class(
         self, target: _Target | None, seen: frozenset[tuple[str, str]] = frozenset()
@@ -1429,7 +1432,7 @@ class PythonPlugin(LanguagePlugin):
             infra_artifacts=[],
         )
 
-    def _route_entrypoint(
+    def _route_entrypoints(
         self,
         func_node: Node,
         call_node: Node | None,
@@ -1444,8 +1447,8 @@ class PythonPlugin(LanguagePlugin):
         resolver: _Resolver,
         references: list[dict[str, Any]],
         dependency_refs: set[tuple[int, int, str]],
-    ) -> dict[str, Any]:
-        """Build an ``http`` entrypoint for a resolved route decorator."""
+    ) -> list[dict[str, Any]]:
+        """Build ``http`` entrypoints for every mount path of a resolved route decorator."""
         raw_route_path = "/"
         method_name = attr.upper()
         if call_node is not None:
@@ -1489,7 +1492,7 @@ class PythonPlugin(LanguagePlugin):
         elif attr in ("route", "api_route"):
             method_name = "GET"
 
-        route_path, router_deps = resolver.get_effective_route_path_and_deps(
+        route_variants = resolver.get_effective_route_paths_and_deps(
             module_name, receiver, raw_route_path
         )
 
@@ -1497,7 +1500,7 @@ class PythonPlugin(LanguagePlugin):
         # (including ``Annotated`` aliases), and router-level dependencies (from
         # ``APIRouter(dependencies=[...])`` and ``include_router(..., dependencies=[...])``).
         # Each direct dependency is persisted as a ``call`` reference; auth is resolved.
-        auth_symbols: list[str] = []
+        base_auth_symbols: list[str] = []
         params = func_node.child_by_field_name("parameters")
         found: list[tuple[str, str, str, Node]] = [
             (marker, text, module_name, node)
@@ -1526,28 +1529,40 @@ class PythonPlugin(LanguagePlugin):
                 )
             if (
                 marker == "Security" or resolver.is_auth_dependency(where, text)
-            ) and text not in auth_symbols:
-                auth_symbols.append(text)
+            ) and text not in base_auth_symbols:
+                base_auth_symbols.append(text)
 
-        for marker, text, where in router_deps:
-            if (
-                marker == "Security" or resolver.is_auth_dependency(where, text)
-            ) and text not in auth_symbols:
-                auth_symbols.append(text)
+        has_login_required = any(d.startswith("@login_required") for d in decorators)
 
-        if any(d.startswith("@login_required") for d in decorators):
-            auth_symbols.append("login_required")
+        entries: list[dict[str, Any]] = []
+        seen_routes: set[tuple[str, tuple[str, ...]]] = set()
+        for route_path, router_deps in route_variants:
+            auth_symbols = list(base_auth_symbols)
+            for marker, text, where in router_deps:
+                if (
+                    marker == "Security" or resolver.is_auth_dependency(where, text)
+                ) and text not in auth_symbols:
+                    auth_symbols.append(text)
+            if has_login_required and "login_required" not in auth_symbols:
+                auth_symbols.append("login_required")
 
-        return {
-            "kind": "http",
-            "name": func_name,
-            "method": method_name,
-            "route_or_trigger": route_path,
-            "file_path": rel_path,
-            "line": func_node.start_point[0] + 1,
-            "symbol_fqname": func_fqname,
-            "auth_symbols_json": json.dumps(auth_symbols),
-        }
+            route_key = (route_path, tuple(auth_symbols))
+            if route_key in seen_routes:
+                continue
+            seen_routes.add(route_key)
+            entries.append(
+                {
+                    "kind": "http",
+                    "name": func_name,
+                    "method": method_name,
+                    "route_or_trigger": route_path,
+                    "file_path": rel_path,
+                    "line": func_node.start_point[0] + 1,
+                    "symbol_fqname": func_fqname,
+                    "auth_symbols_json": json.dumps(auth_symbols),
+                }
+            )
+        return entries
 
     def _record_router_mount(
         self,
@@ -1859,23 +1874,22 @@ class PythonPlugin(LanguagePlugin):
                             continue
 
                         if attr in RECEIVER_ROUTE_ATTRS.get(kind, ()):
-                            add_entrypoint(
-                                self._route_entrypoint(
-                                    func_node,
-                                    call_node,
-                                    receiver,
-                                    attr,
-                                    decorators,
-                                    source_bytes,
-                                    rel_path,
-                                    module_name,
-                                    func_name,
-                                    func_fqname,
-                                    resolver,
-                                    references,
-                                    dependency_refs,
-                                )
-                            )
+                            for entry in self._route_entrypoints(
+                                func_node,
+                                call_node,
+                                receiver,
+                                attr,
+                                decorators,
+                                source_bytes,
+                                rel_path,
+                                module_name,
+                                func_name,
+                                func_fqname,
+                                resolver,
+                                references,
+                                dependency_refs,
+                            ):
+                                add_entrypoint(entry)
                         elif attr in RECEIVER_CLI_ATTRS.get(kind, ()):
                             add_entrypoint(
                                 {
