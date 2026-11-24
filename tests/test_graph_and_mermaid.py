@@ -976,3 +976,89 @@ def test_build_graph_exports_all_service_nodes_without_cap(tmp_path):
 
     assert len(graph["nodes"]) == total_services
     assert len(graph["edges"]) == total_services - 1
+
+
+def test_mermaid_ids_sanitize_hyphens_and_pass_validation():
+    # Oracle: Mermaid flowchart syntax reserves '--' for inline links, so graph ids
+    # containing hyphens (e.g. routes '/api/foo--bar' or modules 'my--service')
+    # must produce hyphen-free node ids that pass validate_mermaid_block.
+    distinct = [
+        "ep:GET:/api/foo--bar",
+        "ep:GET:/api/foo_bar",
+        "mod:my--service",
+        "mod:my_service",
+        "sym:a-b",
+        "sym:a_b",
+        "---",
+        "",
+    ]
+    ids = [mermaid_id(raw) for raw in distinct]
+    assert len(set(ids)) == len(distinct)
+    assert all("-" not in node_id and node_id for node_id in ids)
+
+    graph = {
+        "modules": [
+            {
+                "id": "mod:my--service",
+                "name": "my--service",
+                "path": "my--service",
+                "file_count": 1,
+            },
+        ],
+        "nodes": [
+            {
+                "id": "ep:GET:/api/foo--bar",
+                "kind": "entrypoint",
+                "label": "GET /api/foo--bar",
+                "module_id": "mod:my--service",
+                "file": "my--service/routes.py",
+                "line": 10,
+                "symbol": "get_foo",
+                "tier": "scip",
+                "metadata": {"kind": "http", "route": "/api/foo--bar"},
+            },
+            {
+                "id": "sym:helper-fn",
+                "kind": "service",
+                "label": "helper-fn",
+                "module_id": "mod:my--service",
+                "file": "my--service/routes.py",
+                "line": 20,
+                "symbol": "helper_fn",
+                "tier": "scip",
+                "metadata": {"symbol_kind": "function"},
+            },
+        ],
+        "edges": [
+            {
+                "source": "ep:GET:/api/foo--bar",
+                "target": "sym:helper-fn",
+                "kind": "calls",
+                "file": "my--service/routes.py",
+                "line": 12,
+                "tier": "scip",
+            },
+            {
+                "source": "ep:GET:/api/foo--bar",
+                "target": "ds:db--main",
+                "kind": "reads",
+                "file": "my--service/routes.py",
+                "line": 14,
+                "tier": "scip",
+            },
+        ],
+        "data_stores": [
+            {
+                "id": "ds:db--main",
+                "kind": "postgres",
+                "label": "db--main",
+                "evidence": ["my--service/routes.py:14"],
+            }
+        ],
+        "external_sinks": [],
+    }
+    diagrams = generate_diagrams(graph)
+    assert MODULE_OVERVIEW_ID in diagrams
+    assert "flow-foo-bar" in diagrams
+    for diagram_id, code in diagrams.items():
+        assert validate_mermaid_block(code.splitlines(), f"docs/{diagram_id}.md", 1) == []

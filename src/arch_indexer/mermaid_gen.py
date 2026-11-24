@@ -18,7 +18,6 @@ MODULE_OVERVIEW_ID = "module-overview"
 _GENERIC_ROUTE_SEGMENTS = frozenset(
     {"api", "rest", "internal", "public", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"}
 )
-_BOUNDARY_KINDS = frozenset({"datastore", "external_sink"})
 
 
 def _clean(text: str, limit: int = 60) -> str:
@@ -33,8 +32,8 @@ def _clean(text: str, limit: int = 60) -> str:
 
 def mermaid_id(raw: str) -> str:
     """Injective, stable Mermaid node id from a graph id."""
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_")
-    if slug != raw:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_")
+    if slug != raw or not slug:
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
         slug = f"{slug or 'node'}_{digest}"
     return f"n_{slug}" if slug[:1].isdigit() else slug
