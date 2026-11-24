@@ -1057,6 +1057,18 @@ function testBrowserController(graphJsonText) {
     "A container inspector must not offer trace flow"
   );
 
+  // Boundary and terminal leaves must not offer trace flow
+  viewer.selectNode("ds:postgres:orders");
+  assert(
+    !inspectorContent.innerHTML.includes('id="btn-inspector-trace"'),
+    "A data store inspector must not offer trace flow"
+  );
+  viewer.selectNode("sym:AuthService.login");
+  assert(
+    !inspectorContent.innerHTML.includes('id="btn-inspector-trace"'),
+    "A leaf with no outgoing edges must not offer trace flow"
+  );
+
   // Node inspector must show the fixture node's own symbol, file:line and tier
   const inspectorNodeId = "ep:POST:/api/orders";
   const inspectorNodeFixture = fixtureGraph.nodes.find((n) => n.id === inspectorNodeId);

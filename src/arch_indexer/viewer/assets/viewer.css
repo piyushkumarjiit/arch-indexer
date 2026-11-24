@@ -414,6 +414,7 @@ body {
   z-index: 20;
   box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
   overflow-y: auto;
+  user-select: text;
 }
 
 .inspector-panel.open {
@@ -563,6 +564,7 @@ body {
 .trace-step-text {
   font-size: 13px;
   font-weight: 500;
+  user-select: text;
 }
 
 .trace-actions {
