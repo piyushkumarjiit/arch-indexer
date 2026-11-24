@@ -628,6 +628,13 @@ def test_boundary_rules_handle_registry_prefixes_scoped_packages_and_internal_sy
     assert classify_image("docker.io/library/redis:7") == ("cache", "redis", "Redis")
     assert classify_image("bitnami/postgresql:15") == ("sql", "postgres", "PostgreSQL")
     assert classify_image("apache/kafka:3.7") == ("queue", "kafka", "Kafka")
+    assert classify_image("localhost:5000/postgres:15") == ("sql", "postgres", "PostgreSQL")
+    assert classify_image("registry.internal:5000/redis:7") == ("cache", "redis", "Redis")
+    assert classify_image("localhost:5000/postgres@sha256:abc123") == (
+        "sql",
+        "postgres",
+        "PostgreSQL",
+    )
 
     assert classify_token("@prisma/client") == (
         "datastore",

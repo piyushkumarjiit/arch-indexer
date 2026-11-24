@@ -160,7 +160,7 @@ def classify_token(token: str) -> tuple[str, str, str, str] | None:
 
 def classify_image(image: str) -> tuple[str, str, str] | None:
     """Classify a container image name as a data store (image name is lowest priority)."""
-    lowered = image.lower().split("@", 1)[0].split(":", 1)[0]
+    lowered = re.sub(r":[^/]*$", "", image.lower().split("@", 1)[0])
     for fragment in sorted(DATA_STORE_RULES):
         if _matches(fragment, lowered, allow_prefix=True, split_words=True):
             return DATA_STORE_RULES[fragment]
