@@ -1264,6 +1264,7 @@
     searchNodes,
     getNodeDetails,
     ViewerState,
+    areAllFilterGroupsSelected,
     FILTER_KINDS,
     FILTER_TIERS,
   };

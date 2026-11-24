@@ -202,12 +202,18 @@
     viewportEl.innerHTML = "";
 
     if (view.nodes.length === 0) {
+      const filtersHideNodes = !ArchViewerLogic.areAllFilterGroupsSelected(
+        state.hierarchy,
+        state.filters
+      );
       const message = document.createElementNS("http://www.w3.org/2000/svg", "text");
       message.setAttribute("x", "40");
       message.setAttribute("y", "80");
       message.setAttribute("fill", "#64748b");
       message.setAttribute("font-size", "16");
-      message.textContent = "No nodes match the selected filters.";
+      message.textContent = filtersHideNodes
+        ? "No nodes match the selected filters."
+        : "No nodes in this graph.";
       viewportEl.appendChild(message);
       return;
     }

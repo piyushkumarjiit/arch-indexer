@@ -668,6 +668,7 @@ function runTests() {
  * Minimal DOM harness to test viewer.js interactions.
  */
 function testBrowserController(graphJsonText) {
+  const fixtureGraph = JSON.parse(graphJsonText);
   // Setup minimal DOM elements
   const listeners = new Map();
   const elements = new Map();
@@ -828,15 +829,13 @@ function testBrowserController(graphJsonText) {
     }
     for (const ch of node.children) findNode(ch);
   }
-  function findSvgEdge(node) {
+  function findSvgEdges(node, found) {
+    const results = found || [];
     if (node.attributes && node.attributes.class && node.attributes.class.includes("svg-edge")) {
-      return node;
+      results.push(node);
     }
-    for (const ch of node.children) {
-      const found = findSvgEdge(ch);
-      if (found) return found;
-    }
-    return null;
+    for (const ch of node.children || []) findSvgEdges(ch, results);
+    return results;
   }
   function findText(node, text) {
     if (node.textContent === text) return node;
@@ -912,27 +911,79 @@ function testBrowserController(graphJsonText) {
     "The removed #drill= route must not rebuild a breadcrumb trail"
   );
 
-  // Node inspector must show the SPEC 6.3 fields: symbol, file:line, tier, edges
-  viewer.selectNode("ep:POST:/api/orders");
+  // Node inspector must show the fixture node's own symbol, file:line and tier
+  const inspectorNodeId = "ep:POST:/api/orders";
+  const inspectorNodeFixture = fixtureGraph.nodes.find((n) => n.id === inspectorNodeId);
+  assert(inspectorNodeFixture, "Fixture must contain the inspected node");
+  viewer.selectNode(inspectorNodeId);
   const inspectorContent = elements.get("inspector-content");
-  assert(inspectorContent.innerHTML.includes("create_order"), "Node inspector must show the symbol");
   assert(
-    inspectorContent.innerHTML.includes("src/orders/routes.py:42"),
-    "Node inspector must show file:line"
+    inspectorContent.innerHTML.includes(`>${inspectorNodeFixture.symbol}<`),
+    "Node inspector must show the fixture symbol"
   );
-  assert(inspectorContent.innerHTML.includes("scip"), "Node inspector must show the indexing tier");
+  assert(
+    inspectorContent.innerHTML.includes(
+      `>${inspectorNodeFixture.file}:${inspectorNodeFixture.line}<`
+    ),
+    "Node inspector must show the fixture file:line"
+  );
+  assert(
+    inspectorContent.innerHTML.includes(`>${inspectorNodeFixture.tier}<`),
+    "Node inspector must show the fixture indexing tier"
+  );
   assert(inspectorContent.innerHTML.includes("Uses ("), "Node inspector must show outgoing edges");
   assert(inspectorContent.innerHTML.includes("Used By ("), "Node inspector must show incoming edges");
 
-  // Edge inspector must show the underlying file:line and tier
-  const renderedEdge = findSvgEdge(viewport);
-  assert(renderedEdge, "System view must render aggregated edges");
-  renderedEdge.dispatchEvent({ type: "click" });
-  assert(inspectorContent.innerHTML.includes("Citation"), "Edge inspector must show file:line citations");
-  assert(inspectorContent.innerHTML.includes("src/"), "Edge inspector citations must cite real files");
+  // Edge inspector must cite the fixture call sites and tier of the clicked edge
+  state.drillDown(inspectorNodeId);
+  viewerController.render();
+  const symbolViewEdges = state.getCurrentView().edges;
+  assert(symbolViewEdges.length > 0, "Symbol view must render edges");
+  const svgEdges = findSvgEdges(viewport);
+  assert.strictEqual(
+    svgEdges.length,
+    symbolViewEdges.length,
+    "Every symbol-view edge must be rendered as a path"
+  );
+  const firstViewEdge = symbolViewEdges[0];
+  const fixtureEdges = fixtureGraph.edges.filter(
+    (edge) => edge.source === firstViewEdge.source && edge.target === firstViewEdge.target
+  );
+  assert(fixtureEdges.length > 0, "Clicked edge must resolve to fixture edges");
+  svgEdges[0].dispatchEvent({ type: "click" });
+  const expectedCitations = Array.from(
+    new Set(fixtureEdges.map((edge) => `${edge.file}:${edge.line}`))
+  ).join(", ");
+  const expectedTiers = Array.from(
+    new Set(fixtureEdges.map((edge) => edge.tier).filter(Boolean))
+  ).join(", ");
   assert(
-    inspectorContent.innerHTML.includes("Indexing Tier"),
-    "Edge inspector must show the indexing tier"
+    inspectorContent.innerHTML.includes(`>${expectedCitations}<`),
+    "Edge inspector must cite the fixture call sites of the clicked edge"
+  );
+  assert(
+    inspectorContent.innerHTML.includes(`>${expectedTiers}<`),
+    "Edge inspector must show the fixture tier of the clicked edge"
+  );
+
+  // The tree-sitter frontend edge must report its own fixture tier, not a hard-coded one
+  const frontendEdgeIndex = symbolViewEdges.findIndex(
+    (edge) => edge.source === "fe:checkout_page" && edge.target === inspectorNodeId
+  );
+  assert(frontendEdgeIndex >= 0, "Symbol view must render the frontend-to-entrypoint edge");
+  const frontendFixtureEdges = fixtureGraph.edges.filter(
+    (edge) =>
+      edge.source === symbolViewEdges[frontendEdgeIndex].source &&
+      edge.target === symbolViewEdges[frontendEdgeIndex].target
+  );
+  const frontendExpectedTiers = Array.from(
+    new Set(frontendFixtureEdges.map((edge) => edge.tier).filter(Boolean))
+  ).join(", ");
+  assert.strictEqual(frontendExpectedTiers, "tree-sitter", "Fixture frontend edge must be tree-sitter tier");
+  svgEdges[frontendEdgeIndex].dispatchEvent({ type: "click" });
+  assert(
+    inspectorContent.innerHTML.includes(`>${frontendExpectedTiers}<`),
+    "Edge inspector must show the clicked edge's own tier"
   );
 
   // Trace bar must clear whenever trace mode ends
@@ -978,6 +1029,31 @@ function testBrowserController(graphJsonText) {
   assert(
     findText(viewport, "No nodes match the selected filters."),
     "The viewer must show an empty-state message when no nodes match the filters"
+  );
+
+  // An empty graph must not tell the user that filters are hiding nodes
+  dataScript.textContent = JSON.stringify({
+    schema_version: "1.0",
+    repo_name: "empty-repo",
+    modules: [],
+    nodes: [],
+    edges: [],
+    data_stores: [],
+    external_sinks: [],
+  });
+  viewerController.init();
+  assert.strictEqual(
+    viewerController.getState().getCurrentView().nodes.length,
+    0,
+    "An empty graph must produce an empty view"
+  );
+  assert(
+    findText(viewport, "No nodes in this graph."),
+    "An empty graph must show a neutral empty-state message"
+  );
+  assert(
+    !findText(viewport, "No nodes match the selected filters."),
+    "An empty graph must not blame the filters"
   );
 
   // Synthetic root module must be filterable and never silently hidden
