@@ -86,7 +86,7 @@ Default root: `${XDG_CACHE_HOME:-~/.cache}/arch-indexer` (overridable via `ARCH_
 └── repos/
     └── <sha256(realpath(repo))[:16]>/
         ├── index.db                 # SQLite symbol, reference, file & tier database
-        ├── state.json               # Previous run file hashes, symbol signatures & section map
+        ├── state.json               # Previous run file hashes, symbol signatures, section map & diagram hashes
         ├── master-index.json        # Compact summary for agents
         ├── index-delta.json         # Added/modified/deleted files & symbols
         ├── impacted-sections.json   # Doc sections invalidated by the current delta
@@ -206,7 +206,7 @@ On each `arch-indexer index <repo>` run:
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
 
 ### 5.4 Zero-Token Line-Shift Repair
-If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file's `content_sha256` unchanged), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
+If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file contains a moved symbol with its `content_sha256` unchanged), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
 
 ### 5.5 File-to-Section Impact Mapping (`impacted-sections.json`)
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
@@ -337,9 +337,9 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 
 | Code | Name | Meaning |
 | :--- | :--- | :--- |
-| `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
+| `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
-| `2` | `DELTA_DETECTED` | For `index` only: changes detected (or first run). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
+| `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer is not present in the local cache. |
 
