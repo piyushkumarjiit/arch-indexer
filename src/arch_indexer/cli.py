@@ -88,9 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # 2. index
-    index_parser = subparsers.add_parser(
-        "index", help="Deterministic indexing, delta detection, graph & viewer export"
-    )
+    index_parser = subparsers.add_parser("index", help="Deterministic indexing and delta detection")
     index_parser.add_argument("repo", help="Target repository path")
     index_parser.add_argument(
         "--offline", action="store_true", default=False, help="Run completely offline"
@@ -132,7 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max files per indexing chunk",
     )
     index_parser.add_argument(
-        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+        "--docs-dir",
+        default=DEFAULT_DOCS_DIR,
+        help="Docs directory to read sections from and relocate citations in",
     )
     index_parser.add_argument(
         "--auto-relocate-citations",

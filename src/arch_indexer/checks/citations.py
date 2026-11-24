@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -84,25 +85,10 @@ def _split_lines(text: str) -> list[str]:
 
 def _strip_fenced_blocks_and_comments(text: str) -> str:
     """Strip fenced code blocks and HTML comments so prose references are cleanly parsed."""
-    # Strip HTML comments <!-- ... -->
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    # Replace contents of fenced code blocks with blank lines to preserve line count
-    lines = _split_lines(text)
-    cleaned: list[str] = []
-    in_fence = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            cleaned.append("")
-        elif in_fence:
-            cleaned.append("")
-        else:
-            cleaned.append(line)
-    return "\n".join(cleaned)
+    return "\n".join(_mask_lines(_split_lines(text), mask_comments=True))
 
 
-def _symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
+def symbol_matches(name: str | None, fqname: str | None, symbol: str) -> bool:
     """Return True if symbol is exactly the name or a qualified-name suffix."""
     if name is not None and name == symbol:
         return True
@@ -140,7 +126,7 @@ def _find_symbol_in_index(
     """Check if symbol starts at or spans line in index.db symbols table."""
     rows = _fetch_symbol_rows(conn, file_path)
     for start_line, end_line, name, fqname in rows:
-        if not _symbol_matches(name, fqname, symbol):
+        if not symbol_matches(name, fqname, symbol):
             continue
         if start_line == line:
             return True
@@ -161,7 +147,7 @@ def _find_drift_in_index(
     candidates = [
         start_line
         for start_line, _end_line, name, fqname in rows
-        if start_line is not None and start_line != line and _symbol_matches(name, fqname, symbol)
+        if start_line is not None and start_line != line and symbol_matches(name, fqname, symbol)
     ]
     if not candidates:
         return None
@@ -562,3 +548,334 @@ def run_check_citations(
             stdout.write(f"{error.format_line()}\n")
 
     return 3 if errors else 0
+
+
+# --- Document section parsing, diagram hashes and zero-token citation relocation ---
+
+# Section markers written by the docs assembler: <!-- SECTION:<id>:START --> / :END
+SECTION_LINE_START_RE = re.compile(
+    r"^\s*<!--\s*SECTION:(?P<id>[^:>\s]+):START(?::[^>\s]+)?\s*-->\s*$",
+    re.IGNORECASE,
+)
+SECTION_LINE_END_RE = re.compile(
+    r"^\s*<!--\s*SECTION:(?P<id>[^:>\s]+):END\s*-->\s*$",
+    re.IGNORECASE,
+)
+# Auto-generated diagram slot (spec section 6.2)
+AUTO_DIAGRAM_BLOCK_RE = re.compile(
+    r"<!--\s*AUTO-DIAGRAM:(?P<id>[^:\s]+):START\s*-->(?P<body>.*?)"
+    r"<!--\s*AUTO-DIAGRAM:(?P=id):END\s*-->",
+    re.DOTALL,
+)
+HEADING_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<heading>.+?)\s*$")
+H2_HEADING_RE = re.compile(r"^##\s+(?P<heading>.+?)\s*$")
+FENCE_OPEN_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def slugify_heading(text: str) -> str:
+    """Deterministic section id from a heading: lowercase alphanumerics joined by '-'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    return slug or "section"
+
+
+@dataclass(frozen=True)
+class DocSection:
+    """One documentation section parsed from a canonical document."""
+
+    doc: str
+    section_id: str
+    heading: str
+    start_line: int
+    end_line: int
+    cited_files: tuple[str, ...]
+    cited_symbols: tuple[tuple[str, int, str], ...]
+    diagram_hashes: dict[str, str]
+
+
+def compute_auto_diagram_hashes(text: str) -> dict[str, str]:
+    """Map each AUTO-DIAGRAM id in text to the sha256 of its generated body."""
+    raw_lines = text.splitlines(keepends=True)
+    line_parts: list[tuple[str, str]] = []
+    for raw_line in raw_lines:
+        content = raw_line.rstrip("\r\n")
+        ending = raw_line[len(content) :]
+        line_parts.append((content, ending))
+    masked_bodies = _mask_lines([content for content, _ in line_parts], mask_comments=False)
+    masked_text = "".join(
+        (" " * len(content) if masked == "" and content else masked) + ending
+        for (content, ending), masked in zip(line_parts, masked_bodies, strict=True)
+    )
+    return {
+        match.group("id"): hashlib.sha256(
+            text[match.start("body") : match.end("body")].strip().encode("utf-8")
+        ).hexdigest()
+        for match in AUTO_DIAGRAM_BLOCK_RE.finditer(masked_text)
+    }
+
+
+def parse_citation_definitions(text: str) -> dict[str, tuple[str, int, str]]:
+    """Map footnote id to (file, line, symbol) for every strictly formatted definition."""
+    definitions: dict[str, tuple[str, int, str]] = {}
+    for line in _split_lines(_strip_fenced_blocks_and_comments(text)):
+        def_match = FOOTNOTE_DEF_RE.match(line)
+        if not def_match:
+            continue
+        strict_match = STRICT_CITATION_RE.match(def_match.group("body").strip())
+        if not strict_match:
+            continue
+        definitions.setdefault(
+            def_match.group("id").strip(),
+            (
+                strict_match.group("file").strip(),
+                int(strict_match.group("line")),
+                strict_match.group("symbol").strip(),
+            ),
+        )
+    return definitions
+
+
+def _first_heading(lines: list[str], start_line: int, end_line: int) -> str | None:
+    for line in lines[start_line - 1 : end_line]:
+        match = HEADING_RE.match(line)
+        if match:
+            return match.group("heading").strip()
+    return None
+
+
+def _unique_section_id(section_id: str, seen: set[str]) -> str:
+    candidate = section_id
+    counter = 2
+    while candidate in seen:
+        candidate = f"{section_id}-{counter}"
+        counter += 1
+    seen.add(candidate)
+    return candidate
+
+
+def _section_line_ranges(lines: list[str]) -> list[tuple[str, str, int, int]]:
+    """Return (section_id, heading, start_line, end_line) ranges for a document.
+
+    Uses <!-- SECTION:<id>:START --> / :END markers when present; otherwise treats every
+    level-two heading as the start of a section (spec 5.5).
+    """
+    seen: set[str] = set()
+    unfenced_lines = _mask_lines(lines, mask_comments=False)
+    masked_lines = _mask_lines(lines, mask_comments=True)
+    starts = [
+        (index + 1, match.group("id"))
+        for index, line in enumerate(unfenced_lines)
+        if (match := SECTION_LINE_START_RE.match(line))
+    ]
+    if starts:
+        end_lines: dict[str, int] = {}
+        for index, line in enumerate(unfenced_lines):
+            match = SECTION_LINE_END_RE.match(line)
+            if match:
+                end_lines.setdefault(match.group("id"), index + 1)
+        ranges: list[tuple[str, str, int, int]] = []
+        for position, (start_line, raw_id) in enumerate(starts):
+            next_start = starts[position + 1][0] if position + 1 < len(starts) else len(lines) + 1
+            end_line = end_lines.get(raw_id, next_start - 1)
+            if end_line < start_line:
+                end_line = start_line
+            heading = _first_heading(masked_lines, start_line, end_line) or raw_id
+            ranges.append((_unique_section_id(raw_id, seen), heading, start_line, end_line))
+        return ranges
+
+    headings = [
+        (index + 1, match.group("heading").strip())
+        for index, line in enumerate(masked_lines)
+        if (match := H2_HEADING_RE.match(line))
+    ]
+    ranges = []
+    for position, (start_line, heading) in enumerate(headings):
+        end_line = headings[position + 1][0] - 1 if position + 1 < len(headings) else len(lines)
+        ranges.append(
+            (_unique_section_id(slugify_heading(heading), seen), heading, start_line, end_line)
+        )
+    return ranges
+
+
+def _section_citations(
+    body_text: str, definitions: Mapping[str, tuple[str, int, str]]
+) -> tuple[tuple[str, int, str], ...]:
+    """Collect the (file, line, symbol) citations used by a section's body text."""
+    cited: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for line in _split_lines(_strip_fenced_blocks_and_comments(body_text)):
+        if FOOTNOTE_DEF_RE.match(line):
+            continue
+        line_without_code = re.sub(r"(`+).*?\1", "", line)
+        for match in FOOTNOTE_REF_RE.finditer(line_without_code):
+            definition = definitions.get(match.group("id").strip())
+            if definition is None or definition in seen:
+                continue
+            seen.add(definition)
+            cited.append(definition)
+    cited.sort()
+    return tuple(cited)
+
+
+def parse_doc_sections(doc_text: str, doc_rel: str) -> list[DocSection]:
+    """Parse a canonical document into ordered sections with their citations."""
+    lines = _split_lines(doc_text)
+    definitions = parse_citation_definitions(doc_text)
+    sections: list[DocSection] = []
+    for section_id, heading, start_line, end_line in _section_line_ranges(lines):
+        body_text = "\n".join(lines[start_line - 1 : end_line])
+        citations = _section_citations(body_text, definitions)
+        sections.append(
+            DocSection(
+                doc=doc_rel,
+                section_id=section_id,
+                heading=heading,
+                start_line=start_line,
+                end_line=end_line,
+                cited_files=tuple(sorted({citation[0] for citation in citations})),
+                cited_symbols=citations,
+                diagram_hashes=compute_auto_diagram_hashes(body_text),
+            )
+        )
+    return sections
+
+
+def _mask_lines(lines: Sequence[str], *, mask_comments: bool = True) -> list[str]:
+    """Blank out fenced code blocks (and optionally HTML comments) while preserving line count."""
+    masked: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    in_comment = False
+    for line in lines:
+        if in_fence:
+            stripped = line.strip()
+            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+            masked.append("")
+            continue
+        if not in_comment:
+            fence_match = FENCE_OPEN_RE.match(line)
+            if fence_match:
+                fence = fence_match.group("fence")
+                info = fence_match.group("info")
+                if not (fence[0] == "`" and "`" in info):
+                    in_fence = True
+                    fence_char = fence[0]
+                    fence_len = len(fence)
+                    masked.append("")
+                    continue
+        chars = list(line)
+        index = 0
+        while index < len(line):
+            if in_comment:
+                end = line.find("-->", index)
+                if end == -1:
+                    if mask_comments:
+                        for pos in range(index, len(line)):
+                            chars[pos] = " "
+                    index = len(line)
+                else:
+                    if mask_comments:
+                        for pos in range(index, end + 3):
+                            chars[pos] = " "
+                    index = end + 3
+                    in_comment = False
+                continue
+            start = line.find("<!--", index)
+            if start == -1:
+                break
+            end = line.find("-->", start + 4)
+            if end == -1:
+                if mask_comments:
+                    for pos in range(start, len(line)):
+                        chars[pos] = " "
+                in_comment = True
+                index = len(line)
+            else:
+                if mask_comments:
+                    for pos in range(start, end + 3):
+                        chars[pos] = " "
+                index = end + 3
+        masked.append("".join(chars))
+    return masked
+
+
+def _masked_citation_lines(lines: Sequence[str]) -> list[str]:
+    """Blank out fenced code blocks and HTML comments while preserving line numbering.
+
+    Fenced lines become empty strings; HTML comment characters become spaces, so a
+    footnote definition outside them keeps its column offsets for in-place rewriting.
+    """
+    return _mask_lines(lines, mask_comments=True)
+
+
+def _resolve_move(
+    candidates: Sequence[tuple[int, str, str]],
+    symbol: str,
+) -> int | None:
+    """Return the unique new line for a moved symbol, or None when ambiguous/absent."""
+    matched = [
+        to_line for to_line, name, fqname in candidates if symbol_matches(name, fqname, symbol)
+    ]
+    if len(set(matched)) != 1:
+        return None
+    return matched[0]
+
+
+def relocate_citations_in_text(
+    doc_text: str, moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]]
+) -> tuple[str, int]:
+    """Rewrite shifted line numbers in footnote definitions of one document.
+
+    `moves` maps (file_path, previous_line) to a sequence of (new_line, name, fqname)
+    candidates for the symbols whose previous span contained that line. A footnote is
+    rewritten only when it cites a line present in `moves` and its symbol matches one
+    candidate via the same rule the citation checker uses. Returns the updated text and
+    the number of rewritten footnotes. Fenced code blocks and HTML comments are ignored.
+    """
+    lines = _split_lines(doc_text)
+    masked_lines = _masked_citation_lines(lines)
+    rewritten = 0
+    updated_lines: list[str] = []
+    for line, masked_line in zip(lines, masked_lines, strict=True):
+        def_match = FOOTNOTE_DEF_RE.match(masked_line)
+        if def_match:
+            strict_match = STRICT_CITATION_RE.match(def_match.group("body").strip())
+            if strict_match:
+                file_path = strict_match.group("file").strip()
+                cited_line = int(strict_match.group("line"))
+                symbol = strict_match.group("symbol").strip()
+                candidates = moves.get((file_path, cited_line), ())
+                new_line = _resolve_move(candidates, symbol)
+                if new_line is not None and new_line != cited_line:
+                    prefix = line[: def_match.start("body")]
+                    line = f"{prefix}`{file_path}:{new_line}` \u2014 `{symbol}`"
+                    rewritten += 1
+        updated_lines.append(line)
+    updated_text = "\n".join(updated_lines)
+    if doc_text.endswith("\n"):
+        updated_text += "\n"
+    return updated_text, rewritten
+
+
+def relocate_citations(
+    repo: str | Path,
+    moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]],
+    docs_dir: str = DEFAULT_DOCS_DIR,
+    doc_names: Sequence[str] = CANONICAL_DOCS,
+) -> list[str]:
+    """Apply zero-token citation relocation to every existing canonical document."""
+    repo_path = Path(repo).resolve()
+    updated: list[str] = []
+    for doc_name in doc_names:
+        doc_path = repo_path / docs_dir / doc_name
+        if not doc_path.is_file():
+            continue
+        original = doc_path.read_text(encoding="utf-8", errors="replace")
+        updated_text, rewritten = relocate_citations_in_text(original, moves)
+        if rewritten:
+            doc_path.write_text(updated_text, encoding="utf-8")
+            updated.append(f"{docs_dir}/{doc_name}")
+    return updated
