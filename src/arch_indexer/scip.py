@@ -145,8 +145,6 @@ def derive_ref_kind(occ: Occurrence, last_suffix: str = "") -> str:
         return "import"
     if roles & SymbolRole.WriteAccess:
         return "write"
-    if roles & SymbolRole.ReadAccess:
-        return "read"
 
     syntax = occ.syntax_kind
     if syntax in (

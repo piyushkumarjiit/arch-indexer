@@ -147,6 +147,31 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     assert "pyimp.client.fetch.url" not in unresolved_symbols
 
 
+def test_python_scip_fixture_distinguishes_calls_and_types(tmp_path: Path):
+    """ReadAccess references still resolve to call/type from symbol evidence (Spec 4.5).
+
+    scip-python marks every reference occurrence ReadAccess, but the indexed source
+    calls ``requests.get(url)`` on line 6 and annotates parameters with ``str``.
+    """
+    repo_dir = FIXTURES_DIR / "python_imports"
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "pyimp" / "client.py"],
+    )
+
+    test_scip = tmp_path / "test.scip"
+    shutil.copy(repo_dir / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit)
+    ref_kinds = {(r["line"], r["symbol_fqname"]): r["ref_kind"] for r in res.references}
+    assert ref_kinds[(6, "requests.api.get")] == "call"
+    assert ref_kinds[(5, "builtins.str")] == "type"
+    assert ref_kinds[(9, "builtins.str")] == "type"
+
+
 def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     """Verify TypeScript SCIP fixture ingest with exact lines."""
     fixture_scip = FIXTURES_DIR / "ts" / "index.scip"
@@ -1203,6 +1228,11 @@ def test_scip_symbol_parsing_params_type_params_and_spaces():
     assert (simple, fq, kind, suffix) == ("args", "com.example.App.main.args", "variable", "()")
     assert derive_ref_kind(scip_pb2.Occurrence(), suffix) == "read"
     assert derive_ref_kind(scip_pb2.Occurrence(), "().") == "call"
+
+    read_occ = scip_pb2.Occurrence(symbol_roles=int(scip_pb2.SymbolRole.ReadAccess))
+    assert derive_ref_kind(read_occ, "().") == "call"
+    assert derive_ref_kind(read_occ, "#") == "type"
+    assert derive_ref_kind(read_occ, "()") == "read"
 
     simple, fq, kind, suffix = parse_scip_symbol(
         "semanticdb maven maven/com.example/demo 1.0.0 com/example/Box#[T]"
