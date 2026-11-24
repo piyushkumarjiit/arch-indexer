@@ -266,8 +266,8 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
-- **Module Dependency Diagram** (`diagram:module-overview`): `flowchart LR` of modules, data stores, and external sinks.
-- **Per-Entrypoint / Per-Domain Flow Diagrams** (`diagram:flow-<domain>`): `flowchart TD` tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`.
+- **Module Dependency Diagram** (`module-overview`): `flowchart LR` of modules, data stores, and external sinks.
+- **Per-Entrypoint / Per-Domain Flow Diagrams** (`flow-<domain>`): one `flowchart TD` per entrypoint domain, tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`. Diagram ids are the exact `AUTO-DIAGRAM:<id>` slot ids (no `diagram:` prefix).
 - **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates; if the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
