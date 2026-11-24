@@ -1027,7 +1027,7 @@ def format_status_report(report: ToolchainStatusReport) -> str:
             lines.append(f"  - {lang:12}: {file_count} files")
 
     lines.append("")
-    lines.append("Host Runtimes:")
+    lines.append("Runtimes:")
     for name in ("python", "node", "java", "mvn"):
         rt = report.runtimes.get(name)
         if rt:

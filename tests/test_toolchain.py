@@ -460,7 +460,7 @@ def test_toolchain_status_report(tmp_path):
     text = format_status_report(report)
     assert "Target Repository:" in text
     assert "python" in text
-    assert "Host Runtimes:" in text
+    assert "Runtimes:" in text
     assert "scip-python" in text
 
 

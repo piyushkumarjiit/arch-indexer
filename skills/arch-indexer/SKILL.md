@@ -10,6 +10,8 @@ metadata:
 
 Orchestrator instructions for executing the 4-step conflict-free documentation workflow.
 
+> **Implementation status**: `query`, `plan` and `assemble` are not implemented yet, so the steps below describe the target workflow rather than a runnable one. See the current limits in the repository [README](../../README.md).
+
 ## Orchestration Invariants
 
 1. **Target repository write boundary**: Firstmate orchestrator NEVER writes directly to the target repository itself. Every file write occurs inside an isolated worker git branch or via CLI commands executed by a worker.

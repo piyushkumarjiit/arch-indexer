@@ -137,3 +137,21 @@ def test_skill_commands_exist_in_cli_parser() -> None:
         "module-summary",
         "flow-trace",
     }.issubset(parsed_query_actions)
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "```bash\narch-indexer assemble placeholder --draft-dir docs/.drafts\n```\n",
+        "```bash\narch-indexer toolchain ensure\n```\n",
+    ],
+)
+def test_extraction_pipeline_rejects_invalid_documented_commands(markdown: str) -> None:
+    """A documented command with a misspelled or missing option must fail the CLI grammar."""
+    invocations = _extract_cli_invocations(markdown)
+    assert invocations, f"Sample yielded no CLI invocation: {markdown!r}"
+
+    parser = build_parser()
+    for argv in invocations:
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
