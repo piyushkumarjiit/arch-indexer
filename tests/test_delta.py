@@ -495,6 +495,14 @@ class B:
         return 2
 """
 
+TWO_RUN_GUIDE = """# User Guide
+
+## 1. System Overview
+
+Operators drive the service through the documented entry points.
+"""
+
+
 TWO_RUN_DOC = """# Technical Design
 
 <!-- SECTION:1-architecture-overview:START -->
@@ -559,6 +567,7 @@ def test_relocation_matches_cited_line_not_symbol_name(tmp_path: Path, capsys):
     (repo / "docs").mkdir(parents=True)
     (repo / "src" / "app.py").write_text(TWO_RUN_SOURCE, encoding="utf-8")
     (repo / "docs" / "DESIGN.md").write_text(TWO_RUN_DOC, encoding="utf-8")
+    (repo / "docs" / "USER_GUIDE.md").write_text(TWO_RUN_GUIDE, encoding="utf-8")
     _init_git_repo(repo)
     cache = tmp_path / "cache"
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
@@ -668,6 +677,7 @@ def test_failed_relocation_restores_docs_so_retry_does_not_double_shift(tmp_path
     )
     design_path = repo / "docs" / "DESIGN.md"
     design_path.write_text(broken_doc, encoding="utf-8")
+    (repo / "docs" / "USER_GUIDE.md").write_text(TWO_RUN_GUIDE, encoding="utf-8")
     _init_git_repo(repo)
     cache = tmp_path / "cache"
     assert _index(repo, cache) == EXIT_DELTA_DETECTED
@@ -880,6 +890,7 @@ def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys
         "[^1]: `src/app.py:3` — `start`\n",
         encoding="utf-8",
     )
+    (repo / "docs" / "USER_GUIDE.md").write_text(TWO_RUN_GUIDE, encoding="utf-8")
     _init_git_repo(repo)
     cache = tmp_path / "cache"
     assert _index(repo, cache) == EXIT_DELTA_DETECTED

@@ -86,7 +86,7 @@ Default root: `${XDG_CACHE_HOME:-~/.cache}/arch-indexer` (overridable via `ARCH_
 └── repos/
     └── <sha256(realpath(repo))[:16]>/
         ├── index.db                 # SQLite symbol, reference, file & tier database
-        ├── state.json               # Previous run file hashes, symbol hashes & section map
+        ├── state.json               # Previous run file hashes, symbol signatures & section map
         ├── master-index.json        # Compact summary for agents
         ├── index-delta.json         # Added/modified/deleted files & symbols
         ├── impacted-sections.json   # Doc sections invalidated by the current delta
@@ -185,17 +185,17 @@ Core tables:
 
 ### 5.1 Snapshot & Delta Calculation
 On each `arch-indexer index <repo>` run:
-1. Compute current `sha256` for all tracked source/infra files and `body_sha256` for all extracted symbols.
+1. Compute current `sha256` for all tracked source/infra files and record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
 2. Compare against `<cache>/repos/<id>/state.json`.
 3. Produce `index-delta.json` containing:
    - `is_first_run`: boolean
    - `added_files`, `modified_files`, `deleted_files`
-   - `added_symbols`, `modified_symbols` (body hash changed), `moved_symbols` (same `body_sha256`, changed `start_line`), `deleted_symbols`
+   - `added_symbols`, `modified_symbols` (body, visibility or decorator signature changed), `moved_symbols` (unchanged signature, changed `start_line`), `deleted_symbols`
 
 ### 5.2 First Run (No Previous Index)
 - Detected when `state.json` does not exist (or `--force-full` is passed).
 - All indexed files are recorded under `added_files`.
-- Every canonical section in `DESIGN.md` and `USER_GUIDE.md` is added to `impacted-sections.json`.
+- Every existing section in `DESIGN.md` and `USER_GUIDE.md` is added to `impacted-sections.json`; a canonical document with no sections contributes its full canonical outline (section 8.1).
 - Exits with code **`2`** (`DELTA_DETECTED`).
 
 ### 5.3 Deleted-File Handling
@@ -206,14 +206,14 @@ On each `arch-indexer index <repo>` run:
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
 
 ### 5.4 Zero-Token Line-Shift Repair
-If a run has **only** `moved_symbols` (no added/deleted files and no `modified_symbols` where `body_sha256` changed), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, updates `state.json`, and exits **`0`** (`NO_CHANGES`)—consuming **0 LLM tokens**.
+If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file accounted for by a moved symbol), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
 
 ### 5.5 File-to-Section Impact Mapping (`impacted-sections.json`)
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
-- It cites any file in `modified_files` (with changed symbol bodies) or `deleted_files`.
+- It cites any file in `deleted_files`, any file with modified or deleted symbols, or any file in `modified_files` not explained purely by moved symbols.
 - It covers a module that has `added_files` or `added_symbols` (via module-to-section mapping in `state.json`).
-- It does not yet exist (first run or newly added module).
-- Its embedded auto-generated diagram hash changed.
+- It does not yet exist (first run, a newly added module, or a canonical document with no sections).
+- Its embedded auto-generated diagram hash differs from the hash recorded in `state.json`.
 
 ---
 
@@ -337,7 +337,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 
 | Code | Name | Meaning |
 | :--- | :--- | :--- |
-| `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means delta is empty (docs are up to date; skip LLM workers). |
+| `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected (or first run). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, or `assemble` failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |

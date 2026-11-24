@@ -1,8 +1,8 @@
 """Snapshot, delta calculation and documentation impact mapping (spec sections 5.1-5.5).
 
-`state.json` records the indexed file and symbol hashes of the previous run together with
-the module-to-section map and the hashes of generated diagram blocks. `index-delta.json`
-and `impacted-sections.json` describe the current run.
+`state.json` records the indexed file hashes and symbol signatures of the previous run
+together with the module-to-section map and the hashes of generated diagram blocks.
+`index-delta.json` and `impacted-sections.json` describe the current run.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def _group_symbols(symbols: Iterable[dict[str, Any]]) -> dict[str, tuple[dict[st
 
 @dataclass
 class RepoSnapshot:
-    """Hashes of all tracked files and symbols at one point in time."""
+    """File hashes and symbol signatures at one point in time."""
 
     files: dict[str, dict[str, Any]] = field(default_factory=dict)
     symbols: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
@@ -177,7 +177,7 @@ class Delta:
         )
 
     def is_move_only(self) -> bool:
-        """True when the only change is line shifts of unchanged symbol bodies (spec 5.4)."""
+        """True when the only change is line shifts of otherwise unchanged symbols (spec 5.4)."""
         moved_files = {symbol["file_path"] for symbol in self.moved_symbols}
         return (
             bool(self.moved_symbols)
@@ -244,6 +244,11 @@ def _symbol_record(source: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _symbol_changed(old_symbol: Mapping[str, Any], new_symbol: Mapping[str, Any]) -> bool:
+    """True when the symbol's body, visibility or decorator signature changed.
+
+    Decorators and visibility carry auth, routing and export behavior that the body AST
+    does not see, so a change there must not be reported as a pure line shift.
+    """
     return (
         new_symbol.get("body_sha256") != old_symbol.get("body_sha256")
         or new_symbol.get("visibility") != old_symbol.get("visibility")
@@ -255,7 +260,7 @@ def compute_delta(previous: RepoSnapshot | None, current: RepoSnapshot) -> Delta
     """Compare the previous snapshot with the current one (spec 5.1).
 
     A `None` previous snapshot is a first run: every current file and symbol is reported as
-    added. Symbol bodies are compared per occurrence so duplicate fqnames stay distinct.
+    added. Symbol signatures are compared per occurrence so duplicate fqnames stay distinct.
     """
     delta = Delta(is_first_run=previous is None)
     previous = previous or RepoSnapshot()

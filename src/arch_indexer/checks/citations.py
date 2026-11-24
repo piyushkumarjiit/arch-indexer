@@ -825,10 +825,10 @@ def relocate_citations_in_text(
     """Rewrite shifted line numbers in footnote definitions of one document.
 
     `moves` maps (file_path, previous_line) to a sequence of (new_line, name, fqname)
-    candidates for the symbols that used to start on that line. A footnote is rewritten
-    only when it cites that exact previous line and its symbol matches one candidate via
-    the same rule the citation checker uses. Returns the updated text and the number of
-    rewritten footnotes. Fenced code blocks and HTML comments are ignored.
+    candidates for the symbols whose previous span contained that line. A footnote is
+    rewritten only when it cites a line present in `moves` and its symbol matches one
+    candidate via the same rule the citation checker uses. Returns the updated text and
+    the number of rewritten footnotes. Fenced code blocks and HTML comments are ignored.
     """
     lines = _split_lines(doc_text)
     masked_lines = _masked_citation_lines(lines)
