@@ -83,6 +83,12 @@ function runTests() {
   const feCheckout = hierarchy.nodeLookup.get("fe:checkout_page");
   assert(feCheckout, "fe:checkout_page should exist");
   assert.strictEqual(feCheckout.tier, "tree-sitter", "fe:checkout_page must have canonical tree-sitter tier");
+  // The fixture intentionally names an undeclared module so the synthetic root is exercised.
+  assert.strictEqual(
+    feCheckout.moduleId,
+    "mod:root",
+    "A node whose module_id is undeclared must fall back to the synthetic root module"
+  );
 
   // Check data store does not have hard-coded scip tier
   const dsOrders = hierarchy.nodeLookup.get("ds:postgres:orders");

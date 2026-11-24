@@ -208,7 +208,7 @@
     {
       "source": "sym:PaymentClient.charge",
       "target": "ext:stripe",
-      "kind": "http_api",
+      "kind": "http_request",
       "file": "src/billing/client.py",
       "line": 35,
       "tier": "scip"
