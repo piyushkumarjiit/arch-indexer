@@ -212,7 +212,7 @@ If a run has **only** `moved_symbols` (no added/deleted files, no added/modified
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
 - It cites any file in `deleted_files`, any file with modified or deleted symbols, or any file in `modified_files` not explained purely by moved symbols.
 - It covers a module that has `added_files` or `added_symbols` (via module-to-section mapping in `state.json`).
-- It does not yet exist (first run, a newly added module, or a canonical document with no sections).
+- It does not yet exist: a canonical document with no sections contributes its full canonical outline, while on a later run a newly added module with no covering section is listed under `missing_sections` instead of `sections`.
 - Its embedded auto-generated diagram hash differs from the hash recorded in `state.json`.
 
 ---
