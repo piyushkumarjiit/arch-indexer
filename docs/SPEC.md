@@ -29,7 +29,7 @@ arch-indexer/
 ├── src/arch_indexer/
 │   ├── toolchain.toml               # Pinned external indexer versions & SHA-256 checksums (package data)
 │   ├── cli.py                       # CLI commands and exit codes
-│   ├── config.py                    # Cache paths, memory limits, worker budgets
+│   ├── config.py                    # Cache paths, memory limits, worker and diagram budgets
 │   ├── toolchain.py                 # Language detection & pinned tool installation
 │   ├── plugins/
 │   │   ├── base.py                  # LanguagePlugin interface & IndexingTier enum
@@ -37,8 +37,6 @@ arch-indexer/
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
-│   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
-│   ├── storage/
 │   ├── store.py                     # SQLite schema & streaming SCIP/AST ingestion
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
@@ -55,8 +53,8 @@ arch-indexer/
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
 │   ├── checks/
-│   │   ├── citations.py             # Citation parser, verifier, drift repair & relocation
-│   │   └── mermaid.py               # Lightweight static Mermaid syntax checker
+│   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
+│   │   └── mermaid.py               # Static Mermaid validator & AUTO-DIAGRAM verifier
 │   ├── planner.py                   # Bounded worker packet generator
 │   ├── assembler.py                 # Deterministic section merger & diagram injector
 │   ├── skeletons/
@@ -270,7 +268,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
 - **Module Dependency Diagram** (`diagram:module-overview`): `flowchart LR` of modules, data stores, and external sinks.
 - **Per-Entrypoint / Per-Domain Flow Diagrams** (`diagram:flow-<domain>`): `flowchart TD` tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`.
-- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. Flow diagrams first collapse service nodes to their module-level aggregates; if a diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
+- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates; if the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
   <!-- AUTO-DIAGRAM:module-overview:START -->
