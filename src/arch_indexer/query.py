@@ -94,7 +94,7 @@ def _open_index(repo: str | Path, cache_dir: str | Path | None) -> sqlite3.Conne
 
 
 def _match_clause(column: str, text: str) -> tuple[str, list[Any]]:
-    """Match a column exactly or as a case-sensitive dotted suffix (``name`` matches ``pkg.name``)."""
+    """Match exactly or as a case-sensitive dotted suffix (``name`` matches ``pkg.name``)."""
     suffix = f".{text}"
     clause = f"({column} = ? OR (length({column}) >= ? AND substr({column}, -?) = ?))"
     return clause, [text, len(suffix), len(suffix), suffix]
@@ -409,19 +409,6 @@ def _print_entrypoint_row(entrypoint: dict[str, Any]) -> None:
     print(" ".join(parts))
 
 
-def _normalize_rel_path(repo: str | Path, rel_path: str) -> str:
-    path = Path(rel_path).expanduser()
-    if path.is_absolute():
-        try:
-            return path.resolve().relative_to(Path(repo).expanduser().resolve()).as_posix()
-        except ValueError:
-            return path.as_posix()
-    normalized = rel_path.replace("\\", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized
-
-
 def run_query(
     repo: str | Path,
     action: str,
@@ -481,7 +468,7 @@ def run_query(
             return 0
 
         if action == "file-symbols":
-            file_dict, symbols = query_file_symbols(conn, _normalize_rel_path(repo, rel_path or ""))
+            file_dict, symbols = query_file_symbols(conn, rel_path or "")
             if as_json:
                 _print_json({"file": file_dict, "count": len(symbols), "symbols": symbols})
             else:

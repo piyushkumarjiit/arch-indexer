@@ -170,24 +170,6 @@ def test_file_symbols_and_unknown_file(tmp_path: Path, capsys):
     assert code == EXIT_OK
     assert out.strip() == "app/service.py:5 function app.service.create_order"
 
-    # A leading "./" and an absolute path resolve to the same indexed relative path.
-    code, dotted, _ = _query(
-        capsys, str(repo), "file-symbols", "./app/service.py", "--cache-dir", str(cache)
-    )
-    assert code == EXIT_OK
-    assert dotted == out
-
-    code, out, err = _query(
-        capsys,
-        str(repo),
-        "file-symbols",
-        str(repo / "app" / "service.py"),
-        "--cache-dir",
-        str(cache),
-    )
-    assert code == EXIT_OK
-    assert out.strip() == "app/service.py:5 function app.service.create_order"
-
     code, out, err = _query(
         capsys, str(repo), "file-symbols", "app/missing.py", "--cache-dir", str(cache)
     )
@@ -741,9 +723,7 @@ def call_user():
     assert code == EXIT_OK
     assert out.strip() == "app/routes.py:9 function app.routes.user"
 
-    code, out, err = _query(
-        capsys, str(repo), "refs", "routes.User", "--cache-dir", str(cache)
-    )
+    code, out, err = _query(capsys, str(repo), "refs", "routes.User", "--cache-dir", str(cache))
     assert code == EXIT_ERROR
     assert out == ""
     assert "symbol not found: routes.User" in err
