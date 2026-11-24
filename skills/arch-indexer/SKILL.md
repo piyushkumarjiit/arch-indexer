@@ -153,7 +153,7 @@ The assembly command automatically:
 2. Patches updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (untouched sections and sibling slices preserved).
 3. Renumbers footnotes globally across each document into sequential `[^1]..[^N]` entries in `## References`.
 4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping when one is supplied; slots without a mapping entry keep their current content.
-5. Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to its own slice; `assemble` does not write them yet.
+5. Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
 6. Executes mandatory validation gates:
    ```bash
    arch-indexer check-citations <repo> --docs-dir docs
@@ -174,8 +174,8 @@ The assembly command automatically:
 Commit ONLY the canonical documentation artifacts this run produced:
 - `docs/DESIGN.md`
 - `docs/USER_GUIDE.md`
-- `docs/graph.json` (once graph export is implemented)
-- `docs/flow-viewer.html` (once graph export is implemented)
+- `docs/graph.json`
+- `docs/flow-viewer.html`
 
 *Never commit `index.db`, `.scip` binaries, draft files, or cache directories.*
 

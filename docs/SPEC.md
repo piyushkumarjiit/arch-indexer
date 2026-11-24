@@ -449,10 +449,10 @@ The thin skill instructs Firstmate to run the following 4 steps:
         - Patches only the updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (preserving untouched sections on incremental runs).
         - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots (from a `--diagrams <json>` mapping, when supplied).
         - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
-        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to its own slice; `assemble` does not write them yet.
+        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates.
         - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
-     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus `docs/graph.json` and `docs/flow-viewer.html` once graph export is implemented).
+     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json` and `docs/flow-viewer.html` artifacts written by `arch-indexer index`).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
 
 4. **Step 4 — Summary Report**
