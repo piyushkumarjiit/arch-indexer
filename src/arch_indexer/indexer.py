@@ -14,6 +14,7 @@ from arch_indexer.graph import build_graph, export_graph_artifacts
 from arch_indexer.planner import build_master_index
 from arch_indexer.plugins.base import (
     FallbackSignal,
+    IndexResult,
     IndexUnit,
     build_fqname_prefixes,
     build_name_table,
@@ -140,22 +141,22 @@ def run_index(
         "scip_tmp_dir": cache_paths.scip_tmp_dir,
     }
 
-    # Phase 2a: Resolve Tier 1 for every unit before the store is touched, so a
-    # strict-tier1 failure leaves any existing index.db intact.
-    tier1_results = [
-        plugin.index_unit_tier1(
-            unit,
-            limits,
-            symbol_context=symbol_context,
-            definitions=definitions_by_unit[idx],
-        )
-        for idx, (plugin, unit) in enumerate(all_units)
-    ]
-
     # Spec 7.2: exit 4 only for --offline with --strict-tier1, and only when a
     # required Tier 1 indexer is missing (plugins without one, e.g. infra, never fail).
+    # This mode resolves every unit before the store is touched so that a missing
+    # toolchain leaves any existing index.db intact; other runs stream per unit.
+    strict_tier1_results: list[IndexResult | FallbackSignal] | None = None
     if offline and strict_tier1:
-        for (plugin, unit), tier1_res in zip(all_units, tier1_results, strict=True):
+        strict_tier1_results = [
+            plugin.index_unit_tier1(
+                unit,
+                limits,
+                symbol_context=symbol_context,
+                definitions=definitions_by_unit[idx],
+            )
+            for idx, (plugin, unit) in enumerate(all_units)
+        ]
+        for (plugin, unit), tier1_res in zip(all_units, strict_tier1_results, strict=True):
             if (
                 isinstance(tier1_res, FallbackSignal)
                 and plugin.has_tier1_indexer
@@ -171,9 +172,16 @@ def run_index(
     with IndexStore(cache_paths.index_db) as store:
         store.clear_all()
 
-        for idx, ((plugin, unit), tier1_res) in enumerate(
-            zip(all_units, tier1_results, strict=True)
-        ):
+        for idx, (plugin, unit) in enumerate(all_units):
+            if strict_tier1_results is not None:
+                tier1_res = strict_tier1_results[idx]
+            else:
+                tier1_res = plugin.index_unit_tier1(
+                    unit,
+                    limits,
+                    symbol_context=symbol_context,
+                    definitions=definitions_by_unit[idx],
+                )
             if isinstance(tier1_res, FallbackSignal):
                 # Run Tier 2
                 res = plugin.index_unit_tier2(

@@ -1153,6 +1153,7 @@ class PythonPlugin(LanguagePlugin):
                 unit,
                 entrypoints=entrypoints,
                 module_by_path=module_by_path,
+                tier2_symbols=tier2_result.symbols,
             )
         except Exception as e:
             scip_file.unlink(missing_ok=True)

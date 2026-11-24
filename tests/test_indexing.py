@@ -87,6 +87,7 @@ def test_python_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert sym_map["hello"]["fqname"] == "src.app.hello"
     assert sym_map["hello"]["start_line"] == 1
     assert len(sym_map["hello"]["body_sha256"]) == 64
+    assert sym_map["__init__"]["kind"] == "module"
 
 
 def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Path):
@@ -164,6 +165,85 @@ def test_typescript_scip_fixture_ingest_exact_lines(tmp_path: Path):
     assert sym_map["index.ts"]["end_line"] == 1
     assert "component.tsx" in sym_map
     assert sym_map["component.tsx"]["end_line"] == 1
+
+
+def test_java_scip_fixture_ignores_package_prefix_occurrences(tmp_path: Path):
+    """Java package-declaration prefixes are not references or unresolved externals."""
+    repo_dir = FIXTURES_DIR / "java_maven"
+    unit = IndexUnit(
+        unit_id="java:root",
+        name="root",
+        language="java",
+        root_dir=repo_dir,
+        files=[repo_dir / "src" / "main" / "java" / "com" / "example" / "App.java"],
+    )
+
+    test_scip = tmp_path / "java_prefix.scip"
+    shutil.copy(FIXTURES_DIR / "java_maven" / "index.scip", test_scip)
+
+    res = ingest_scip(test_scip, unit)
+    assert {r["symbol_fqname"] for r in res.references} == {"java.lang.String"}
+    assert {u["raw_symbol"] for u in res.unresolved_refs} == {"java.lang.String"}
+
+
+def test_scip_keeps_references_to_indexed_modules(tmp_path: Path):
+    """Namespace-suffix references to documents defined in the index are kept."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "a.ts").write_text('import { fn } from "./b";\nfn();\n')
+    (repo / "src" / "b.ts").write_text("export function fn() {}\n")
+
+    module_b = "scip-typescript npm ts-fixture 1.0.0 src/`b.ts`/"
+    fn_b = "scip-typescript npm ts-fixture 1.0.0 src/`b.ts`/fn."
+    module_a = "scip-typescript npm ts-fixture 1.0.0 src/`a.ts`/"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/a.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_a,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=module_b,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 18, 0],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="src/b.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=module_b,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=fn_b, symbol_roles=scip_pb2.SymbolRole.Definition, range=[0, 16, 0]
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    test_scip = tmp_path / "ts_modules.scip"
+    test_scip.write_bytes(scip_index.SerializeToString())
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=repo,
+        files=[repo / "src" / "a.ts", repo / "src" / "b.ts"],
+    )
+
+    res = ingest_scip(test_scip, unit)
+    assert "src.b.ts" in {r["symbol_fqname"] for r in res.references}
+    assert res.unresolved_refs == []
 
 
 def test_java_scip_fixture_ingest_exact_lines(tmp_path: Path):
@@ -571,6 +651,76 @@ def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
         assert len(main_eps) == 1
         assert main_eps[0]["name"] == "__main__"
         assert main_eps[0]["line"] == 18
+
+        sym_map = {s["name"]: s for s in res.symbols}
+        assert sym_map["read_item"]["visibility"] == "public"
+        assert json.loads(sym_map["read_item"]["decorators_json"]) == [
+            '@app.get("/items/{item_id}")'
+        ]
+
+
+def test_tier1_symbols_inherit_tier2_visibility(tmp_path: Path):
+    """Tier 1 symbol rows keep the Tier 2 visibility that SCIP cannot express."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    secret = repo / "src" / "secret.py"
+    secret.write_text("def _secret():\n    return 1\n")
+
+    sym = "scip-python python pkg 0.1.0 `src.secret`/_secret()."
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/secret.py",
+                language="Python",
+                symbols=[
+                    scip_pb2.SymbolInformation(
+                        symbol=sym,
+                        display_name="_secret",
+                        kind=scip_pb2.SymbolInformation.Kind.Function,
+                    )
+                ],
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=sym,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 4, 1],
+                        enclosing_range=[0, 0, 2, 0],
+                    )
+                ],
+            )
+        ]
+    )
+
+    plugin = PythonPlugin()
+    fake_bin = tmp_path / "scip-python"
+    fake_bin.touch()
+    unit = IndexUnit(
+        unit_id="python:root",
+        name="root",
+        language="python",
+        root_dir=repo,
+        files=[secret],
+    )
+
+    with (
+        patch("arch_indexer.plugins.python_plugin.check_tool_status") as mock_status,
+        patch("shutil.which", return_value="/usr/bin/node"),
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_bin)
+
+        def write_scip(cmd, *args, **kwargs):
+            out_path = Path(cmd[cmd.index("--output") + 1])
+            out_path.write_bytes(scip_index.SerializeToString())
+            return MagicMock(returncode=0)
+
+        mock_run.side_effect = write_scip
+
+        res = plugin.index_unit_tier1(unit, {"cache_dir": tmp_path})
+
+    assert isinstance(res, IndexResult)
+    sym_map = {s["name"]: s for s in res.symbols}
+    assert sym_map["_secret"]["visibility"] == "private"
 
 
 # 7. Strict/offline exit 4 CLI tests

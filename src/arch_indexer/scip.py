@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
-
-from google.protobuf.internal import decoder
 
 from arch_indexer.config import RepoCachePaths
 from arch_indexer.plugins.base import IndexingTier, IndexResult, IndexUnit
@@ -128,7 +127,7 @@ def parse_scip_symbol(symbol_str: str) -> tuple[str, str, str, str]:
         kind = "method"
     elif last_suffix == "#":
         kind = "class"
-    elif last_suffix == "/":
+    elif last_suffix in ("/", ":"):
         kind = "module"
     else:
         kind = "variable"
@@ -166,6 +165,25 @@ def derive_ref_kind(occ: Occurrence, last_suffix: str = "") -> str:
     return "read"
 
 
+def _read_varint(stream: Any, first: bytes = b"") -> int:
+    value = 0
+    shift = 0
+    raw = first
+    while True:
+        if not raw:
+            raw = stream.read(1)
+            if not raw:
+                raise ValueError("Truncated varint in SCIP file")
+        byte = raw[0]
+        raw = b""
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value
+        shift += 7
+        if shift > 63:
+            raise ValueError("Invalid varint in SCIP file")
+
+
 def iter_scip_file(scip_path: Path | str) -> Iterator[tuple[int, Any]]:
     """Stream chunks from an index.scip binary protobuf file.
 
@@ -174,47 +192,44 @@ def iter_scip_file(scip_path: Path | str) -> Iterator[tuple[int, Any]]:
     - 2: Document
     - 3: SymbolInformation (external_symbol)
     """
-    with open(scip_path, "rb") as f:
-        data = f.read()
-
-    pos = 0
-    size = len(data)
-    while pos < size:
-        tag, pos = decoder._DecodeVarint(data, pos)
-        field_num = tag >> 3
-        wire_type = tag & 0x07
-        if field_num <= 0:
-            raise ValueError(f"Invalid protobuf field number: {field_num}")
-        if wire_type == 2:
-            length, pos = decoder._DecodeVarint(data, pos)
-            if length < 0 or pos + length > size:
-                raise ValueError("Truncated length-delimited field in SCIP file")
-            chunk = data[pos : pos + length]
-            pos += length
-            if field_num == 1:
-                meta = Metadata()
-                meta.ParseFromString(chunk)
-                yield (1, meta)
-            elif field_num == 2:
-                doc = Document()
-                doc.ParseFromString(chunk)
-                yield (2, doc)
-            elif field_num == 3:
-                ext = SymbolInformation()
-                ext.ParseFromString(chunk)
-                yield (3, ext)
-        elif wire_type == 0:
-            _, pos = decoder._DecodeVarint(data, pos)
-        elif wire_type == 1:
-            if pos + 8 > size:
-                raise ValueError("Truncated 64-bit field in SCIP file")
-            pos += 8
-        elif wire_type == 5:
-            if pos + 4 > size:
-                raise ValueError("Truncated 32-bit field in SCIP file")
-            pos += 4
-        else:
-            raise ValueError(f"Unsupported protobuf wire type: {wire_type}")
+    with open(scip_path, "rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        while True:
+            first = stream.read(1)
+            if not first:
+                return
+            tag = _read_varint(stream, first)
+            field_num = tag >> 3
+            wire_type = tag & 0x07
+            if field_num <= 0:
+                raise ValueError(f"Invalid protobuf field number: {field_num}")
+            if wire_type == 2:
+                length = _read_varint(stream)
+                if stream.tell() + length > size:
+                    raise ValueError("Truncated length-delimited field in SCIP file")
+                chunk = stream.read(length)
+                if field_num == 1:
+                    meta = Metadata()
+                    meta.ParseFromString(chunk)
+                    yield (1, meta)
+                elif field_num == 2:
+                    doc = Document()
+                    doc.ParseFromString(chunk)
+                    yield (2, doc)
+                elif field_num == 3:
+                    ext = SymbolInformation()
+                    ext.ParseFromString(chunk)
+                    yield (3, ext)
+            elif wire_type == 0:
+                _read_varint(stream)
+            elif wire_type == 1:
+                if len(stream.read(8)) != 8:
+                    raise ValueError("Truncated 64-bit field in SCIP file")
+            elif wire_type == 5:
+                if len(stream.read(4)) != 4:
+                    raise ValueError("Truncated 32-bit field in SCIP file")
+            else:
+                raise ValueError(f"Unsupported protobuf wire type: {wire_type}")
 
 
 def _range_lines(
@@ -313,6 +328,16 @@ def _resolve_relative_path(
     return None
 
 
+def _defined_fqname_prefixes(defined_symbols: set[str]) -> set[str]:
+    prefixes: set[str] = set()
+    for symbol in defined_symbols:
+        _, fqname, _, _ = parse_scip_symbol(symbol)
+        parts = fqname.split(".")
+        for i in range(1, len(parts)):
+            prefixes.add(".".join(parts[:i]))
+    return prefixes
+
+
 def _module_for_file(
     unit: IndexUnit,
     rel_path: str,
@@ -345,6 +370,7 @@ def ingest_scip(
     *,
     work_dir: Path | None = None,
     module_by_path: dict[str, str] | None = None,
+    tier2_symbols: list[dict[str, Any]] | None = None,
 ) -> IndexResult:
     """Ingest SCIP protobuf file into unit result and delete temporary .scip file."""
     try:
@@ -354,6 +380,7 @@ def ingest_scip(
             entrypoints=entrypoints,
             work_dir=work_dir,
             module_by_path=module_by_path,
+            tier2_symbols=tier2_symbols,
         )
     finally:
         scip_path.unlink(missing_ok=True)
@@ -366,6 +393,7 @@ def _parse_scip_payload(
     *,
     work_dir: Path | None = None,
     module_by_path: dict[str, str] | None = None,
+    tier2_symbols: list[dict[str, Any]] | None = None,
 ) -> IndexResult:
     if scip_path.stat().st_size == 0:
         raise ValueError(f"SCIP index file is empty: {scip_path}")
@@ -377,16 +405,24 @@ def _parse_scip_payload(
     external_symbols: set[str] = set()
     metadata_project_root: Path | None = None
 
-    documents: list[Document] = []
+    document_count = 0
+    defined_symbols: set[str] = set()
     for field_num, msg in iter_scip_file(scip_path):
-        if field_num == 1 and msg.project_root:
-            metadata_project_root = _parse_project_root(msg.project_root)
+        if field_num == 1:
+            if msg.project_root:
+                metadata_project_root = _parse_project_root(msg.project_root)
         elif field_num == 2:
-            documents.append(msg)
+            document_count += 1
+            for sym_info in msg.symbols:
+                if sym_info.symbol:
+                    defined_symbols.add(sym_info.symbol)
+            for occ in msg.occurrences:
+                if (occ.symbol_roles & SymbolRole.Definition) and occ.symbol:
+                    defined_symbols.add(occ.symbol)
         elif field_num == 3:
             external_symbols.add(msg.symbol)
 
-    if not documents:
+    if not document_count:
         raise ValueError(f"SCIP index file contains no documents: {scip_path}")
 
     root_resolved = unit.root_dir.resolve()
@@ -406,21 +442,26 @@ def _parse_scip_payload(
         search_roots.append(root_resolved)
 
     allowed_paths = {f.resolve() for f in unit.files} if unit.files else None
+    namespace_prefixes = _defined_fqname_prefixes(defined_symbols)
 
-    # First collect all symbols defined within this index to detect external refs
-    defined_symbols: set[str] = set()
-    for doc in documents:
-        for sym_info in doc.symbols:
-            if sym_info.symbol:
-                defined_symbols.add(sym_info.symbol)
-        for occ in doc.occurrences:
-            if (occ.symbol_roles & SymbolRole.Definition) and occ.symbol:
-                defined_symbols.add(occ.symbol)
+    tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
+    tier2_by_line: dict[tuple[str, int], dict[str, Any]] = {}
+    tier2_line_counts: dict[tuple[str, int], int] = {}
+    for sym in tier2_symbols or ():
+        if "visibility" not in sym:
+            continue
+        line_key = (sym["file_path"], sym["start_line"])
+        tier2_by_key.setdefault((sym["file_path"], sym["start_line"], sym["name"]), sym)
+        tier2_by_line.setdefault(line_key, sym)
+        tier2_line_counts[line_key] = tier2_line_counts.get(line_key, 0) + 1
+    tier2_by_line = {k: v for k, v in tier2_by_line.items() if tier2_line_counts[k] == 1}
 
     seen_refs: set[tuple[str, int, int, str, str]] = set()
     seen_unresolved: set[tuple[str, int, str]] = set()
 
-    for doc in documents:
+    for field_num, doc in iter_scip_file(scip_path):
+        if field_num != 2:
+            continue
         resolved = _resolve_relative_path(doc.relative_path, unit, search_roots)
         if resolved is None:
             continue
@@ -465,9 +506,17 @@ def _parse_scip_payload(
 
             start_line, col, end_line = _get_occ_range(occ)
             simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
+            is_definition = bool(occ.symbol_roles & SymbolRole.Definition)
+            if (
+                not is_definition
+                and last_suffix == "/"
+                and sym_str not in defined_symbols
+                and fqname in namespace_prefixes
+            ):
+                continue
             info = sym_info_by_str.get(sym_str)
 
-            if occ.symbol_roles & SymbolRole.Definition:
+            if is_definition:
                 display_name = info.display_name if (info and info.display_name) else simple_name
                 kind = (
                     SCIP_KIND_MAP.get(info.kind, inferred_kind)
@@ -482,6 +531,10 @@ def _parse_scip_payload(
                 else:
                     body_sha256 = hashlib.sha256(display_name.encode("utf-8")).hexdigest()
 
+                tier2_meta = tier2_by_key.get(
+                    (rel_path, start_line, display_name)
+                ) or tier2_by_line.get((rel_path, start_line))
+
                 symbols.append(
                     {
                         "fqname": fqname,
@@ -491,8 +544,8 @@ def _parse_scip_payload(
                         "start_line": start_line,
                         "end_line": enc_end,
                         "body_sha256": body_sha256,
-                        "visibility": "public",
-                        "decorators_json": "[]",
+                        "visibility": (tier2_meta or {}).get("visibility") or "public",
+                        "decorators_json": (tier2_meta or {}).get("decorators_json") or "[]",
                     }
                 )
             else:
