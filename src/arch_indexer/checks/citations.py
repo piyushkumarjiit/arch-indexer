@@ -19,6 +19,7 @@ CODE_SYMBOL_MISMATCH: str = "SYMBOL_MISMATCH"
 CODE_DANGLING_FOOTNOTE: str = "DANGLING_FOOTNOTE"
 CODE_INVALID_FORMAT: str = "INVALID_FORMAT"
 CODE_DUPLICATE_FOOTNOTE: str = "DUPLICATE_FOOTNOTE"
+CODE_UNCITED_SECTION: str = "UNCITED_SECTION"
 
 # Maximum distance in lines to classify a shifted symbol as drift rather than mismatch
 DEFAULT_DRIFT_WINDOW: int = 100
@@ -33,6 +34,12 @@ STRICT_CITATION_RE = re.compile(
     r"^`(?P<file>[^`:]+):(?P<line>\d+)`\s*[\u2014—]\s*`(?P<symbol>[^`]+)`$"
 )
 FOOTNOTE_REF_RE = re.compile(r"\[\^(?P<id>[^\]]+)\]")
+
+# Stable section markers used by the canonical documents and the assembly contract (spec 9.2)
+SECTION_START_RE = re.compile(
+    r"<!--\s*SECTION:(?P<id>[a-zA-Z0-9_\-]+):START(?::(?P<flag>[^>\s]+))?\s*-->",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -56,9 +63,13 @@ class CitationError:
 
     def format_line(self) -> str:
         """One line per error: code, document, footnote id, citation."""
+        if self.code == CODE_UNCITED_SECTION:
+            return f"{self.code}: {self.document} section '{self.footnote_id}'"
         if self.citation:
             return f"{self.code}: {self.document} [^{self.footnote_id}] {self.citation}"
-        return f"{self.code}: {self.document} [^{self.footnote_id}]"
+        if self.footnote_id:
+            return f"{self.code}: {self.document} [^{self.footnote_id}]"
+        return f"{self.code}: {self.document}"
 
 
 def _split_lines(text: str) -> list[str]:
@@ -370,6 +381,59 @@ def check_document_citations(
                     ),
                 )
             )
+
+    # 5. Check for uncited technical sections in DESIGN.md (spec 8.2 step 1)
+    if doc_path.name == "DESIGN.md" or doc_rel.endswith("DESIGN.md"):
+        for m in SECTION_START_RE.finditer(content):
+            sec_id = m.group("id")
+            flag = m.group("flag")
+            is_exempt = "exempt" in (flag or "").lower()
+            if is_exempt:
+                continue
+
+            end_marker = re.compile(
+                rf"<!--\s*SECTION:{re.escape(sec_id)}:END\s*-->",
+                re.IGNORECASE,
+            )
+            end_match = end_marker.search(content, m.end())
+            if not end_match:
+                continue
+
+            sec_body = content[m.end() : end_match.start()]
+            # Strip comments and fenced code blocks
+            cleaned_sec = re.sub(r"<!--.*?-->", "", sec_body, flags=re.DOTALL)
+            cleaned_sec = re.sub(r"```.*?```", "", cleaned_sec, flags=re.DOTALL)
+            body_lines: list[str] = []
+            for line in _split_lines(cleaned_sec):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if FOOTNOTE_DEF_RE.match(line):
+                    continue
+                body_lines.append(line)
+            cleaned_body = "\n".join(body_lines).strip()
+
+            # If body has technical content
+            if cleaned_body:
+                has_fn_ref = False
+                for line in body_lines:
+                    pline_no_inline_code = re.sub(r"(`+).*?\1", "", line)
+                    if FOOTNOTE_REF_RE.search(pline_no_inline_code):
+                        has_fn_ref = True
+                        break
+                if not has_fn_ref:
+                    errors.append(
+                        CitationError(
+                            code=CODE_UNCITED_SECTION,
+                            document=doc_rel,
+                            footnote_id=sec_id,
+                            citation="",
+                            message=(
+                                f"Technical section '{sec_id}' in {doc_rel} contains body "
+                                "content but has no footnote citations"
+                            ),
+                        )
+                    )
 
     return errors
 

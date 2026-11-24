@@ -23,9 +23,9 @@ Handle exit codes across all commands per spec section 7.2:
 | Code | Constant | Meaning & Orchestrator Action |
 | :--- | :--- | :--- |
 | `0` | `EXIT_OK` / `EXIT_NO_CHANGES` | Command succeeded. For `index`: repository delta is empty (docs are up to date). Terminate workflow immediately; skip LLM worker dispatch. |
-| `1` | `EXIT_ERROR` | Runtime error, invalid CLI flags, or unreadable repository. Abort workflow and report error to supervisor. |
+| `1` | `EXIT_ERROR` | Runtime error, invalid CLI flags, unreadable repository, an unusable `--drafts-dir`/`--diagrams` path, or one `packet_id` declared by more than one draft. Abort workflow and report error to supervisor. |
 | `2` | `EXIT_DELTA_DETECTED` | For `index` only: source changes detected (or first run without previous index). Proceed to planning and worker dispatch. |
-| `3` | `EXIT_VALIDATION_FAILED` | Citation drift/breakage, missing symbol, invalid Mermaid syntax, or missing draft section. Dispatch targeted fix worker for failing section(s). |
+| `3` | `EXIT_VALIDATION_FAILED` | Citation drift/breakage, missing symbol, uncited technical section, invalid Mermaid syntax, missing draft section, or any other violation of the draft-file contract in spec §9.2. Drafts are retained; dispatch a targeted fix worker for the failing section(s). |
 | `4` | `EXIT_TOOLCHAIN_MISSING` | Required Tier 1 indexer missing in local cache during `--strict-tier1 --offline` run. Abort workflow and report missing toolchain. |
 
 ---
@@ -77,17 +77,18 @@ Read generated `<cache>/repos/<id>/work-plan.json`:
 #### 2b. Mandatory Worker Rules
 Instruct every section worker to follow these rules:
 1. **Scope boundary**: Read only assigned packet definition, `master-index.json`, `index-delta.json`, and existing section text if updating an existing section.
-2. **Targeted reads & query CLI**: Never load entire large files into context. Use targeted line-range reads and local index queries:
+2. **Draft file contract**: Begin the draft with YAML front-matter declaring `packet_id`, `target_doc` and `section_ids`, and bound each section of a multi-section draft with `<!-- SECTION:<id>:START -->` / `<!-- SECTION:<id>:END -->` markers. Never author `SLICE` or `AUTO-DIAGRAM` markers. The full contract is spec §9.2.
+3. **Targeted reads & query CLI**: Never load entire large files into context. Use targeted line-range reads and local index queries:
    - `arch-indexer query <repo> def <symbol>`
    - `arch-indexer query <repo> refs <symbol> --limit 100`
    - `arch-indexer query <repo> file-symbols <rel-path>`
    - `arch-indexer query <repo> entrypoints --module <mod>`
    - `arch-indexer query <repo> module-summary <mod>`
    - `arch-indexer query <repo> flow-trace <entrypoint-id>`
-3. **Never author or edit Mermaid**: Explain code and pre-rendered diagrams. Never create or edit ```` ```mermaid ```` diagram blocks (Mermaid is generated deterministically by the indexer).
-4. **Cite every claim**: Format every citation as a local footnote:
+4. **Never author or edit Mermaid**: Explain code and pre-rendered diagrams. Never create or edit ```` ```mermaid ```` diagram blocks (Mermaid is generated deterministically by the indexer).
+5. **Cite every claim**: Format every citation as a local footnote:
    `[^n]: `file_path:line` — `symbol``
-5. **Pre-completion citation check**: Run before finishing:
+6. **Pre-completion citation check**: Run before finishing:
    ```bash
    arch-indexer check-citations <repo> --file docs/.drafts/<packet_id>.md
    ```
@@ -107,21 +108,22 @@ Assigned Modules: {{assigned_modules}}
 Rules:
 1. Work in your own isolated git branch: arch-indexer/draft-{{packet_id}}.
 2. Write ONLY to docs/.drafts/{{packet_id}}.md. Never edit docs/DESIGN.md or docs/USER_GUIDE.md directly.
-3. Read only your packet definition, master-index.json, index-delta.json, and existing section text (if updating).
-4. Do not load large source files into context. Use targeted line-range reads and query commands:
+3. Begin the draft with YAML front-matter declaring packet_id: {{packet_id}}, target_doc: {{target_doc}}, and section_ids for {{section_ids}}. Bound each section with <!-- SECTION:<id>:START --> / <!-- SECTION:<id>:END --> markers when the draft spans several sections. Never author SLICE or AUTO-DIAGRAM markers (see spec §9.2).
+4. Read only your packet definition, master-index.json, index-delta.json, and existing section text (if updating).
+5. Do not load large source files into context. Use targeted line-range reads and query commands:
    - arch-indexer query <repo> def <symbol>
    - arch-indexer query <repo> refs <symbol> --limit 100
    - arch-indexer query <repo> file-symbols <rel-path>
    - arch-indexer query <repo> entrypoints --module <mod>
    - arch-indexer query <repo> module-summary <mod>
    - arch-indexer query <repo> flow-trace <entrypoint-id>
-5. NEVER author or edit Mermaid diagrams. Diagrams are generated deterministically by arch-indexer. Describe architectures and flows in direct explanatory text.
-6. Support every technical assertion with a footnote citation:
+6. NEVER author or edit Mermaid diagrams. Diagrams are generated deterministically by arch-indexer. Describe architectures and flows in direct explanatory text.
+7. Support every technical assertion with a footnote citation:
    [^n]: `file_path:line` — `symbol`
-7. Before completing, verify your draft citations:
+8. Before completing, verify your draft citations:
    arch-indexer check-citations <repo> --file docs/.drafts/{{packet_id}}.md
    Resolve all citation errors until this command exits 0.
-8. Commit docs/.drafts/{{packet_id}}.md to your branch and report completion.
+9. Commit docs/.drafts/{{packet_id}}.md to your branch and report completion.
 ```
 
 ---
@@ -144,32 +146,33 @@ arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs
 ```
 
 The assembly command automatically:
-1. Patches updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (untouched sections preserved).
-2. Injects pre-rendered Mermaid diagrams into `AUTO-DIAGRAM` placeholders.
+1. Starts a missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton.
+2. Patches updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (untouched sections and sibling slices preserved).
 3. Renumbers footnotes globally across each document into sequential `[^1]..[^N]` entries in `## References`.
-4. Writes/updates `docs/graph.json` and `docs/flow-viewer.html`.
-5. Removes temporary drafts in `docs/.drafts/`.
+4. Injects Mermaid into `AUTO-DIAGRAM` slots from a `--diagrams <json>` mapping when one is supplied; slots without a mapping entry keep their current content.
+5. Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to its own slice; `assemble` does not write them yet.
 6. Executes mandatory validation gates:
    ```bash
    arch-indexer check-citations <repo> --docs-dir docs
    arch-indexer check-mermaid <repo> --docs-dir docs
    ```
+7. Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
 
 #### 3d. Gate Verification & Targeted Fixes
 - If `assemble` exits `0`: proceed to commit (Step 3e).
 - If `assemble` exits `3` (`EXIT_VALIDATION_FAILED`):
-  1. Inspect error diagnostics from `check-citations` or `check-mermaid`.
+  1. Inspect error diagnostics from `check-citations` or `check-mermaid` (the drafts are retained).
   2. Identify specific failing section(s).
   3. Dispatch a targeted worker only for the failing section(s).
   4. Re-run assembly after fixes.
 - If `assemble` exits `1`: Abort and report error.
 
 #### 3e. Commit Canonical Documentation
-Commit ONLY canonical documentation artifacts:
+Commit ONLY the canonical documentation artifacts this run produced:
 - `docs/DESIGN.md`
 - `docs/USER_GUIDE.md`
-- `docs/graph.json`
-- `docs/flow-viewer.html`
+- `docs/graph.json` (once graph export is implemented)
+- `docs/flow-viewer.html` (once graph export is implemented)
 
 *Never commit `index.db`, `.scip` binaries, draft files, or cache directories.*
 

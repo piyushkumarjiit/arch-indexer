@@ -32,11 +32,15 @@ arch-indexer index /path/to/repo
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
 arch-indexer check-citations /path/to/repo [--docs-dir docs] [--file <path>] [--format text|json]
 arch-indexer check-mermaid /path/to/repo [--docs-dir docs] [--format text|json]
+
+# Deterministic assembly of worker drafts (offline; exits 3 and keeps the drafts on failure)
+arch-indexer assemble /path/to/repo --drafts-dir docs/.drafts [--docs-dir docs] \
+  [--diagrams <json>] [--remove-slice <packet_id>]...
 ```
 
 ### Validation Gates
 
-- **`check-citations`**: Parses footnote references (``[^n]: `file_path:line` — `symbol` ``) in `docs/DESIGN.md` and `docs/USER_GUIDE.md` (or specific files passed with `--file`). Verifies that each cited file exists within the repository, line numbers are in range, and symbols match definitions in `index.db` or literal line tokens. Detects dangling footnote references, duplicate definitions, format errors, and drifted symbols (`SYMBOL_DRIFTED_TO:<line>`).
+- **`check-citations`**: Parses footnote references (``[^n]: `file_path:line` — `symbol` ``) in `docs/DESIGN.md` and `docs/USER_GUIDE.md` (or specific files passed with `--file`). Verifies that each cited file exists within the repository, line numbers are in range, and symbols match definitions in `index.db` or literal line tokens. Detects dangling footnote references, duplicate definitions, format errors, drifted symbols (`SYMBOL_DRIFTED_TO:<line>`), and, in `docs/DESIGN.md`, technical sections that carry body text but no citations (`UNCITED_SECTION`).
 - **`check-mermaid`**: Pure-Python static validator for fenced ```` ```mermaid ```` diagram blocks in documentation. Verifies diagram declaration headers (`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram-v2`), non-empty bodies, balanced `subgraph`/`end` blocks and delimiters, balanced `sequenceDiagram` blocks (`loop`, `alt`/`else`, `opt`, `par`/`and`, `rect`, `critical`/`option`, `break`, `box` each closed by `end`), node ID characters, edge arrows, and `AUTO-DIAGRAM` markers.
 
 ### Indexing
@@ -50,6 +54,10 @@ Current limits: indexing runs at Tier 2 only. Tier 1 SCIP indexing, delta detect
 ```bash
 arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 ```
+
+### Assembly
+
+`assemble` turns worker drafts into the canonical documents. It starts a missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` from the packaged skeleton, then replaces only the per-packet slices this run drafted, leaving sibling slices, untouched sections and `AUTO-DIAGRAM` slots in place, renumbers footnotes globally, fills diagram slots from `--diagrams` when supplied, and runs both validation gates. Consumed drafts are deleted only when every gate passes; a failed gate exits `3` and keeps them. `--remove-slice` retires the slice of a packet that no longer exists (a deleted or re-sharded module). `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against the target repository, never the current directory, and the drafts directory must live inside it, but must not be the repository root, equal the docs directory, or contain it. The draft file format is specified in [docs/SPEC.md](docs/SPEC.md) §9.2.
 
 ### Flow viewer
 
@@ -65,7 +73,7 @@ Path("docs/flow-viewer.html").write_text(render_viewer(graph), encoding="utf-8")
 
 The renderer embeds `graph` into the page and also exposes a "Load `graph.json`" file picker, so the same HTML can open any standalone graph without a web server. See [section 6.3 of the spec](docs/SPEC.md) for the full viewer contract.
 
-The `query`, `plan`, and `assemble` commands are not implemented yet: they print an error and exit `1`.
+The `query` and `plan` commands are not implemented yet: they print an error and exit `1`.
 
 ## Firstmate Integration
 
@@ -73,4 +81,4 @@ For multi-worker automated execution, see the Firstmate skill definition at [`sk
 
 ## Status
 
-In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.
+In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`), Tier 2 `tree-sitter` indexing (`index`), the assembly slice (`assemble`), and the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the remaining commands specified beyond these slices are not implemented yet.

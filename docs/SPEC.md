@@ -55,7 +55,10 @@ arch-indexer/
 │   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
 │   │   └── mermaid.py               # Lightweight static Mermaid syntax checker
 │   ├── planner.py                   # Bounded worker packet generator
-│   └── assembler.py                 # Deterministic section merger & diagram injector
+│   ├── assembler.py                 # Deterministic section merger & diagram injector
+│   ├── skeletons/
+│   │   ├── DESIGN.md                # Design-doc skeleton: SECTION markers & AUTO-DIAGRAM slots
+│   │   └── USER_GUIDE.md            # User-guide skeleton: SECTION markers
 ├── skills/
 │   └── arch-indexer/
 │       └── SKILL.md                 # Thin Firstmate orchestrator skill (copied/installed into Firstmate)
@@ -66,7 +69,8 @@ arch-indexer/
     ├── test_graph_and_mermaid.py
     ├── test_query.py
     ├── test_citations.py
-    └── test_plan_and_assemble.py
+    ├── test_planner.py
+    └── test_assembler.py
 ```
 
 ### 2.2 External Tool-Local Cache Layout
@@ -316,12 +320,16 @@ arch-indexer plan <repo> \
   [--max-sections-per-worker 3]
 
 # 5. Deterministic assembly (merges worker drafts + injects diagrams + checks gates)
-arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs]
+arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs] [--diagrams <json>] \
+  [--remove-slice <packet_id>]...
 
 # 6. Validation gates (standalone or run automatically by assemble)
 arch-indexer check-citations <repo> [--docs-dir docs] [--file <path>] [--format json|text]
 arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 ```
+
+> [!NOTE] Amendment: `assemble --diagrams`, `assemble --remove-slice` and path resolution
+> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text, produced by the graph step. Keys match slot ids exactly (no alias spellings); slots with no matching key, or every slot when the flag is absent, are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory.
 
 ### 7.2 Exit Codes
 All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle exit code `2` as a **non-error signal**:
@@ -329,9 +337,9 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | Code | Name | Meaning |
 | :--- | :--- | :--- |
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means delta is empty (docs are up to date; skip LLM workers). |
-| `1` | `ERROR` | Runtime error, invalid CLI arguments, or unreadable repository. |
+| `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected (or first run). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, or `assemble` failed verification (broken/drifted citation, missing symbol, invalid Mermaid syntax, or missing draft section). |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, or `assemble` failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer is not present in the local cache. |
 
 ---
@@ -366,12 +374,12 @@ Every footnote reference uses a strict machine-parseable format:
 (For non-symbol infra/config lines, the symbol token may be a literal key/directive, e.g., `` `Dockerfile:14` — `EXPOSE 8000` ``.)
 
 **`arch-indexer check-citations` algorithm**:
-1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, and verify no dangling footnote markers (`[^n]` without definition) or uncited technical sections exist.
+1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, and verify no dangling footnote markers (`[^n]` without definition) or uncited technical sections exist. In `docs/DESIGN.md`, a `SECTION` block whose body carries prose but no footnote reference is reported as `UNCITED_SECTION`, unless its start marker carries the `:exempt` flag (marker syntax in §9.2).
 2. For each `(file_path, line, symbol)`:
    - Verify `file_path` exists in `<repo>`.
    - Verify `1 <= line <= total_lines`.
    - Verify `symbol` matches either (a) a symbol in `index.db` spanning or starting at `line` (or `start_line == line`), or (b) the literal token `symbol` appears on `line` of `file_path` (for infra/config lines).
-3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`) and exit **`3`** on any failure.
+3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
@@ -390,7 +398,7 @@ No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses 
 
 ### 9.2 Bounded Worker Sharding (`arch-indexer plan`)
 To prevent any single worker from handling a 200k-line repository, `arch-indexer plan` reads `impacted-sections.json`, `master-index.json`, and `graph.json`, and emits `work-plan.json` containing bounded **work packets**:
-- Each packet targets a disjoint subset of impacted sections and/or module slices (e.g., `design-sec2-mod-billing`, `design-sec2-mod-orders`, `design-sec6-security`, `guide-sec3-admin`).
+- Each packet targets a disjoint subset of impacted sections and/or module slices (e.g., the packets `design-sec2-mod-billing` and `design-sec2-mod-orders` both draft canonical section `design-sec2`, and `guide-sec3-admin` drafts `guide-sec3`; the packet id names the slice, while `section_ids` names the canonical section).
 - Budgets per packet (configurable):
   - Default max **15,000 source lines** across assigned modules
   - Default max **800 indexed symbols**
@@ -400,6 +408,18 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
   - `target_doc` (`DESIGN.md` or `USER_GUIDE.md`) and `section_ids`
   - `draft_output_path`: `docs/.drafts/<packet_id>.md` (guaranteed unique per worker)
   - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context)
+
+> [!NOTE] Amendment: Draft File Front-Matter Format
+> Each worker draft written to `docs/.drafts/<packet_id>.md` must begin with a YAML front-matter header bounded by `---` declaring its target document and assigned section identifiers:
+> ```yaml
+> ---
+> packet_id: <packet_id>
+> target_doc: DESIGN.md  # or USER_GUIDE.md
+> section_ids:
+>   - design-sec2
+> ---
+> ```
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the skeleton: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` preserves and refills them in every document it rewrites.
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:
@@ -412,7 +432,7 @@ The thin skill instructs Firstmate to run the following 4 steps:
 
 2. **Step 2 — Dispatch Bounded Section Workers (Parallel, Isolated Branches)**
    - Dispatch up to `K` parallel Firstmate workers (one per packet in `work-plan.json`, capped by concurrency limit).
-   - Each worker operates in its own isolated checkout/branch and writes **only** its assigned disjoint draft file `docs/.drafts/<packet_id>.md`—never `docs/DESIGN.md` or `docs/USER_GUIDE.md`.
+   - Each worker operates in its own isolated checkout/branch and writes **only** its assigned disjoint draft file `docs/.drafts/<packet_id>.md`—never `docs/DESIGN.md` or `docs/USER_GUIDE.md`. Each draft follows the draft-file contract in §9.2 (YAML front-matter, `SECTION` markers, no `SLICE` or `AUTO-DIAGRAM` markers).
    - Worker rules:
      - Read only its packet JSON, `master-index.json`, `index-delta.json`, and existing section text (if patching).
      - Use `arch-indexer query <repo> ...` and targeted line-range file reads; never load entire large files indiscriminately.
@@ -424,13 +444,14 @@ The thin skill instructs Firstmate to run the following 4 steps:
    - Dispatch **one** assembly worker that:
      1. Merges all worker draft branches into a single branch (guaranteed conflict-free because every worker wrote a unique file in `docs/.drafts/`).
      2. Runs `arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs`, which deterministically:
+        - Creates `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton when the document does not exist yet.
         - Patches only the updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (preserving untouched sections on incremental runs).
-        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots.
+        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots (from a `--diagrams <json>` mapping, when supplied).
         - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
-        - Writes/updates `docs/graph.json` and `docs/flow-viewer.html`.
-        - Deletes `docs/.drafts/`.
+        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to its own slice; `assemble` does not write them yet.
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates.
-     3. Commits only `docs/DESIGN.md`, `docs/USER_GUIDE.md`, `docs/graph.json`, and `docs/flow-viewer.html`.
+        - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
+     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus `docs/graph.json` and `docs/flow-viewer.html` once graph export is implemented).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
 
 4. **Step 4 — Summary Report**
@@ -462,8 +483,9 @@ Built against small, committed fixture repositories under `tests/fixtures/` (run
 - **`test_citations.py`**:
   - Valid citations pass; missing file, out-of-range line, wrong symbol, shifted line, and dangling footnote all fail with exit `3` and exact diagnostic codes.
   - File-to-section mapping accurately isolates impacted sections.
-- **`test_plan_and_assemble.py`**:
+- **`test_planner.py`**:
   - Large synthetic index splits into multiple bounded packets under line/symbol budgets with disjoint draft paths.
+- **`test_assembler.py`**:
   - `assemble` merges drafts, patches only impacted sections, globally renumbers footnotes, injects diagrams, deletes drafts, and enforces validation gates.
 
 ### 10.2 Progressive End-to-End Validation Plan

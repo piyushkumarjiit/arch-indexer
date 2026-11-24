@@ -243,10 +243,6 @@ def test_cli_fetch_runtime_help_uses_pinned_java_minimum(capsys):
             ],
             "plan",
         ),
-        (
-            ["assemble", "some/repo", "--drafts-dir", "drafts", "--docs-dir", "docs"],
-            "assemble",
-        ),
     ],
 )
 def test_not_implemented_commands_exit_error(cmd_args, expected_cmd, capsys):
@@ -277,6 +273,52 @@ def test_cli_check_citations_dispatch(tmp_path):
     draft.write_text("Hello [^1].\n\n[^1]: `app.py:1` — `hello`\n", encoding="utf-8")
     code_draft = main(["check-citations", str(repo), "--file", "docs/draft.md"])
     assert code_draft == 0
+
+
+def test_cli_assemble_dispatch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    drafts = repo / "docs" / ".drafts"
+    drafts.mkdir(parents=True)
+    code = main(["assemble", str(repo), "--drafts-dir", "docs/.drafts"])
+    assert code == 1
+
+
+def test_cli_assemble_remove_slice_dispatch(tmp_path):
+    repo = tmp_path / "repo"
+    docs = repo / "docs"
+    docs.mkdir(parents=True)
+    (docs / "DESIGN.md").write_text(
+        "# Technical Design Document\n\n"
+        "<!-- SECTION:design-sec1:START:exempt -->\n"
+        "## 1. Architecture Overview\n\n"
+        "<!-- SLICE:pkt-old:START -->\n"
+        "Stale overview prose.\n"
+        "<!-- SLICE:pkt-old:END -->\n\n"
+        "<!-- SLICE:pkt-older:START -->\n"
+        "Older overview prose.\n"
+        "<!-- SLICE:pkt-older:END -->\n"
+        "<!-- SECTION:design-sec1:END -->\n",
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "assemble",
+            str(repo),
+            "--drafts-dir",
+            "docs/.drafts",
+            "--remove-slice",
+            "pkt-old",
+            "--remove-slice",
+            "pkt-older",
+        ]
+    )
+    assert code == 0
+    content = (docs / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Stale overview prose." not in content
+    assert "Older overview prose." not in content
+    assert "SLICE:" not in content
 
 
 def test_cli_check_citations_multiple_files(tmp_path):
