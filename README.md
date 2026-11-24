@@ -86,9 +86,9 @@ The renderer embeds `graph` into the page and also exposes a "Load `graph.json`"
 `query` opens `<cache>/repos/<id>/index.db` read-only and prints deterministic, line-oriented rows with `path:line`; add `--json` for structured output. The cache location follows the same rules as `index`, so pass the same `--cache-dir` when one was used. Every command exits `1` with a clear message when the index is missing or the symbol, file, module or entrypoint is unknown.
 
 - `def <symbol>` resolves an exact fqname, then an exact name, then a dotted suffix.
-- `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`).
+- `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`). A symbol that is defined in the index but has no references exits `0` with an empty result.
 - `file-symbols <rel-path>` lists the symbols defined in one indexed file.
-- `entrypoints [--module <mod>]` lists HTTP routes, CLI commands, workers and frontend API callers with their numeric `id`.
+- `entrypoints [--module <mod>]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
 - `module-summary <mod>` prints a module's file, symbol and entrypoint counts followed by its symbols and entrypoints.
 - `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing each step as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block or a file-level argparse CLI) fails instead of guessing a root.
 
