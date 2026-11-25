@@ -1514,7 +1514,8 @@ def test_java_tier1_maven_args_are_repeatable_and_online_drops_offline_flag(tmp_
 
 
 def test_run_index_records_unit_tier_reason_and_captured_message(tmp_path: Path, capsys):
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
     cache_dir = tmp_path / "cache"
     failure = FallbackSignal(
         reason="maven_unresolved_artifact",
@@ -1550,7 +1551,8 @@ def test_run_index_records_unit_tier_reason_and_captured_message(tmp_path: Path,
 
 
 def test_run_index_warns_loudly_when_every_unit_file_falls_back(tmp_path: Path, capsys):
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
     cache_dir = tmp_path / "cache"
 
     with patch.object(
