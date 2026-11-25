@@ -100,8 +100,10 @@ The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-co
 - `def <symbol>` resolves an exact fqname, then an exact name, then a dotted suffix.
 - `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`). A symbol that is defined in the index but has no references exits `0` with an empty result.
 - `file-symbols <rel-path>` lists the symbols defined in one indexed file.
-- `entrypoints [--module <mod>] [--include-tests]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
+- `entrypoints [--module <mod>] [--include-tests]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`. Each row reports `line` (the discovery line: decorator, route registration, CLI block or `__main__` guard) and `symbol_line` (the indexed definition line); cite `symbol_line`, because `check-citations` resolves a symbol at its definition or within its body span. Text output adds `symbol_line=<n>` when it differs from `line`.
 - `module-summary <mod> [--include-tests]` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints.
+
+Both module commands accept the canonical id `mod:<key>` and bare key emitted by `docs/graph.json`, `master-index.json` and `work-plan.json`, as well as a dotted package namespace such as `pkg.mod`.
 - `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root.
 
 Test files are outside the default architecture scope (see [Indexing](#indexing)); `entrypoints` and `module-summary` include them when `--include-tests` is passed.

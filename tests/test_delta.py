@@ -179,6 +179,29 @@ def test_second_run_without_changes_exits_ok(tmp_path: Path, capsys):
     assert (_repo_cache(cache) / "state.json").read_text(encoding="utf-8") == state_before
 
 
+def test_unchanged_tree_with_empty_sections_never_reports_up_to_date(tmp_path: Path, capsys):
+    """Exit 2 must not be paired with the exit-0 "documentation is up to date" message."""
+    repo = _make_repo(tmp_path)
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        design_path.read_text(encoding="utf-8").replace(
+            "The service starts through `start`[^1].\n", ""
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "empty a required section")
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    captured = capsys.readouterr()
+    assert "documentation is up to date" not in captured.out.lower()
+    assert "No source changes: 1 documentation section(s) still impacted" in captured.out
+    assert "Impacted sections: 1" in captured.out
+
+
 def test_modified_symbol_body_impacts_only_citing_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"

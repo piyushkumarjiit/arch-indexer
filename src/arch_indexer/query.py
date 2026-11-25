@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from arch_indexer.config import get_cache_dir, get_repo_cache_id
+from arch_indexer.graph import _build_modules
 from arch_indexer.known_symbols import classify_sink
-from arch_indexer.source_scope import in_scope
+from arch_indexer.source_scope import filter_rows, in_scope
 
 DEFAULT_QUERY_LIMIT: int = 100
 DEFAULT_FLOW_DEPTH: int = 6
@@ -34,7 +35,14 @@ _SYMBOL_ORDER = " ORDER BY file_path, start_line, end_line, fqname"
 
 _ENTRYPOINT_SELECT = """
 SELECT e.id, e.kind, e.name, e.method, e.route_or_trigger, e.file_path, e.line,
-       e.symbol_fqname, e.auth_symbols_json, f.module AS module
+       e.symbol_fqname, e.auth_symbols_json, f.module AS module,
+       (
+           SELECT s.start_line
+           FROM symbols s
+           WHERE s.fqname = e.symbol_fqname
+           ORDER BY s.start_line ASC, s.end_line ASC
+           LIMIT 1
+       ) AS symbol_line
 FROM entrypoints e
 LEFT JOIN files f ON f.path = e.file_path
 """
@@ -108,6 +116,62 @@ def _prefix_clause(column: str, text: str) -> tuple[str, list[Any]]:
     return clause, [text, len(prefix), prefix]
 
 
+def _module_id_paths(
+    conn: sqlite3.Connection, module: str, include_tests: bool
+) -> list[str] | None:
+    """Resolve a canonical module id (``mod:<key>``) or bare key to its file paths.
+
+    Module ids are emitted by ``graph.json`` and ``master-index.json``; they are derived
+    with the same grouping rules as the graph so this query accepts exactly the ids a
+    worker reads from a work packet. Returns ``None`` when the argument is not a module
+    id, so callers can fall back to the dotted package namespace.
+    """
+    file_rows = filter_rows(
+        [dict(row) for row in conn.execute("SELECT path, language, module, tier FROM files")],
+        include_tests,
+        key="path",
+    )
+    modules, module_by_file, _tier_by_file = _build_modules(file_rows)
+    requested = module.strip()
+    bare = requested.removeprefix("mod:")
+    for record in modules:
+        if requested in (record["id"], record["name"]) or bare == record["name"]:
+            return sorted(
+                path for path, module_id in module_by_file.items() if module_id == record["id"]
+            )
+    return None
+
+
+def _resolve_module_paths(conn: sqlite3.Connection, module: str, include_tests: bool) -> list[str]:
+    """Files for a module id (``mod:<key>`` or ``<key>``) or a dotted package prefix.
+
+    An explicit ``mod:`` id resolves first so the ids from ``graph.json``/``plan`` always
+    work. A bare name keeps the long-standing dotted-package meaning when that namespace
+    matches, and otherwise falls back to a canonical module key.
+    """
+    requested = module.strip()
+    explicit_id = requested.startswith("mod:")
+    if explicit_id:
+        by_id = _module_id_paths(conn, requested, include_tests)
+        if by_id is not None:
+            return by_id
+    clause, params = _prefix_clause("module", requested.removeprefix("mod:"))
+    by_prefix = [
+        row["path"]
+        for row in conn.execute(
+            f"SELECT path FROM files WHERE {clause} ORDER BY path", params
+        ).fetchall()
+        if in_scope(row["path"], include_tests)
+    ]
+    if by_prefix:
+        return by_prefix
+    if not explicit_id:
+        by_id = _module_id_paths(conn, requested, include_tests)
+        if by_id is not None:
+            return by_id
+    return []
+
+
 def _symbol_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in _SYMBOL_COLUMNS.split(", ")}
 
@@ -131,6 +195,7 @@ def _entrypoint_dict(row: sqlite3.Row) -> dict[str, Any]:
         "route_or_trigger": row["route_or_trigger"],
         "file_path": row["file_path"],
         "line": row["line"],
+        "symbol_line": row["symbol_line"] if row["symbol_line"] is not None else row["line"],
         "symbol_fqname": row["symbol_fqname"],
         "auth_symbols": _json_list(row["auth_symbols_json"]),
         "module": row["module"],
@@ -217,14 +282,12 @@ def query_entrypoints(
     where = ""
     params: list[Any] = []
     if module is not None:
-        clause, params = _prefix_clause("f.module", module)
-        known = [
-            row[0]
-            for row in conn.execute(f"SELECT f.path FROM files f WHERE {clause}", params).fetchall()
-        ]
-        if not [path for path in known if in_scope(path, include_tests)]:
+        paths = _resolve_module_paths(conn, module, include_tests)
+        if not paths:
             raise QueryError(f"module not found: {module} (no indexed files in that module)")
-        where = f"WHERE {clause}"
+        placeholders = ", ".join("?" for _ in paths)
+        where = f"WHERE e.file_path IN ({placeholders})"
+        params = list(paths)
 
     rows = conn.execute(
         f"{_ENTRYPOINT_SELECT} {where} ORDER BY e.file_path, e.line, e.kind, e.name, e.id",
@@ -236,21 +299,18 @@ def query_entrypoints(
 def query_module_summary(
     conn: sqlite3.Connection, module: str, *, include_tests: bool = False
 ) -> dict[str, Any]:
-    clause, params = _prefix_clause("module", module)
+    paths = _resolve_module_paths(conn, module, include_tests)
+    if not paths:
+        raise QueryError(f"module not found: {module} (no indexed files in that module)")
+    placeholders = ", ".join("?" for _ in paths)
     files = [
         dict(row)
         for row in conn.execute(
             f"SELECT path, language, module, tier, line_count, fallback_reason "
-            f"FROM files WHERE {clause} ORDER BY path",
-            params,
+            f"FROM files WHERE path IN ({placeholders}) ORDER BY path",
+            paths,
         ).fetchall()
-        if in_scope(row["path"], include_tests)
     ]
-    if not files:
-        raise QueryError(f"module not found: {module} (no indexed files in that module)")
-
-    paths = [f["path"] for f in files]
-    placeholders = ", ".join("?" for _ in paths)
     symbols = [
         _symbol_dict(row)
         for row in conn.execute(
@@ -418,6 +478,8 @@ def _print_entrypoint_row(entrypoint: dict[str, Any]) -> None:
     ]
     if entrypoint["auth_symbols"]:
         parts.append(f"auth={','.join(str(a) for a in entrypoint['auth_symbols'])}")
+    if entrypoint["symbol_line"] != entrypoint["line"]:
+        parts.append(f"symbol_line={entrypoint['symbol_line']}")
     print(" ".join(parts))
 
 

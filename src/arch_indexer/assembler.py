@@ -37,6 +37,7 @@ SECTION_MARKER_RE = re.compile(r"<!--\s*SECTION:", re.IGNORECASE)
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
 AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
 MERMAID_FENCE_RE = re.compile(r"^\s*(?:```|~~~)\s*mermaid\b", re.IGNORECASE | re.MULTILINE)
+TRAILING_REFERENCES_RE = re.compile(r"(?m)^##\s+References\s*$")
 
 
 class DraftFormatError(ValueError):
@@ -61,6 +62,22 @@ def _parse_frontmatter_value(val_str: str) -> str:
     if comment:
         val = val[: comment.start()].strip()
     return val
+
+
+def _strip_trailing_references_block(text: str) -> str:
+    """Drop a single trailing ``## References`` heading from a draft body.
+
+    Footnote definitions are extracted before section parsing, so the natural draft shape
+    leaves only the end-of-document heading behind. Allow that heading (and the blank lines
+    around it) as documented output while still rejecting any prose outside SECTION markers.
+    """
+    match = TRAILING_REFERENCES_RE.search(text)
+    if match is None:
+        return text
+    trailing = text[match.end() :]
+    if trailing.strip():
+        return text
+    return text[: match.start()].rstrip() + "\n"
 
 
 def parse_draft_file(path: Path) -> DraftPacket:
@@ -179,6 +196,7 @@ def parse_draft_file(path: Path) -> DraftPacket:
         else:
             rewritten_lines.append(replace_fn_in_line(line))
     rewritten_body = "\n".join(rewritten_lines)
+    rewritten_body = _strip_trailing_references_block(rewritten_body)
 
     # Extract sections from draft
     sections: dict[str, str] = {}

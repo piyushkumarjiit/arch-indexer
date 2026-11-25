@@ -1099,3 +1099,67 @@ def test_mermaid_ids_sanitize_hyphens_and_pass_validation():
     assert "flow-foo-bar" in diagrams
     for diagram_id, code in diagrams.items():
         assert validate_mermaid_block(code.splitlines(), f"docs/{diagram_id}.md", 1) == []
+
+
+def test_datastore_evidence_ignores_import_lines(tmp_path):
+    """A datastore citation points at the use site; an import row is not evidence."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = tmp_path / "store" / "index.db"
+    with IndexStore(db_path) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "src/db.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 10,
+                    "module": "src.db",
+                    "tier": "scip",
+                }
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "src.db.load",
+                    "name": "load",
+                    "kind": "function",
+                    "file_path": "src/db.py",
+                    "start_line": 3,
+                    "end_line": 8,
+                    "body_sha256": "b" * 64,
+                }
+            ]
+        )
+        store.insert_references(
+            [
+                {
+                    "symbol_fqname": "sqlite3",
+                    "file_path": "src/db.py",
+                    "line": 1,
+                    "col": 0,
+                    "ref_kind": "import",
+                },
+                {
+                    "symbol_fqname": "sqlite3.connect",
+                    "file_path": "src/db.py",
+                    "line": 5,
+                    "col": 4,
+                    "ref_kind": "call",
+                },
+            ]
+        )
+        store.insert_unresolved_refs(
+            [
+                {
+                    "file_path": "src/db.py",
+                    "line": 5,
+                    "raw_symbol": "sqlite3",
+                    "language": "python",
+                }
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    assert graph["data_stores"][0]["evidence"] == ["src/db.py:5"]
