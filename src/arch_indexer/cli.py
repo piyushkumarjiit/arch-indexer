@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.add_argument(
         "--module-depth",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Fix architecture modules to the first N package segments instead of splitting "

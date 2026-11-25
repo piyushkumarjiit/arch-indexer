@@ -10,8 +10,10 @@ import json
 
 import pytest
 
+from arch_indexer.cli import EXIT_ERROR, main
 from arch_indexer.config import DEFAULT_MAX_DIAGRAM_NODES, RepoCachePaths
 from arch_indexer.graph import _build_modules
+from arch_indexer.indexer import run_index
 from arch_indexer.mermaid_gen import generate_diagram, generate_diagrams
 from arch_indexer.module_identity import (
     ModuleOptions,
@@ -68,27 +70,47 @@ def test_python_container_package_with_many_subpackages_is_not_one_module():
     assert len({names[r["path"]] for r in rows if r["path"] != "app/__init__.py"}) == 5
 
 
-def test_large_flat_python_package_splits_by_subpackage_only_when_over_budget():
+def test_python_non_source_root_container_with_init_strips_container_under_budget():
     rows = [
-        _row(f"core/{sub}/f{i}.py", "python", f"core.{sub}.f{i}", lines=100)
-        for sub in ("api", "db", "jobs")
-        for i in range(6)
-    ] + [_row("core/__init__.py", "python", "core", lines=1)]
+        _row(f"myservice/sub{i}/mod.py", "python", f"myservice.sub{i}.mod", lines=100)
+        for i in range(5)
+    ] + [_row("myservice/__init__.py", "python", "myservice", lines=1)]
+    names = assign_module_names(rows)
+    assert {names[r["path"]] for r in rows if r["path"] != "myservice/__init__.py"} == {
+        f"sub{i}" for i in range(5)
+    }
+
+
+def test_large_flat_python_package_splits_by_subpackage_only_when_over_budget():
+    rows = (
+        [
+            _row(f"core/{sub}/f{i}.py", "python", f"core.{sub}.f{i}", lines=100)
+            for sub in ("api", "db", "jobs")
+            for i in range(6)
+        ]
+        + [_row("core/__init__.py", "python", "core", lines=1)]
+        + [_row("other/mod.py", "python", "other.mod", lines=10)]
+    )
     small = assign_module_names(rows)
-    assert {small[r["path"]] for r in rows} == {"core"}
+    assert {small[r["path"]] for r in rows if r["path"].startswith("core/")} == {"core"}
     big = assign_module_names(rows, ModuleOptions(max_lines=700, max_symbols=10_000))
     assert {big[r["path"]] for r in rows if "/api/" in r["path"]} == {"core.api"}
     assert {big[r["path"]] for r in rows if "/db/" in r["path"]} == {"core.db"}
     grouped = {}
     for path, name in big.items():
-        grouped.setdefault(name, []).append(path)
+        if path.startswith("core/"):
+            grouped.setdefault(name, []).append(path)
     assert max(sum(100 for _ in files) for files in grouped.values()) <= 700
 
 
 def test_symbol_budget_also_splits_modules():
-    rows = [_row(f"core/{sub}/m.py", "python", f"core.{sub}.m") for sub in ("a", "b")] + [
-        _row("core/__init__.py", "python", "core")
-    ]
+    rows = (
+        [_row(f"core/{sub}/m.py", "python", f"core.{sub}.m") for sub in ("a", "b")]
+        + [_row("core/__init__.py", "python", "core")]
+        + [_row("other/mod.py", "python", "other.mod")]
+    )
+    under = assign_module_names(rows, ModuleOptions(max_symbols=800))
+    assert under["core/a/m.py"] == under["core/b/m.py"] == "core"
     counts = {"core/a/m.py": 600, "core/b/m.py": 600}
     names = assign_module_names(rows, ModuleOptions(max_symbols=800), symbols_by_file=counts)
     assert names["core/a/m.py"] != names["core/b/m.py"]
@@ -119,6 +141,45 @@ def test_invalid_module_config_is_rejected(tmp_path):
         load_module_options(tmp_path)
     with pytest.raises(ValueError):
         load_module_options(tmp_path / "missing", depth=0)
+
+
+def test_invalid_module_depth_and_config_leave_existing_index_db_unchanged(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+
+    assert run_index(repo, offline=True, cache_dir=cache_dir) == 2
+    index_db = RepoCachePaths.from_repo(repo, cache_dir_override=cache_dir).index_db
+    original_bytes = index_db.read_bytes()
+
+    assert (
+        main(
+            [
+                "index",
+                str(repo),
+                "--offline",
+                "--module-depth",
+                "0",
+                "--cache-dir",
+                str(cache_dir),
+            ]
+        )
+        == EXIT_ERROR
+    )
+    assert index_db.read_bytes() == original_bytes
+
+    with pytest.raises(ValueError):
+        run_index(repo, offline=True, module_depth=0, cache_dir=cache_dir)
+    assert index_db.read_bytes() == original_bytes
+
+    (repo / ".arch-indexer.toml").write_text("[modules]\ndepth = 'bad'\n", encoding="utf-8")
+    assert main(["index", str(repo), "--offline", "--cache-dir", str(cache_dir)]) == EXIT_ERROR
+    assert index_db.read_bytes() == original_bytes
+
+    with pytest.raises(ValueError):
+        run_index(repo, offline=True, cache_dir=cache_dir)
+    assert index_db.read_bytes() == original_bytes
 
 
 def test_typescript_modules_keep_first_directory():

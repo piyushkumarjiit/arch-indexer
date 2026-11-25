@@ -73,7 +73,7 @@ def load_module_options(repo_path: str | Path, depth: int | None = None) -> Modu
     ``[modules] depth = N`` fixes the module depth, and ``[modules.map]`` maps a
     repository-relative path prefix to a module name. Malformed values raise ValueError.
     """
-    if depth is not None and depth < 1:
+    if depth is not None and (isinstance(depth, bool) or not isinstance(depth, int) or depth < 1):
         raise ValueError("module depth must be a positive integer")
     config_path = Path(repo_path) / REPO_CONFIG_NAME
     cfg_depth: int | None = None
@@ -125,11 +125,13 @@ def _python_container_stripped(file_rows: list[dict[str, Any]]) -> dict[str, lis
             split_parts[row["path"]] = _strip_roots(_split_dots(row["module"]))
     if (
         len(split_parts) > 1
-        and all(len(parts) > 1 for parts in split_parts.values())
+        and all(split_parts.values())
+        and any(len(parts) > 1 for parts in split_parts.values())
         and len({parts[0] for parts in split_parts.values()}) == 1
     ):
         for path, parts in split_parts.items():
-            split_parts[path] = _strip_roots(parts[1:])
+            if len(parts) > 1:
+                split_parts[path] = _strip_roots(parts[1:])
     return split_parts
 
 

@@ -14,6 +14,7 @@ from arch_indexer.checks.citations import (
 )
 from arch_indexer.config import DEFAULT_CHUNK_FILES, RepoCachePaths
 from arch_indexer.graph import build_graph, export_graph_artifacts
+from arch_indexer.module_identity import load_module_options
 from arch_indexer.planner import build_master_index
 from arch_indexer.plugins.base import (
     FallbackSignal,
@@ -182,6 +183,8 @@ def run_index(
             f"Error: Target repository does not exist or is not a directory: {target_repo}\n"
         )
         return EXIT_ERROR
+
+    load_module_options(target_repo, module_depth)
 
     # Initialize store at <cache>/repos/<repo-id>/index.db
     cache_paths = RepoCachePaths.from_repo(target_repo, cache_dir_override=cache_dir)
