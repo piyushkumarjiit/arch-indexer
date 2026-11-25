@@ -115,6 +115,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     index_parser.add_argument(
+        "--maven-reactor",
+        action="store_true",
+        default=False,
+        help=(
+            "Index a multi-module Maven repository with one scip-java run at the reactor root "
+            "instead of one per module; modules missing from its output (or all of them, if it "
+            "fails or produces nothing) are still indexed separately"
+        ),
+    )
+    index_parser.add_argument(
         "--maven-online",
         action="store_true",
         default=False,
@@ -414,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cache_dir=args.cache_dir,
                 maven_args=args.maven_args,
                 maven_online=args.maven_online,
+                maven_reactor=args.maven_reactor,
             )
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error during indexing: {e}\n")
