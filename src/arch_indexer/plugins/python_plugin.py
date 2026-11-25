@@ -1033,30 +1033,18 @@ class PythonPlugin(LanguagePlugin):
 
         units: list[IndexUnit] = []
         for pkg_name in sorted(groups.keys()):
-            group_files = sorted(groups[pkg_name])
-            if len(group_files) > chunk_files:
-                for idx in range(0, len(group_files), chunk_files):
-                    chunk = group_files[idx : idx + chunk_files]
-                    chunk_id = f"python:{pkg_name}:chunk{idx // chunk_files}"
-                    units.append(
-                        IndexUnit(
-                            unit_id=chunk_id,
-                            name=f"{pkg_name}:chunk{idx // chunk_files}",
-                            language="python",
-                            root_dir=repo_path,
-                            files=chunk,
-                        )
-                    )
-            else:
-                units.append(
-                    IndexUnit(
-                        unit_id=f"python:{pkg_name}",
-                        name=pkg_name,
-                        language="python",
-                        root_dir=repo_path,
-                        files=group_files,
-                    )
+            # One unit per package regardless of ``chunk_files``: each unit is a separate
+            # scip-python run, so splitting a package would silently drop every call edge
+            # that crosses a chunk boundary. ``chunk_files`` is still validated above.
+            units.append(
+                IndexUnit(
+                    unit_id=f"python:{pkg_name}",
+                    name=pkg_name,
+                    language="python",
+                    root_dir=repo_path,
+                    files=sorted(groups[pkg_name]),
                 )
+            )
 
         return units
 

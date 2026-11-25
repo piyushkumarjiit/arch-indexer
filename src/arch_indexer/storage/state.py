@@ -38,6 +38,7 @@ IMPACT_MODIFIED_FILE: str = "modified_file"
 IMPACT_MODULE_ADDED: str = "module_added"
 IMPACT_DIAGRAM_CHANGED: str = "diagram_changed"
 IMPACT_SECTION_MISSING: str = "section_missing"
+IMPACT_EMPTY_SECTION: str = "empty_section"
 
 # Canonical section outline used for first runs before any document exists (spec 8.1)
 CANONICAL_SECTION_OUTLINE: dict[str, tuple[str, ...]] = {
@@ -623,6 +624,9 @@ def compute_impacted_sections(
             section.diagram_hashes
         ):
             reasons.add(IMPACT_DIAGRAM_CHANGED)
+        # A required section that was never written stays impacted until it has a body.
+        if not section.has_body and not section.exempt:
+            reasons.add(IMPACT_EMPTY_SECTION)
         if reasons:
             report.sections.append(_impact_entry(section, reasons, section_modules))
 

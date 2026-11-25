@@ -137,7 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--chunk-files",
         type=_positive_int,
         default=DEFAULT_CHUNK_FILES,
-        help="Max files per indexing chunk",
+        help="Max files per indexing chunk (Python packages are never split: "
+        "chunking would drop cross-chunk call edges)",
     )
     index_parser.add_argument(
         "--docs-dir",
@@ -407,6 +408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_format=args.format,
                 cache_dir=args.cache_dir,
                 files=args.files,
+                require_complete=True,
             )
         except Exception as e:
             sys.stderr.write(f"Error checking citations: {e}\n")
