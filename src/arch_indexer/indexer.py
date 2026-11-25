@@ -26,6 +26,7 @@ from arch_indexer.plugins.python_plugin import PythonPlugin
 from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
 from arch_indexer.source_scope import in_scope
 from arch_indexer.storage.state import (
+    Delta,
     RepoSnapshot,
     compute_delta,
     compute_impacted_sections,
@@ -52,6 +53,26 @@ def _read_doc_texts(target_repo: Path, docs_dir: str) -> dict[str, str | None]:
             doc_path.read_text(encoding="utf-8", errors="replace") if doc_path.is_file() else None
         )
     return doc_texts
+
+
+def _scoped_delta(delta: Delta, include_tests: bool) -> Delta:
+    if include_tests:
+        return delta
+    return Delta(
+        is_first_run=delta.is_first_run,
+        added_files=[p for p in delta.added_files if in_scope(p, include_tests)],
+        modified_files=[p for p in delta.modified_files if in_scope(p, include_tests)],
+        deleted_files=[p for p in delta.deleted_files if in_scope(p, include_tests)],
+        added_symbols=[s for s in delta.added_symbols if in_scope(s["file_path"], include_tests)],
+        modified_symbols=[
+            s for s in delta.modified_symbols if in_scope(s["file_path"], include_tests)
+        ],
+        moved_symbols=[s for s in delta.moved_symbols if in_scope(s["file_path"], include_tests)],
+        deleted_symbols=[
+            s for s in delta.deleted_symbols if in_scope(s["file_path"], include_tests)
+        ],
+        purely_moved_files=[p for p in delta.purely_moved_files if in_scope(p, include_tests)],
+    )
 
 
 def run_index(
@@ -218,12 +239,14 @@ def run_index(
         current = RepoSnapshot.from_store(store, target_repo)
         previous_state = read_json(cache_paths.state_json)
         previous = None if force_full else RepoSnapshot.from_state(previous_state)
-        delta = compute_delta(previous, current)
+        full_delta = compute_delta(previous, current)
 
         # Spec 5.3: deleted files are purged from every table. The index was just rebuilt
         # from disk, but purging keeps the guarantee explicit and idempotent.
-        store.purge_files(delta.deleted_files)
+        store.purge_files(full_delta.deleted_files)
         master_index = build_master_index(store, target_repo, include_tests=include_tests)
+
+    delta = _scoped_delta(full_delta, include_tests)
 
     # Test files stay in state.json (they are indexed for references), but they must not
     # route requirements into worker packets unless tests are explicitly in scope (gap S5).

@@ -385,12 +385,14 @@ def extract_delta_slice(
     module_files: Mapping[str, Sequence[str]],
     cited_files: Sequence[str],
     module_paths: Mapping[str, str] | None = None,
+    *,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
     """Extract the subset of index-delta.json relevant to a packet."""
     is_first_run = bool(delta.get("is_first_run", False))
-    target_files: set[str] = set(cited_files)
+    target_files: set[str] = {f for f in cited_files if in_scope(f, include_tests)}
     for mod in assigned_modules:
-        target_files.update(module_files.get(mod, []))
+        target_files.update(f for f in module_files.get(mod, []) if in_scope(f, include_tests))
 
     if not target_files and not assigned_modules:
         return {
@@ -410,8 +412,11 @@ def extract_delta_slice(
     deleted_files = sorted(
         f
         for f in delta.get("deleted_files", [])
-        if f in target_files
-        or any(_file_belongs_to_module(f, mod, specific_paths) for mod in assigned_modules)
+        if in_scope(f, include_tests)
+        and (
+            f in target_files
+            or any(_file_belongs_to_module(f, mod, specific_paths) for mod in assigned_modules)
+        )
     )
     deleted_target_files = target_files | set(deleted_files)
 
@@ -491,6 +496,8 @@ def _build_packet_for_sections(
     module_symbols: Mapping[str, int],
     module_paths: Mapping[str, str],
     graph: dict[str, Any],
+    *,
+    include_tests: bool = False,
 ) -> Packet:
     target_doc = sections[0].target_doc
     section_ids = [s.sec_id for s in sections]
@@ -521,6 +528,7 @@ def _build_packet_for_sections(
         module_files,
         cited_files,
         module_paths=module_paths,
+        include_tests=include_tests,
     )
     d_diagrams = resolve_packet_diagram_ids(section_ids, assigned_modules, sec_diagram_ids, graph)
 
@@ -771,6 +779,7 @@ def run_plan(
                         module_files,
                         cited_by_mod.get(m, []),
                         module_paths=module_paths,
+                        include_tests=include_tests,
                     )
                     d_diagrams = resolve_packet_diagram_ids(
                         [sec.sec_id], [m], sec.diagram_ids, graph
@@ -811,6 +820,7 @@ def run_plan(
                     module_files,
                     [],
                     module_paths=module_paths,
+                    include_tests=include_tests,
                 )
                 d_diagrams = resolve_packet_diagram_ids(
                     [sec.sec_id], slice_mods, sec.diagram_ids, graph
@@ -850,6 +860,7 @@ def run_plan(
                     module_symbols,
                     module_paths,
                     graph,
+                    include_tests=include_tests,
                 )
                 packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
                 cur_sections = [sec]
@@ -868,6 +879,7 @@ def run_plan(
                 module_symbols,
                 module_paths,
                 graph,
+                include_tests=include_tests,
             )
             packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
 
