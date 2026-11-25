@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,58 @@ from arch_indexer.toolchain import (
     check_tool_status,
     get_repo_files,
 )
+
+
+@dataclass(frozen=True)
+class _Tooling:
+    launcher: Path
+    env: dict[str, str]
+    cache_dir: Path
+    timeout: float
+
+
+@dataclass
+class _ReactorRun:
+    """A reactor-root ``.scip`` and the units still expected to read from it."""
+
+    scip_file: Path
+    work_dir: Path
+    pending: set[str] = field(default_factory=set)
+
+
+def _maven_argv(limits: dict[str, Any]) -> list[str]:
+    """Maven arguments for a scip-java run.
+
+    ``test-compile`` is only added with ``include_tests``: a unit whose test sources do
+    not compile offline then falls back to Tier 2 as a whole, main sources included.
+    """
+    goal = "test-compile" if limits.get("include_tests") else "compile"
+    argv = ["--batch-mode", "clean", goal, "-DskipTests"]
+    if not limits.get("maven_online", False):
+        argv.append("-o")
+    argv.extend(str(arg) for arg in limits.get("maven_args") or ())
+    return argv
+
+
+def _reactor_note(message: str) -> None:
+    sys.stderr.write(f"Note: Maven reactor mode: {message}\n")
+
+
+def _relative_posix(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _scip_document_paths(scip_file: Path) -> set[str]:
+    """Relative paths of every document in a SCIP index (empty if unreadable)."""
+    from arch_indexer.scip import iter_scip_file
+
+    try:
+        return {msg.relative_path for field_num, msg in iter_scip_file(scip_file) if field_num == 2}
+    except Exception:
+        return set()
 
 
 def _summarize_maven_failure(stderr: str, stdout: str) -> str:
@@ -73,6 +128,105 @@ def _annotation_methods(annotation_args: str) -> list[str]:
         return []
     value = attr_match.group(1) or attr_match.group(2)
     return re.findall(r"(?:RequestMethod\.)?\b([A-Z]+)\b", value)
+
+
+_ANNOTATION_NAME_RE = re.compile(r"@(?:[\w.]+\.)?(\w+)")
+_JAXRS_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
+# annotation simple name -> attributes that name the destination (first present wins)
+_LISTENER_ANNOTATIONS: dict[str, tuple[str, ...]] = {
+    "KafkaListener": ("topics", "topicPattern", "topicPartitions", "value"),
+    "RabbitListener": ("queues", "queuesToDeclare", "bindings", "value"),
+    "JmsListener": ("destination", "value"),
+}
+_LISTENER_HANDLERS = frozenset({"KafkaHandler", "RabbitHandler"})
+_SCHEDULE_RE = re.compile(
+    r"\b(cron|fixedRateString|fixedDelayString|fixedRate|fixedDelay)\s*=\s*(\"[^\"]*\"|[^,)\s]+)"
+)
+_RUNNER_RE = re.compile(r"\b(CommandLineRunner|ApplicationRunner)\b")
+_GRPC_BASE_RE = re.compile(r"\b(\w+)Grpc\.(?:\w+ImplBase|AsyncService)\b")
+
+
+def _annotation_name(annotation: str) -> str:
+    """The simple name of an annotation, bare or package-qualified."""
+    match = _ANNOTATION_NAME_RE.match(annotation)
+    return match.group(1) if match else ""
+
+
+def _annotation_args(annotation: str) -> str:
+    """The text between an annotation's outermost parentheses, or empty."""
+    start = annotation.find("(")
+    end = annotation.rfind(")")
+    return annotation[start + 1 : end] if 0 <= start < end else ""
+
+
+def _annotation_targets(annotation: str, attributes: tuple[str, ...]) -> str:
+    """Destinations (topics, queues, ...) a listener annotation names, comma-joined."""
+    args = _annotation_args(annotation)
+    for attr in attributes:
+        if attr == "value":
+            match = re.match(r"\s*(\{[^}]*\}|\"[^\"]*\")", args)
+        else:
+            match = re.search(rf"\b{attr}\s*=\s*(\{{[^}}]*\}}|\"[^\"]*\"|[^,)\s]+)", args)
+        if not match:
+            continue
+        raw = match.group(1)
+        literals = re.findall(r"\"([^\"]*)\"", raw)
+        return ",".join(literals) if literals else raw.strip("{} ")
+    return ""
+
+
+def _join_route(base: str, sub: str) -> str:
+    joined = "/".join(part.strip("/") for part in (base, sub) if part and part.strip("/"))
+    return f"/{joined}" if joined else "/"
+
+
+def _is_main_method(node: Node, source_bytes: bytes, name: str) -> bool:
+    """A ``public static void main(String[] args)`` style process entry method."""
+    if name != "main":
+        return False
+    is_static = any(
+        mod.type == "static"
+        for child in node.children
+        if child.type == "modifiers"
+        for mod in child.children
+    )
+    params = node.child_by_field_name("parameters")
+    param_text = _get_node_text(params, source_bytes) if params else ""
+    return is_static and "String" in param_text
+
+
+def _class_entry_context(
+    node: Node, source_bytes: bytes, declarations: list[str], class_name: str
+) -> dict[str, Any]:
+    """Class-level facts that decide which methods are non-HTTP entrypoints."""
+    supers = " ".join(
+        _get_node_text(child, source_bytes)
+        for child in node.children
+        if child.type in ("superclass", "super_interfaces")
+    )
+    names = {_annotation_name(ann): ann for ann in declarations}
+    grpc_match = _GRPC_BASE_RE.search(supers)
+    grpc_service = None
+    if grpc_match:
+        grpc_service = grpc_match.group(1)
+    elif "GrpcService" in names or "GRpcService" in names:
+        grpc_service = class_name.rsplit(".", 1)[-1]
+    runner = _RUNNER_RE.search(supers)
+    listener = next(
+        (
+            (name, _annotation_targets(ann, _LISTENER_ANNOTATIONS[name]))
+            for name, ann in names.items()
+            if name in _LISTENER_ANNOTATIONS
+        ),
+        None,
+    )
+    return {
+        "spring_boot": "SpringBootApplication" in names,
+        "runner": runner.group(1) if runner else None,
+        "grpc": grpc_service,
+        "jaxrs_path": _annotation_path(_annotation_args(names["Path"])) if "Path" in names else "",
+        "listener": listener,
+    }
 
 
 DECLARATION_KINDS = {
@@ -151,6 +305,7 @@ class JavaPlugin(LanguagePlugin):
     def __init__(self) -> None:
         self.language = _JAVA_LANGUAGE
         self.parser = Parser(self.language)
+        self._reactor: _ReactorRun | None = None
 
     @property
     def name(self) -> str:
@@ -239,11 +394,57 @@ class JavaPlugin(LanguagePlugin):
         symbol_context: dict[str, Any] | None = None,
         definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None,
     ) -> IndexResult | FallbackSignal:
-        """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits."""
-        from arch_indexer.scip import scip_output_path
+        """Attempt precise Tier 1 (SCIP) indexing within memory/timeout limits.
 
+        With ``maven_reactor`` a single reactor-root run may already hold this unit's
+        documents (see :meth:`prepare_tier1`); otherwise the unit builds on its own.
+        """
+        from arch_indexer.scip import ingest_scip, scip_output_path
+
+        reactor = self._reactor
+        if reactor is not None and unit.unit_id in reactor.pending:
+            reactor_result = self._ingest_from_reactor(
+                reactor, unit, limits, symbol_context, definitions
+            )
+            if reactor_result is not None:
+                return reactor_result
+
+        tooling = self._tier1_tooling(unit.root_dir, limits)
+        if isinstance(tooling, FallbackSignal):
+            return tooling
+
+        cache_dir = tooling.cache_dir
+        scip_file = scip_output_path(limits.get("scip_tmp_dir"), unit, cache_dir)
+        scip_file.unlink(missing_ok=True)
+
+        pom_path = unit.metadata.get("pom")
+        work_dir = (unit.root_dir / pom_path).parent if pom_path else unit.root_dir
+
+        failure = self._run_scip_java(tooling, scip_file, work_dir, limits, tooling.timeout)
+        if failure is not None:
+            return failure
+
+        tier2_result = self.index_unit_tier2(
+            unit,
+            symbol_context=symbol_context,
+            definitions=definitions,
+        )
+        try:
+            return ingest_scip(
+                scip_file,
+                unit,
+                work_dir=work_dir,
+                tier2_result=tier2_result,
+                symbol_context=symbol_context,
+            )
+        except Exception as e:
+            scip_file.unlink(missing_ok=True)
+            return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")
+
+    def _tier1_tooling(self, root_dir: Path, limits: dict[str, Any]) -> _Tooling | FallbackSignal:
+        """Resolve java, Maven and the scip-java launcher for a Tier 1 run."""
         cache_dir = get_cache_dir(limits.get("cache_dir"))
-        runtimes, java_runtime, _portable = _effective_runtimes(cache_dir, repo_path=unit.root_dir)
+        runtimes, java_runtime, _portable = _effective_runtimes(cache_dir, repo_path=root_dir)
         if not runtimes["java"].available:
             return FallbackSignal(
                 reason="tool_unavailable",
@@ -263,40 +464,41 @@ class JavaPlugin(LanguagePlugin):
                 message="scip-java launcher is not installed in the cache",
             )
 
-        scip_file = scip_output_path(limits.get("scip_tmp_dir"), unit, cache_dir)
-        scip_file.unlink(missing_ok=True)
-
         jvm_heap_mb = get_jvm_heap_mb(limits.get("jvm_max_heap_mb"))
         env = dict(os.environ)
         if java_runtime.env:
             env.update(java_runtime.env)
         env["JAVA_TOOL_OPTIONS"] = f"-Xmx{jvm_heap_mb}m"
-        timeout = limits.get("unit_timeout_sec", DEFAULT_UNIT_TIMEOUT_SEC)
+        return _Tooling(
+            launcher=Path(str(tool_status.install_path)),
+            env=env,
+            cache_dir=cache_dir,
+            timeout=limits.get("unit_timeout_sec", DEFAULT_UNIT_TIMEOUT_SEC),
+        )
 
-        pom_path = unit.metadata.get("pom")
-        work_dir = (unit.root_dir / pom_path).parent if pom_path else unit.root_dir
-
+    def _run_scip_java(
+        self,
+        tooling: _Tooling,
+        scip_file: Path,
+        work_dir: Path,
+        limits: dict[str, Any],
+        timeout: float,
+    ) -> FallbackSignal | None:
+        """Run scip-java over Maven in ``work_dir``; ``None`` means ``scip_file`` was produced."""
         cmd = [
-            str(tool_status.install_path),
+            str(tooling.launcher),
             "index",
             "--build-tool=maven",
             "--output",
             str(scip_file),
             "--",
-            "--batch-mode",
-            "clean",
-            "compile",
-            "-DskipTests",
+            *_maven_argv(limits),
         ]
-        if not limits.get("maven_online", False):
-            cmd.append("-o")
-        cmd.extend(str(arg) for arg in limits.get("maven_args") or ())
-
         try:
             proc = subprocess.run(
                 cmd,
                 cwd=str(work_dir),
-                env=env,
+                env=tooling.env,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -339,25 +541,117 @@ class JavaPlugin(LanguagePlugin):
                 reason="build_failure",
                 message=f"scip-java exited 0 but did not produce {scip_file}",
             )
+        return None
 
-        tier2_result = self.index_unit_tier2(
-            unit,
-            symbol_context=symbol_context,
-            definitions=definitions,
+    def prepare_tier1(self, units: list[IndexUnit], limits: dict[str, Any]) -> None:
+        """Optionally index the whole Maven reactor with one scip-java invocation.
+
+        Opt-in via ``maven_reactor``. The shared ``.scip`` is only trusted for the
+        units whose files actually appear in it; every other unit, and every unit
+        when the reactor run fails or yields nothing, keeps the per-module run.
+        Each such decision is reported on stderr, never swallowed.
+        """
+        from arch_indexer.scip import scip_output_path
+
+        self._discard_reactor()
+        if not limits.get("maven_reactor"):
+            return
+        maven_units = [u for u in units if u.metadata.get("pom")]
+        if not maven_units:
+            return
+        root_dir = maven_units[0].root_dir
+        root_pom = root_dir / "pom.xml"
+        try:
+            is_reactor = "<modules>" in root_pom.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            is_reactor = False
+        if len(maven_units) < 2 or not is_reactor:
+            _reactor_note("no multi-module root pom.xml; indexing each Maven module separately")
+            return
+
+        tooling = self._tier1_tooling(root_dir, limits)
+        if isinstance(tooling, FallbackSignal):
+            _reactor_note(f"{tooling.message}; indexing each Maven module separately")
+            return
+
+        scip_file = scip_output_path(
+            limits.get("scip_tmp_dir"),
+            IndexUnit(
+                unit_id="java:reactor", name="reactor", language="java", root_dir=root_dir, files=[]
+            ),
+            tooling.cache_dir,
+        )
+        scip_file.unlink(missing_ok=True)
+        timeout = tooling.timeout * len(maven_units)
+        failure = self._run_scip_java(tooling, scip_file, root_dir, limits, timeout)
+        if failure is not None:
+            _reactor_note(
+                f"reactor-root run failed ({failure.reason}: {failure.message}); "
+                "indexing each Maven module separately"
+            )
+            return
+
+        documents = _scip_document_paths(scip_file)
+        covered: set[str] = set()
+        for unit in maven_units:
+            if any(_relative_posix(f, root_dir) in documents for f in unit.files):
+                covered.add(unit.unit_id)
+        missing = sorted(u.unit_id for u in maven_units if u.unit_id not in covered)
+        if not covered:
+            scip_file.unlink(missing_ok=True)
+            _reactor_note(
+                "reactor-root run exited 0 but produced no per-module documents; "
+                "indexing each Maven module separately"
+            )
+            return
+        if missing:
+            _reactor_note(
+                f"reactor-root output has no documents for {', '.join(missing)}; "
+                "those modules are indexed separately"
+            )
+        self._reactor = _ReactorRun(scip_file=scip_file, work_dir=root_dir, pending=covered)
+
+    def _discard_reactor(self) -> None:
+        if self._reactor is not None:
+            self._reactor.scip_file.unlink(missing_ok=True)
+        self._reactor = None
+
+    def _ingest_from_reactor(
+        self,
+        reactor: _ReactorRun,
+        unit: IndexUnit,
+        limits: dict[str, Any],
+        symbol_context: dict[str, Any] | None,
+        definitions: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None,
+    ) -> IndexResult | None:
+        """Ingest one unit from the shared reactor ``.scip``; ``None`` means run it alone."""
+        from arch_indexer.scip import ingest_scip, scip_output_path
+
+        reactor.pending.discard(unit.unit_id)
+        unit_copy = scip_output_path(
+            limits.get("scip_tmp_dir"), unit, get_cache_dir(limits.get("cache_dir"))
         )
         try:
-            from arch_indexer.scip import ingest_scip
-
+            shutil.copyfile(reactor.scip_file, unit_copy)
+            tier2_result = self.index_unit_tier2(
+                unit, symbol_context=symbol_context, definitions=definitions
+            )
             return ingest_scip(
-                scip_file,
+                unit_copy,
                 unit,
-                work_dir=work_dir,
+                work_dir=reactor.work_dir,
                 tier2_result=tier2_result,
                 symbol_context=symbol_context,
             )
         except Exception as e:
-            scip_file.unlink(missing_ok=True)
-            return FallbackSignal(reason="build_failure", message=f"SCIP ingest failed: {e}")
+            unit_copy.unlink(missing_ok=True)
+            _reactor_note(
+                f"could not read {unit.unit_id} from reactor output ({e}); running it alone"
+            )
+            return None
+        finally:
+            if not reactor.pending:
+                self._discard_reactor()
 
     def extract_definitions(
         self, unit: IndexUnit
@@ -556,6 +850,69 @@ class JavaPlugin(LanguagePlugin):
             infra_artifacts=[],
         )
 
+    def _collect_non_spring_entrypoints(
+        self,
+        node: Node,
+        source_bytes: bytes,
+        annotations: list[str],
+        class_ctx: dict[str, Any],
+        auth_symbols: list[str],
+        where: tuple[str, str, int, str],
+        entrypoints: list[dict[str, Any]],
+    ) -> None:
+        """Process, scheduled, queue, JAX-RS and gRPC entrypoints of one method."""
+        m_name, m_fqname, m_line, rel_path = where
+
+        def add(kind: str, method: str | None, trigger: str, auth: list[str] | None = None) -> None:
+            entrypoints.append(
+                {
+                    "kind": kind,
+                    "name": m_name,
+                    "method": method,
+                    "route_or_trigger": trigger,
+                    "file_path": rel_path,
+                    "line": m_line,
+                    "symbol_fqname": m_fqname,
+                    "auth_symbols_json": json.dumps(auth or []),
+                }
+            )
+
+        by_name = {_annotation_name(ann): ann for ann in annotations}
+
+        if _is_main_method(node, source_bytes, m_name):
+            boot = "@SpringBootApplication " if class_ctx.get("spring_boot") else ""
+            add("process", None, f"{boot}main(String[])")
+        if m_name == "run" and class_ctx.get("runner"):
+            add("process", None, str(class_ctx["runner"]))
+
+        if "Scheduled" in by_name:
+            schedule = _SCHEDULE_RE.search(_annotation_args(by_name["Scheduled"]))
+            trigger = (
+                f"{schedule.group(1)}={schedule.group(2).strip(chr(34))}"
+                if schedule
+                else "@Scheduled"
+            )
+            add("scheduled", None, trigger)
+
+        for ann_name, attributes in _LISTENER_ANNOTATIONS.items():
+            if ann_name in by_name:
+                targets = _annotation_targets(by_name[ann_name], attributes)
+                add("queue", None, targets or f"@{ann_name}")
+        listener = class_ctx.get("listener")
+        if listener and _LISTENER_HANDLERS & by_name.keys():
+            add("queue", None, listener[1] or f"@{listener[0]}")
+
+        verbs = _JAXRS_VERBS & by_name.keys()
+        if verbs:
+            sub_path = (
+                _annotation_path(_annotation_args(by_name["Path"])) if "Path" in by_name else ""
+            )
+            route = _join_route(class_ctx.get("jaxrs_path") or "", sub_path)
+            add("http", ",".join(sorted(verbs)), route, auth_symbols)
+
+        if class_ctx.get("grpc") and "Override" in by_name:
+            add("grpc", None, f"{class_ctx['grpc']}/{m_name}")
+
     def _analyze_file(
         self,
         root: Node,
@@ -572,12 +929,15 @@ class JavaPlugin(LanguagePlugin):
         """Extract imports, call references, and Spring annotations."""
         file_imports: dict[str, str] = {}
 
-        walk_stack: list[tuple[Node, str, str, list[str]]] = [(root, "", "", [])]
+        walk_stack: list[tuple[Node, str, str, list[str], dict[str, Any]]] = [
+            (root, "", "", [], {})
+        ]
         while walk_stack:
-            node, current_class, current_base_path, current_auth = walk_stack.pop()
+            node, current_class, current_base_path, current_auth, class_ctx = walk_stack.pop()
             child_class = current_class
             child_base_path = current_base_path
             child_auth = current_auth
+            child_ctx = class_ctx
 
             # 1. Imports
             if node.type == "import_declaration":
@@ -617,6 +977,7 @@ class JavaPlugin(LanguagePlugin):
                 _, declarations = _get_modifiers_and_annotations(node, source_bytes)
                 child_base_path = ""
                 child_auth = []
+                child_ctx = _class_entry_context(node, source_bytes, declarations, child_class)
                 for ann in declarations:
                     ann_match = re.search(
                         r"@RequestMapping\b(?:\s*\((.*)\))?", ann, flags=re.DOTALL
@@ -730,7 +1091,17 @@ class JavaPlugin(LanguagePlugin):
                             }
                         )
 
+                self._collect_non_spring_entrypoints(
+                    node,
+                    source_bytes,
+                    annotations,
+                    class_ctx,
+                    auth_symbols,
+                    (m_name, m_fqname, m_line, rel_path),
+                    entrypoints,
+                )
+
             walk_stack.extend(
-                (child, child_class, child_base_path, child_auth)
+                (child, child_class, child_base_path, child_auth, child_ctx)
                 for child in reversed(node.children)
             )

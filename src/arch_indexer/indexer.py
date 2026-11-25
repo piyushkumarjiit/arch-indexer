@@ -226,6 +226,7 @@ def run_index(
     cache_dir: str | Path | None = None,
     maven_args: Sequence[str] | None = None,
     maven_online: bool = False,
+    maven_reactor: bool = False,
 ) -> int:
     """Index the target repository, diff it against the previous snapshot (spec 4, 5 and 7)."""
     target_repo = Path(repo_path).resolve()
@@ -303,7 +304,13 @@ def run_index(
         "scip_tmp_dir": cache_paths.scip_tmp_dir,
         "maven_args": list(maven_args or ()),
         "maven_online": maven_online,
+        "maven_reactor": maven_reactor,
+        "include_tests": include_tests,
     }
+    for plugin in plugins:
+        plugin_units = [unit for owner, unit in all_units if owner is plugin]
+        if plugin_units:
+            plugin.prepare_tier1(plugin_units, limits)
 
     # Spec 7.2: exit 4 only for --offline with --strict-tier1, and only when a
     # required Tier 1 indexer is missing (plugins without one, e.g. infra, never fail).

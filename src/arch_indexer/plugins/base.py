@@ -136,6 +136,10 @@ class LanguagePlugin(abc.ABC):
         """Pre-extract file and symbol records for a unit."""
         return [], []
 
+    def prepare_tier1(self, units: list[IndexUnit], limits: dict[str, Any]) -> None:
+        """Optional hook run once before any unit's Tier 1 attempt (e.g. shared builds)."""
+        return None
+
     @abc.abstractmethod
     def index_unit_tier1(
         self,

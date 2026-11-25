@@ -158,7 +158,7 @@ Each language implements a uniform interface:
 | :--- | :--- | :--- | :--- |
 | **Python** | One unit per top-level package, never split by file count (`--chunk-files` is still accepted but no longer splits any unit) | `scip-python index` run in isolation; **no `pip install` of target deps**; unresolved third-party imports recorded in `unresolved_refs` | OOM, timeout, non-zero exit, or missing `node` |
 | **TypeScript** | Per `tsconfig.json` workspace/package | `scip-typescript index --no-progress-bar` (uses existing `node_modules` if present, never runs `npm install`) | Missing `node_modules` causing fatal resolution failure, OOM, timeout, or invalid `tsconfig` |
-| **Java / Maven** | Per Maven module (`pom.xml` reactor modules) | `scip-java index --build-tool=maven` run offline first (`-o` / existing `~/.m2`) so private artifacts never stall or break; `--maven-online` drops `-o` and repeatable `--maven-arg=<arg>` forwards extra Maven arguments | Missing private Maven artifacts (prime the local repository once with the repo's own Maven because sibling modules must already be installed), build failure, missing/too-old JDK or Maven, OOM, or timeout |
+| **Java / Maven** | Per Maven module (`pom.xml` reactor modules) | `scip-java index --build-tool=maven` run offline first (`-o` / existing `~/.m2`) so private artifacts never stall or break; `--maven-online` drops `-o` and repeatable `--maven-arg=<arg>` forwards extra Maven arguments; goals are `clean compile -DskipTests`, or `clean test-compile -DskipTests` with `--include-tests` (a module whose tests do not compile falls back as a whole); opt-in `--maven-reactor` runs scip-java once at the root `pom.xml`, accepts per module only what the output actually contains and otherwise falls back to the per-module run | Missing private Maven artifacts (prime the local repository once with the repo's own Maven because sibling modules must already be installed), build failure, missing/too-old JDK or Maven, OOM, or timeout |
 
 ### 4.3 Tier Recording & Unresolved References
 Every indexed file row in `index.db` records:
@@ -184,7 +184,7 @@ Core tables:
   - `visibility` and `decorators_json` are `NULL` when the tier that produced the row does not report them: SCIP carries neither, so a Tier 1 symbol with no matching Tier 2 symbol stores `NULL` rather than a guessed default. A JSON array such as `[]` means the tier recorded that the symbol has no decorators.
 - `references(id PK, symbol_fqname, file_path, line, col, ref_kind)` (`call`, `import`, `type`, `read`, `write`)
 - `entrypoints(id PK, kind, name, method, route_or_trigger, file_path, line, symbol_fqname, auth_symbols_json)`
-  - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
+  - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), Java process entrypoints (`main` in a `@SpringBootApplication` class, `CommandLineRunner`/`ApplicationRunner`) and gRPC service implementations, workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
 - `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` record at each `CREATE TABLE` line, and `migration_descriptor` records for Liquibase-style changelogs).
 - `unresolved_refs(id PK, file_path, line, raw_symbol, language)`
 - `units(unit_id PK, language, tier, files_count, fallback_reason, message)` (per-unit tier and captured fallback message)
@@ -343,7 +343,7 @@ arch-indexer index <repo> \
   [--unit-timeout-sec 300] [--chunk-files 250] \
   [--docs-dir docs] [--auto-relocate-citations] [--include-tests] \
   [--module-depth N] [--cache-dir <dir>] \
-  [--maven-arg=<arg>]... [--maven-online]
+  [--maven-arg=<arg>]... [--maven-online] [--maven-reactor]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
