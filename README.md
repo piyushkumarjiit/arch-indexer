@@ -32,12 +32,12 @@ arch-indexer index /path/to/repo [--include-tests] [--maven-arg=<arg>]... [--mav
 
 # Read-only queries over the local index (offline, deterministic)
 arch-indexer query /path/to/repo def <symbol> [--json]
-arch-indexer query /path/to/repo refs <symbol> [--limit 100] [--json]
+arch-indexer query /path/to/repo refs <symbol> [--limit 100] [--include-tests] [--json]
 arch-indexer query /path/to/repo file-symbols <rel-path> [--json]
 arch-indexer query /path/to/repo units [--json]
 arch-indexer query /path/to/repo entrypoints [--module <mod>] [--include-tests] [--json]
 arch-indexer query /path/to/repo module-summary <mod> [--include-tests] [--json]
-arch-indexer query /path/to/repo flow-trace <entrypoint-id> [--depth 6] [--json]
+arch-indexer query /path/to/repo flow-trace <entrypoint-id> [--depth 6] [--include-tests] [--json]
 
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
 arch-indexer check-citations /path/to/repo [--docs-dir docs] [--file <path>] [--format text|json]
@@ -117,13 +117,12 @@ The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-co
 `query` opens `<cache>/repos/<id>/index.db` read-only and prints deterministic, line-oriented rows with `path:line`; add `--json` for structured output. The cache location follows the same rules as `index`, so pass the same `--cache-dir` when one was used. Every command exits `1` with a clear message when the index is missing or the symbol, file, module or entrypoint is unknown.
 
 - `def <symbol>` resolves an exact fqname, then an exact name, then a dotted suffix.
-- `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`). A symbol that is defined in the index but has no references exits `0` with an empty result.
+- `refs <symbol> [--limit 100] [--include-tests]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`). A symbol that is defined in the index but has no references exits `0` with an empty result. A reference located in a test file is neither returned nor counted unless `--include-tests` is passed.
 - `file-symbols <rel-path>` lists the symbols defined in one indexed file.
-- `refs <symbol> [--limit N] [--include-tests]` and `flow-trace <entrypoint-id> [--depth N] [--include-tests]` respect the test scope: by default a reference or call edge in a test file is neither returned nor counted, and a test-file entrypoint cannot start a trace.
 - `entrypoints [--module <mod>] [--include-tests]` lists detected HTTP routes, CLI commands, `__main__` blocks, Java process entrypoints (`main` including `@SpringBootApplication` classes, `CommandLineRunner`/`ApplicationRunner`; kind `process`), `@Scheduled` jobs (`scheduled`), `@KafkaListener`/`@RabbitListener`/`@JmsListener` consumers (`queue`), JAX-RS `@Path` resources (`http`), gRPC service implementations (`grpc`) and frontend API callers with their numeric `id`. Each row reports the discovery `line` and the definition `symbol_line` that citations must use; text output adds `symbol_line=<n>` when it differs. See [sections 7.1 and 8.2 of the spec](docs/SPEC.md) for both fields and the citation rule.
 - `units` lists every indexing unit with its file count, tier, fallback reason and the captured fallback message (truncated), which is how a silent all-Tier-2 Java fallback is diagnosed.
 - `module-summary <mod> [--include-tests]` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints. Both this command and `entrypoints --module` accept the `mod:<key>` id or bare module key used by `docs/graph.json`, `master-index.json` and `work-plan.json`, and a dotted package namespace such as `pkg.mod`.
-- `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root.
+- `flow-trace <entrypoint-id> [--depth 6] [--include-tests]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root. A call edge located in a test file is not followed unless `--include-tests` is passed, and a test-file entrypoint cannot start a trace.
 
 Test files are outside the default architecture scope (see [Indexing](#indexing)); `entrypoints`, `module-summary`, `refs` and `flow-trace` include them when `--include-tests` is passed.
 
