@@ -21,6 +21,7 @@ CODE_DANGLING_FOOTNOTE: str = "DANGLING_FOOTNOTE"
 CODE_INVALID_FORMAT: str = "INVALID_FORMAT"
 CODE_DUPLICATE_FOOTNOTE: str = "DUPLICATE_FOOTNOTE"
 CODE_UNCITED_SECTION: str = "UNCITED_SECTION"
+CODE_EMPTY_SECTION: str = "EMPTY_SECTION"
 
 # Maximum distance in lines to classify a shifted symbol as drift rather than mismatch
 DEFAULT_DRIFT_WINDOW: int = 100
@@ -64,7 +65,7 @@ class CitationError:
 
     def format_line(self) -> str:
         """One line per error: code, document, footnote id, citation."""
-        if self.code == CODE_UNCITED_SECTION:
+        if self.code in (CODE_UNCITED_SECTION, CODE_EMPTY_SECTION):
             return f"{self.code}: {self.document} section '{self.footnote_id}'"
         if self.citation:
             return f"{self.code}: {self.document} [^{self.footnote_id}] {self.citation}"
@@ -187,8 +188,12 @@ def check_document_citations(
     doc_rel: str,
     index_db_conn: sqlite3.Connection | None,
     drift_window: int = DEFAULT_DRIFT_WINDOW,
+    require_complete: bool = False,
 ) -> list[CitationError]:
-    """Parse and verify footnote citations in a single document."""
+    """Parse and verify footnote citations in a single document.
+
+    With ``require_complete`` a non-exempt section without any body is an EMPTY_SECTION.
+    """
     errors: list[CitationError] = []
     content = doc_path.read_text(encoding="utf-8", errors="replace")
 
@@ -368,8 +373,11 @@ def check_document_citations(
                 )
             )
 
-    # 5. Check for uncited technical sections in DESIGN.md (spec 8.2 step 1)
-    if doc_path.name == "DESIGN.md" or doc_rel.endswith("DESIGN.md"):
+    # 5. Check uncited technical sections (DESIGN.md only) and empty required sections
+    # (both documents) per spec 8.2 step 1.
+    is_design = doc_path.name == "DESIGN.md" or doc_rel.endswith("DESIGN.md")
+    is_guide = doc_path.name == "USER_GUIDE.md" or doc_rel.endswith("USER_GUIDE.md")
+    if is_design or is_guide:
         for m in SECTION_START_RE.finditer(content):
             sec_id = m.group("id")
             flag = m.group("flag")
@@ -399,8 +407,21 @@ def check_document_citations(
                 body_lines.append(line)
             cleaned_body = "\n".join(body_lines).strip()
 
+            if not cleaned_body:
+                if not require_complete:
+                    continue
+                # A required section with no prose (heading/diagram only) was never written.
+                errors.append(
+                    CitationError(
+                        code=CODE_EMPTY_SECTION,
+                        document=doc_rel,
+                        footnote_id=sec_id,
+                        citation="",
+                        message=f"Required section '{sec_id}' in {doc_rel} has no body content",
+                    )
+                )
             # If body has technical content
-            if cleaned_body:
+            elif is_design:
                 has_fn_ref = False
                 for line in body_lines:
                     pline_no_inline_code = re.sub(r"(`+).*?\1", "", line)
@@ -430,6 +451,7 @@ def check_citations(
     cache_dir: str | Path | None = None,
     files: Sequence[str | Path] | None = None,
     out: TextIO | None = None,
+    require_complete: bool = False,
 ) -> tuple[list[CitationError], list[str]]:
     """Check citations across canonical documentation files in target repository.
 
@@ -466,6 +488,7 @@ def check_citations(
                 doc_path=resolved_f,
                 doc_rel=doc_rel,
                 index_db_conn=conn,
+                require_complete=require_complete,
             )
             errors.extend(doc_errors)
     else:
@@ -481,6 +504,7 @@ def check_citations(
                 doc_path=doc_path,
                 doc_rel=doc_rel,
                 index_db_conn=conn,
+                require_complete=require_complete,
             )
             errors.extend(doc_errors)
 
@@ -504,6 +528,7 @@ def run_check_citations(
     files: Sequence[str | Path] | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    require_complete: bool = False,
 ) -> int:
     """CLI execution handler for check-citations.
 
@@ -531,6 +556,7 @@ def run_check_citations(
         cache_dir=cache_dir,
         files=files,
         out=stdout,
+        require_complete=require_complete,
     )
 
     if output_format == "json":
@@ -590,6 +616,18 @@ class DocSection:
     cited_files: tuple[str, ...]
     cited_symbols: tuple[tuple[str, int, str], ...]
     diagram_hashes: dict[str, str]
+    has_body: bool = True
+    exempt: bool = False
+
+
+def section_has_body(section_text: str) -> bool:
+    """True when text has prose beyond headings, comments, fenced blocks and footnote defs."""
+    cleaned = re.sub(r"<!--.*?-->", "", section_text, flags=re.DOTALL)
+    cleaned = re.sub(r"```.*?```", "", cleaned, flags=re.DOTALL)
+    return any(
+        line.strip() and not line.strip().startswith("#") and not FOOTNOTE_DEF_RE.match(line)
+        for line in _split_lines(cleaned)
+    )
 
 
 def compute_auto_diagram_hashes(text: str) -> dict[str, str]:
@@ -724,6 +762,10 @@ def parse_doc_sections(doc_text: str, doc_rel: str) -> list[DocSection]:
     for section_id, heading, start_line, end_line in _section_line_ranges(lines):
         body_text = "\n".join(lines[start_line - 1 : end_line])
         citations = _section_citations(body_text, definitions)
+        start_marker = SECTION_START_RE.search(lines[start_line - 1])
+        exempt = bool(start_marker and "exempt" in (start_marker.group("flag") or "").lower())
+        # A references list holds only footnote definitions by design.
+        exempt = exempt or heading.strip().lower().startswith("references")
         sections.append(
             DocSection(
                 doc=doc_rel,
@@ -734,6 +776,8 @@ def parse_doc_sections(doc_text: str, doc_rel: str) -> list[DocSection]:
                 cited_files=tuple(sorted({citation[0] for citation in citations})),
                 cited_symbols=citations,
                 diagram_hashes=compute_auto_diagram_hashes(body_text),
+                has_body=section_has_body(body_text),
+                exempt=exempt,
             )
         )
     return sections
