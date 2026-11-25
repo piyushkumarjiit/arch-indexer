@@ -13,12 +13,17 @@ from urllib.request import url2pathname
 from arch_indexer.config import RepoCachePaths
 from arch_indexer.plugins.base import IndexingTier, IndexResult, IndexUnit
 from arch_indexer.scip_pb2 import (
+    UTF8,
+    UTF16,
     Document,
     Metadata,
     Occurrence,
     SymbolInformation,
     SymbolRole,
     SyntaxKind,
+    UTF8CodeUnitOffsetFromLineStart,
+    UTF16CodeUnitOffsetFromLineStart,
+    UTF32CodeUnitOffsetFromLineStart,
 )
 
 _DESC_PATTERN = re.compile(
@@ -166,10 +171,172 @@ def _starts_import(stripped: str, language: str) -> bool:
     return False
 
 
+_STATEMENT_KEY = tuple[int, int]  # (1-based start line, 0-based start column)
+
+
 class _ImportInfo(NamedTuple):
-    lines: dict[int, int]
     spans: list[tuple[int, int, int, int]]
-    texts: dict[int, str]
+    texts: dict[_STATEMENT_KEY, str]
+
+    def statement_at(self, line: int, col: int) -> _STATEMENT_KEY | None:
+        """Return the key of the import statement covering a source position."""
+        for start_line, start_col, end_line, end_col in self.spans:
+            if (start_line, start_col) <= (line, col) < (end_line, end_col):
+                return (start_line, start_col)
+        return None
+
+
+def _masked_source_lines(file_lines: list[str], language: str) -> list[str]:
+    """Blank out comments and string contents while preserving every column.
+
+    Positions in the masked lines keep their original offsets so SCIP ranges and
+    AST/S-expression columns still line up, but prose inside a docstring or a
+    comment can never look like an import statement.
+    """
+    masked: list[str] = []
+    quote = ""
+    in_block_comment = False
+    for raw in file_lines:
+        out = [" "] * len(raw)
+        index = 0
+        while index < len(raw):
+            char = raw[index]
+            if in_block_comment:
+                if raw.startswith("*/", index):
+                    in_block_comment = False
+                    index += 2
+                else:
+                    index += 1
+                continue
+            if quote:
+                if len(quote) == 1 and char == "\\":
+                    index += 2
+                    continue
+                if raw.startswith(quote, index):
+                    index += len(quote)
+                    quote = ""
+                    continue
+                index += 1
+                continue
+            if language != "python" and raw.startswith("//", index):
+                break
+            if language != "python" and raw.startswith("/*", index):
+                in_block_comment = True
+                index += 2
+                continue
+            if language == "python" and char == "#":
+                break
+            if char in "'\"":
+                if raw.startswith(char * 3, index):
+                    quote = char * 3
+                    index += 3
+                else:
+                    quote = char
+                    index += 1
+                continue
+            if language == "typescript" and char == "`":
+                quote = "`"
+                index += 1
+                continue
+            out[index] = char
+            index += 1
+        if (
+            quote
+            and len(quote) == 1
+            and not (language == "typescript" and quote == "`")
+            and not raw.rstrip().endswith("\\")
+        ):
+            # Only triple-quoted strings, TS template literals and explicitly
+            # backslash-continued Python strings continue past a line.
+            quote = ""
+        masked.append("".join(out))
+    return masked
+
+
+def _utf8_column_index(line: str, column: int) -> int:
+    """Convert a UTF-8 code-unit offset (Python AST / tree-sitter) to a str index."""
+    if column <= 0:
+        return 0
+    seen = 0
+    for index, char in enumerate(line):
+        if seen >= column:
+            return index
+        seen += len(char.encode("utf-8", "surrogatepass"))
+    return len(line)
+
+
+def _scip_column_index(line: str, column: int, encoding: int) -> int:
+    """Convert a SCIP column in the document's position encoding to a str index."""
+    if column <= 0:
+        return 0
+    if encoding == UTF32CodeUnitOffsetFromLineStart:
+        return min(column, len(line))
+    if encoding == UTF16CodeUnitOffsetFromLineStart:
+        seen = 0
+        for index, char in enumerate(line):
+            if seen >= column:
+                return index
+            seen += 2 if ord(char) > 0xFFFF else 1
+        return len(line)
+    return _utf8_column_index(line, column)
+
+
+def _document_position_encoding(doc: Document, metadata_encoding: int) -> int:
+    """Resolve the column unit a document's SCIP ranges are expressed in."""
+    if doc.position_encoding:
+        return doc.position_encoding
+    if metadata_encoding == UTF16:
+        return UTF16CodeUnitOffsetFromLineStart
+    if metadata_encoding == UTF8:
+        return UTF8CodeUnitOffsetFromLineStart
+    return UTF8CodeUnitOffsetFromLineStart
+
+
+def _normalize_occurrence_columns(doc: Document, file_lines: list[str], encoding: int) -> None:
+    """Rewrite SCIP column offsets to Python str indices for the document's source."""
+    if not file_lines or encoding == UTF32CodeUnitOffsetFromLineStart:
+        return
+
+    def to_index(line_0: int, column: int) -> int:
+        if 0 <= line_0 < len(file_lines):
+            return _scip_column_index(file_lines[line_0], column, encoding)
+        return column
+
+    for occ in doc.occurrences:
+        if len(occ.range) >= 4:
+            occ.range[1] = to_index(occ.range[0], occ.range[1])
+            occ.range[3] = to_index(occ.range[2], occ.range[3])
+        elif len(occ.range) == 3:
+            occ.range[1] = to_index(occ.range[0], occ.range[1])
+            occ.range[2] = to_index(occ.range[0], occ.range[2])
+        if len(occ.enclosing_range) >= 4:
+            occ.enclosing_range[1] = to_index(occ.enclosing_range[0], occ.enclosing_range[1])
+            occ.enclosing_range[3] = to_index(occ.enclosing_range[2], occ.enclosing_range[3])
+        elif len(occ.enclosing_range) == 3:
+            occ.enclosing_range[1] = to_index(occ.enclosing_range[0], occ.enclosing_range[1])
+            occ.enclosing_range[2] = to_index(occ.enclosing_range[0], occ.enclosing_range[2])
+        if occ.HasField("single_line_range"):
+            single = occ.single_line_range
+            single.start_character = to_index(single.line, single.start_character)
+            single.end_character = to_index(single.line, single.end_character)
+        if occ.HasField("multi_line_range"):
+            multi = occ.multi_line_range
+            multi.start_character = to_index(multi.start_line, multi.start_character)
+            multi.end_character = to_index(multi.end_line, multi.end_character)
+        if occ.HasField("single_line_enclosing_range"):
+            single = occ.single_line_enclosing_range
+            single.start_character = to_index(single.line, single.start_character)
+            single.end_character = to_index(single.line, single.end_character)
+        if occ.HasField("multi_line_enclosing_range"):
+            multi = occ.multi_line_enclosing_range
+            multi.start_character = to_index(multi.start_line, multi.start_character)
+            multi.end_character = to_index(multi.end_line, multi.end_character)
+
+
+def _source_line(file_lines: list[str], line_no: int) -> str:
+    if 1 <= line_no <= len(file_lines):
+        return file_lines[line_no - 1]
+    return ""
 
 
 def _import_span_text(
@@ -189,89 +356,81 @@ def _import_span_text(
 def _python_import_info(file_lines: list[str]) -> _ImportInfo | None:
     try:
         tree = ast.parse("\n".join(file_lines))
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return None
-    lines: dict[int, int] = {}
     spans: list[tuple[int, int, int, int]] = []
-    texts: dict[int, str] = {}
+    texts: dict[_STATEMENT_KEY, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Import, ast.ImportFrom)):
             continue
         start_line = node.lineno
-        start_col = node.col_offset
         end_line = node.end_lineno or start_line
+        # ast columns are UTF-8 byte offsets; keep every span in str indices.
+        start_col = _utf8_column_index(_source_line(file_lines, start_line), node.col_offset)
+        end_line_text = _source_line(file_lines, end_line)
         end_col = node.end_col_offset
         if end_col is None:
-            end_col = len(file_lines[end_line - 1]) if 1 <= end_line <= len(file_lines) else 0
+            end_col = len(end_line_text)
+        else:
+            end_col = _utf8_column_index(end_line_text, end_col)
         spans.append((start_line, start_col, end_line, end_col))
-        for line_no in range(start_line, min(end_line, len(file_lines)) + 1):
-            lines.setdefault(line_no, start_line)
-        texts.setdefault(
-            start_line, _import_span_text(file_lines, start_line, start_col, end_line, end_col)
+        texts[(start_line, start_col)] = _import_span_text(
+            file_lines, start_line, start_col, end_line, end_col
         )
-    return _ImportInfo(lines, spans, texts)
+    return _ImportInfo(spans, texts)
 
 
-def _heuristic_import_line_numbers(file_lines: list[str], language: str) -> dict[int, int]:
-    """Map each 1-based import line to the first line of its import statement."""
-    lines: dict[int, int] = {}
+def _statement_end(
+    masked: list[str], language: str, line_index: int, col: int
+) -> tuple[int, int, int, int]:
+    """Return (end_line, end_col, next_line_index, next_col) for one statement."""
     depth = 0
-    continued = False
-    statement_start = 0
-    for line_no, raw in enumerate(file_lines, start=1):
-        stripped = raw.strip()
-        if depth == 0 and not continued:
-            if not _starts_import(_code_only(stripped, language).strip(), language):
-                continue
-            statement_start = line_no
-        lines[line_no] = statement_start
-        code = _code_only(stripped, language)
-        depth += sum(code.count(ch) for ch in "([{")
-        depth -= sum(code.count(ch) for ch in ")]}")
-        continued = code.rstrip().endswith("\\")
-        if depth <= 0:
-            depth = 0
-    return lines
-
-
-def _statement_end_col(line: str, terminators: str) -> int:
-    quote = ""
-    escaped = False
-    index = 0
-    while index < len(line):
-        char = line[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = ""
+    index = line_index
+    position = col
+    while index < len(masked):
+        line = masked[index]
+        while position < len(line):
+            char = line[position]
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth = max(depth - 1, 0)
+            elif char == ";" and depth == 0:
+                return index + 1, position + 1, index, position + 1
+            position += 1
+        if depth > 0:
             index += 1
+            position = 0
             continue
-        if char in "\"'`":
-            quote = char
-        elif line.startswith("//", index) or line.startswith("/*", index):
-            break
-        elif char in terminators:
-            return index + 1
-        index += 1
-    return len(line)
+        if language == "python" and line.rstrip().endswith("\\"):
+            index += 1
+            position = 0
+            continue
+        return index + 1, len(line), index + 1, 0
+    last = masked[-1] if masked else ""
+    return max(len(masked), 1), len(last), len(masked), 0
 
 
 def _heuristic_import_spans(
-    file_lines: list[str], lines: dict[int, int]
+    file_lines: list[str], language: str
 ) -> list[tuple[int, int, int, int]]:
-    by_statement: dict[int, list[int]] = {}
-    for line_no, statement in lines.items():
-        by_statement.setdefault(statement, []).append(line_no)
+    """Find one span per import statement, including several statements on one line."""
+    masked = _masked_source_lines(file_lines, language)
     spans: list[tuple[int, int, int, int]] = []
-    for statement, statement_lines in by_statement.items():
-        first_line = file_lines[statement - 1]
-        start_col = len(first_line) - len(first_line.lstrip())
-        end_line = max(statement_lines)
-        end_col = _statement_end_col(file_lines[end_line - 1], ";")
-        spans.append((statement, start_col, end_line, end_col))
+    index = 0
+    position = 0
+    while index < len(masked):
+        line = masked[index]
+        while position < len(line) and line[position].isspace():
+            position += 1
+        if position >= len(line):
+            index += 1
+            position = 0
+            continue
+        start_line, start_col = index + 1, position
+        end_line, end_col, index, position = _statement_end(masked, language, index, position)
+        if _starts_import(line[start_col:].strip(), language):
+            spans.append((start_line, start_col, end_line, end_col))
     return spans
 
 
@@ -280,8 +439,7 @@ def _import_info(file_lines: list[str], language: str) -> _ImportInfo:
         info = _python_import_info(file_lines)
         if info is not None:
             return info
-    lines = _heuristic_import_line_numbers(file_lines, language)
-    return _ImportInfo(lines, _heuristic_import_spans(file_lines, lines), {})
+    return _ImportInfo(_heuristic_import_spans(file_lines, language), {})
 
 
 def _in_import_span(start_line: int, col: int, spans: list[tuple[int, int, int, int]]) -> bool:
@@ -339,15 +497,15 @@ def _attribute_chain(file_lines: list[str], occ: Occurrence) -> str:
     return match.group(0) if match else ""
 
 
-def _import_statement_text(file_lines: list[str], info: _ImportInfo, statement: int) -> str:
+def _import_statement_text(
+    file_lines: list[str], info: _ImportInfo, statement: _STATEMENT_KEY
+) -> str:
     if statement in info.texts:
         return info.texts[statement]
-    parts = [
-        _code_only(file_lines[line_no - 1].strip(), "python")
-        for line_no in sorted(info.lines)
-        if info.lines[line_no] == statement and 1 <= line_no <= len(file_lines)
-    ]
-    return " ".join(parts).replace("\\", " ")
+    for start_line, start_col, end_line, end_col in info.spans:
+        if (start_line, start_col) == statement:
+            return _import_span_text(file_lines, start_line, start_col, end_line, end_col)
+    return ""
 
 
 def _split_import_names(raw: str) -> list[tuple[str, str]]:
@@ -402,6 +560,7 @@ def _relative_import_module(
     file_lines: list[str],
     info: _ImportInfo,
     start_line: int,
+    col: int,
     module: str,
     rel_path: str,
     fqname: str,
@@ -410,7 +569,7 @@ def _relative_import_module(
     """Qualify a module occurrence from a Python relative import statement."""
     if last_suffix not in ("/", ":"):
         return ""
-    statement = info.lines.get(start_line)
+    statement = info.statement_at(start_line, col)
     if statement is None:
         return ""
     text = _import_statement_text(file_lines, info, statement)
@@ -431,7 +590,7 @@ def _relative_module_bindings(
     rel_path: str,
 ) -> dict[str, str]:
     """Map names bound to modules by Python relative imports to stored module fqnames."""
-    imported_names: dict[int, dict[str, str]] = {}
+    imported_names: dict[_STATEMENT_KEY, dict[str, str]] = {}
     bindings: dict[str, str] = {}
     for occ in doc.occurrences:
         if not occ.symbol or occ.symbol.startswith("local "):
@@ -441,14 +600,14 @@ def _relative_module_bindings(
         start_line, col, _ = _get_occ_range(occ)
         if not _in_import_span(start_line, col, info.spans):
             continue
-        statement = info.lines.get(start_line)
+        statement = info.statement_at(start_line, col)
         if statement is None:
             continue
         _, fqname, _, suffix = parse_scip_symbol(occ.symbol)
         if suffix not in ("/", ":"):
             continue
         qualified = _relative_import_module(
-            file_lines, info, start_line, module, rel_path, fqname, suffix
+            file_lines, info, start_line, col, module, rel_path, fqname, suffix
         )
         if not qualified:
             continue
@@ -489,15 +648,15 @@ def _local_import_aliases(
     module: str,
 ) -> dict[str, str]:
     """Map document-local import bindings to the imported symbol or module."""
-    modules_by_statement: dict[int, list[tuple[int, int, str]]] = {}
-    locals_by_statement: dict[int, list[Occurrence]] = {}
+    modules_by_statement: dict[_STATEMENT_KEY, list[tuple[int, int, str]]] = {}
+    locals_by_statement: dict[_STATEMENT_KEY, list[Occurrence]] = {}
     for occ in doc.occurrences:
         if not occ.symbol:
             continue
         start_line, col, _ = _get_occ_range(occ)
         if not _in_import_span(start_line, col, info.spans):
             continue
-        statement = info.lines.get(start_line)
+        statement = info.statement_at(start_line, col)
         if statement is None:
             continue
         if occ.symbol.startswith("local "):
@@ -579,6 +738,7 @@ def derive_ref_kind(
     is_import: bool = False,
     line_text: str = "",
     tier2_ref_kind: str | None = None,
+    in_brace_block: bool = False,
 ) -> str:
     """Derive reference kind (call/import/type/read/write) from an occurrence."""
     roles = occ.symbol_roles
@@ -615,9 +775,13 @@ def derive_ref_kind(
             or re.search(r"\bnew$", before_text)
         ):
             return "call"
-        annotation_colon = before_text.endswith(":") and before_text.count(
-            "{"
-        ) <= before_text.count("}")
+        # A ": Type" annotation is never taken from inside a brace-delimited body,
+        # where the colon belongs to a dict key / value pair instead.
+        annotation_colon = (
+            before_text.endswith(":")
+            and not in_brace_block
+            and before_text.count("{") <= before_text.count("}")
+        )
         if (
             annotation_colon
             or before_text.endswith("->")
@@ -767,21 +931,89 @@ def _definition_start_positions(doc: Document) -> list[tuple[int, int]]:
     return sorted(starts)
 
 
-def _fallback_definition_end(
-    file_lines: list[str], start_line: int, starts: list[tuple[int, int]]
-) -> int:
+_TRIVIA_PREFIXES = ("#", "//", "/*", "*", "*/")
+
+
+def _is_trivia_line(line: str, indent: int) -> bool:
+    """True when a line is blank or a comment that is not nested in the body."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if len(line) - len(line.lstrip()) > indent:
+        return False
+    return stripped.startswith(_TRIVIA_PREFIXES)
+
+
+def _fallback_definition_span(
+    file_lines: list[str],
+    start_line: int,
+    start_col: int,
+    starts: list[tuple[int, int]],
+    language: str,
+) -> tuple[int, int, int | None]:
+    """Bound a declaration that has no SCIP enclosing range to its own source.
+
+    Returns ``(hash_start_col, end_line, hash_end_col)``. The span stops at the
+    next sibling declaration - including a sibling that begins on the same
+    physical line - and drops trailing blank or comment-only trivia so edits
+    outside the declaration never change its body hash.
+    """
     if not (1 <= start_line <= len(file_lines)):
-        return start_line
+        return 0, start_line, None
     current_line = file_lines[start_line - 1]
     current_indent = len(current_line) - len(current_line.lstrip())
-    for line_no, _ in starts:
-        if line_no <= start_line or line_no > len(file_lines):
+
+    hash_start_col = 0
+    if any(line_no == start_line and col < start_col for line_no, col in starts):
+        # Start after the previous statement's terminator on this line so a
+        # sibling declaration on the left never enters this body hash.
+        masked = _masked_source_lines([current_line], language)[0]
+        terminator = max(masked.rfind(";", 0, start_col), masked.rfind("}", 0, start_col))
+        if terminator >= 0:
+            rest = current_line[terminator + 1 :]
+            hash_start_col = terminator + 1 + (len(rest) - len(rest.lstrip()))
+
+    for line_no, col in starts:
+        if (line_no, col) <= (start_line, start_col) or line_no > len(file_lines):
             continue
         next_line = file_lines[line_no - 1]
         next_indent = len(next_line) - len(next_line.lstrip())
-        if next_indent <= current_indent:
-            return max(start_line, line_no - 1)
-    return len(file_lines)
+        if next_indent > current_indent:
+            continue
+        if line_no == start_line:
+            return hash_start_col, start_line, col
+        end_line = line_no - 1
+        while end_line > start_line and _is_trivia_line(file_lines[end_line - 1], current_indent):
+            end_line -= 1
+        return hash_start_col, end_line, None
+
+    end_line = len(file_lines)
+    while end_line > start_line and _is_trivia_line(file_lines[end_line - 1], current_indent):
+        end_line -= 1
+    return hash_start_col, end_line, None
+
+
+def _definition_body_text(
+    file_lines: list[str],
+    start_line: int,
+    start_col: int,
+    end_line: int,
+    end_col: int | None,
+) -> str:
+    """Slice a declaration's source lines, honouring same-line sibling bounds."""
+    if not file_lines or not (1 <= start_line <= len(file_lines)):
+        return ""
+    end_line = min(max(end_line, start_line), len(file_lines))
+    segments: list[str] = []
+    for line_no in range(start_line, end_line + 1):
+        line = file_lines[line_no - 1]
+        offset = start_col if line_no == start_line else 0
+        if offset:
+            line = line[offset:]
+        if line_no == end_line and end_col is not None:
+            line = line[: max(end_col - offset, 0)]
+        segments.append(line)
+    return "\n".join(segments)
 
 
 def _parse_project_root(project_root: str | Path | None) -> Path | None:
@@ -827,6 +1059,14 @@ def _resolve_relative_path(
     if fallback_candidate is not None:
         return fallback_candidate.relative_to(root_resolved).as_posix(), fallback_candidate
     return None
+
+
+def _is_internal_fqname(fqname: str, internal: set[str]) -> bool:
+    """True when an fqname or one of its namespace parents is defined in the index."""
+    if not internal or not fqname:
+        return False
+    parts = fqname.split(".")
+    return any(".".join(parts[:length]) in internal for length in range(1, len(parts) + 1))
 
 
 def _defined_fqname_prefixes(defined_symbols: set[str]) -> set[str]:
@@ -974,9 +1214,11 @@ def _parse_scip_payload(
     metadata_project_root: Path | None = None
 
     document_count = 0
+    metadata_encoding = 0
     defined_by_doc: dict[str, set[str]] = {}
     for field_num, msg in iter_scip_file(scip_path):
         if field_num == 1:
+            metadata_encoding = msg.text_document_encoding
             if msg.project_root:
                 metadata_project_root = _parse_project_root(msg.project_root)
         elif field_num == 2:
@@ -1020,6 +1262,9 @@ def _parse_scip_payload(
             continue
         defined_symbols.update(doc_symbols)
     namespace_prefixes = _defined_fqname_prefixes(defined_symbols)
+    defined_fqnames = {
+        parse_scip_symbol(symbol)[1] for symbol in defined_symbols if parse_scip_symbol(symbol)[1]
+    }
 
     module_by_path = {f["path"]: f["module"] for f in tier2_result.files} if tier2_result else None
     tier2_symbols = tier2_result.symbols if tier2_result else []
@@ -1039,6 +1284,7 @@ def _parse_scip_payload(
                 renames.setdefault(prefix, module)
         repo_fqnames.update(symbol_context.get("fqnames", {}).get(unit.language, set()))
         repo_modules.update(symbol_context.get("modules", {}).get(unit.language, set()))
+    internal_fqnames = defined_fqnames | repo_fqnames | repo_modules
 
     tier2_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     tier2_by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1093,6 +1339,16 @@ def _parse_scip_payload(
             }
         )
 
+        _normalize_occurrence_columns(
+            doc, file_lines, _document_position_encoding(doc, metadata_encoding)
+        )
+        masked_lines = _masked_source_lines(file_lines, unit.language)
+        brace_depth_at_line: list[int] = []
+        depth = 0
+        for masked_line in masked_lines:
+            brace_depth_at_line.append(depth)
+            depth += masked_line.count("{") - masked_line.count("}")
+
         import_info = _import_info(file_lines, unit.language)
         local_aliases = _local_import_aliases(doc, file_lines, import_info, module)
         relative_modules = (
@@ -1128,7 +1384,14 @@ def _parse_scip_payload(
                 simple_name, fqname, inferred_kind, last_suffix = parse_scip_symbol(sym_str)
                 if is_import_occ and unit.language == "python":
                     relative_fqname = _relative_import_module(
-                        file_lines, import_info, start_line, module, rel_path, fqname, last_suffix
+                        file_lines,
+                        import_info,
+                        start_line,
+                        col,
+                        module,
+                        rel_path,
+                        fqname,
+                        last_suffix,
                     )
                     if relative_fqname:
                         fqname = relative_fqname
@@ -1171,10 +1434,12 @@ def _parse_scip_payload(
                         tier2_meta = max(containing, key=lambda c: c["start_line"])
                 if tier2_meta and tier2_meta.get("end_line"):
                     enc_end = max(enc_end, tier2_meta["end_line"])
+                fallback_span: tuple[int, int, int | None] | None = None
                 if tier2_meta is None and not _has_enclosing_range(occ):
-                    enc_end = max(
-                        enc_end, _fallback_definition_end(file_lines, start_line, definition_starts)
+                    fallback_span = _fallback_definition_span(
+                        file_lines, start_line, col, definition_starts, unit.language
                     )
+                    enc_end = max(enc_end, fallback_span[1])
                 if file_lines and 1 <= start_line <= len(file_lines):
                     enc_end = min(max(enc_end, start_line), len(file_lines))
                 if (
@@ -1187,8 +1452,12 @@ def _parse_scip_payload(
                     hash_start = enc_start if 1 <= enc_start <= len(file_lines) else start_line
                     if file_lines and 1 <= hash_start <= len(file_lines):
                         hash_end = max(enc_end, hash_start)
-                        body_text = "\n".join(
-                            file_lines[hash_start - 1 : min(hash_end, len(file_lines))]
+                        hash_start_col = 0
+                        hash_end_col: int | None = None
+                        if fallback_span is not None and hash_end == fallback_span[1]:
+                            hash_start_col, _, hash_end_col = fallback_span
+                        body_text = _definition_body_text(
+                            file_lines, hash_start, hash_start_col, hash_end, hash_end_col
                         )
                         body_sha256 = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
                     else:
@@ -1221,16 +1490,32 @@ def _parse_scip_payload(
                 ref_fqname = _module_fqname(fqname, last_suffix)
                 if not is_import_line:
                     aligned_fqname = _align_fqname(ref_fqname, doc_renames)
-                    for target, kind in tier2_refs.get((rel_path, start_line, col), ()):
+                    tier2_candidates = tier2_refs.get((rel_path, start_line, col), ())
+                    if not tier2_candidates and line_str:
+                        # Tier 2 columns are UTF-8 byte offsets; SCIP columns are str indices.
+                        byte_col = len(line_str[:col].encode("utf-8", "surrogatepass"))
+                        if byte_col != col:
+                            tier2_candidates = tier2_refs.get((rel_path, start_line, byte_col), ())
+                    for target, kind in tier2_candidates:
                         if target == aligned_fqname:
                             t2_kind = kind
                             break
+                if 1 <= start_line <= len(brace_depth_at_line):
+                    before_col = line_str[:col]
+                    open_braces = (
+                        brace_depth_at_line[start_line - 1]
+                        + before_col.count("{")
+                        - before_col.count("}")
+                    )
+                else:
+                    open_braces = 0
                 ref_kind = derive_ref_kind(
                     occ,
                     last_suffix,
                     is_import=is_import_line,
                     line_text=line_str,
                     tier2_ref_kind=t2_kind,
+                    in_brace_block=open_braces > 0,
                 )
                 ref_key = (rel_path, start_line, col, ref_fqname, ref_kind)
                 if ref_key not in seen_refs:
@@ -1245,11 +1530,15 @@ def _parse_scip_payload(
                         }
                     )
 
-                if not is_local and sym_str not in defined_symbols:
+                if is_local or sym_str not in defined_symbols:
                     # scip-python emits imported modules as external namespace symbols
                     # (`requests/__init__:`) with ReadAccess roles, so classify unresolved
-                    # refs by symbol resolution rather than by derived ref kind.
+                    # refs by symbol resolution rather than by derived ref kind. Local
+                    # symbols bound by an import count only when the bound target is
+                    # external - an internal module alias stays resolved.
                     raw_symbol = _module_fqname(fqname, last_suffix)
+                    if is_local and _is_internal_fqname(raw_symbol, internal_fqnames):
+                        continue
                     unresolved_key = (rel_path, start_line, raw_symbol)
                     if unresolved_key not in seen_unresolved:
                         seen_unresolved.add(unresolved_key)

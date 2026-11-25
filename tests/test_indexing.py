@@ -115,7 +115,9 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     absolute ``Metadata.project_root`` removed for portability) for
     ``src/pyimp/client.py``, which imports the third-party modules ``requests`` and
     ``yaml`` (neither installed). scip-python emits those module references as
-    namespace symbols with ReadAccess roles, not Import roles.
+    namespace symbols with ReadAccess roles, not Import roles. ``from yaml import
+    safe_load`` also binds a local alias, whose external target must be recorded
+    as unresolved too.
     """
     repo_dir = FIXTURES_DIR / "python_imports"
     unit = IndexUnit(
@@ -139,6 +141,7 @@ def test_python_scip_fixture_records_unresolved_third_party_imports(tmp_path: Pa
     assert imports == {
         ("src/pyimp/client.py", 1, "requests"),
         ("src/pyimp/client.py", 2, "yaml"),
+        ("src/pyimp/client.py", 2, "yaml.safe_load"),
     }
     assert all(u["language"] == "python" for u in res.unresolved_refs)
 
