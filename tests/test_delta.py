@@ -1524,3 +1524,57 @@ def test_replace_auto_diagram_block_ignores_fenced_example():
     assert fenced_example in updated
     assert replacement in updated
     assert "old --> graph" not in updated
+
+
+def test_plain_index_and_force_full_do_not_rewrite_auto_diagrams(tmp_path: Path, capsys):
+    """AUTO-DIAGRAM refresh is gated behind --auto-relocate-citations on move-only deltas."""
+    repo = _make_repo(tmp_path)
+    app_path = repo / "src" / "app.py"
+    util_path = repo / "src" / "util.py"
+    app_path.write_text(
+        APP_SOURCE + '\n\nif __name__ == "__main__":\n    start()\n', encoding="utf-8"
+    )
+    util_path.write_text(
+        UTIL_SOURCE + '\n\nif __name__ == "__main__":\n    helper()\n', encoding="utf-8"
+    )
+    _commit(repo, "add entry points")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+    diagrams = generate_diagrams(graph)
+    first_id = sorted(diagrams)[0]
+    edited_block = render_auto_diagram_block(first_id, "flowchart TD\n  MANUAL --> EDIT")
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        DESIGN_DOC.replace(
+            "The service starts through `start`[^1].",
+            "The service starts through `start`[^1].\n\n"
+            + render_auto_diagram_block(first_id, diagrams[first_id]),
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "record diagram block")
+    assert _index(repo, cache) == EXIT_OK
+    capsys.readouterr()
+
+    # Manual edit is flagged with exit 2 and recorded in state.json; a subsequent plain index
+    # must leave the edited block intact on disk.
+    manually_edited = replace_auto_diagram_block(
+        design_path.read_text(encoding="utf-8"), first_id, edited_block
+    )
+    design_path.write_text(manually_edited, encoding="utf-8")
+    _commit(repo, "manual diagram edit")
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert design_path.read_text(encoding="utf-8") == manually_edited
+
+    assert _index(repo, cache) == EXIT_OK
+    capsys.readouterr()
+    assert design_path.read_text(encoding="utf-8") == manually_edited
+
+    # --force-full (even with --auto-relocate-citations) must not rewrite DESIGN.md either.
+    assert _index(repo, cache, "--force-full", "--auto-relocate-citations") == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert design_path.read_text(encoding="utf-8") == manually_edited
