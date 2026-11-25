@@ -527,7 +527,7 @@ class IndexStore:
         }
 
     def format_summary(self) -> str:
-        """Format the one-line index summary plus each unit's tier and fallback detail."""
+        """Format the index summary line plus each unit's tier and fallback detail."""
         summary = self.get_summary()
         breakdown_parts = [
             f"{lang}: {count} [{tier}]" for lang, tier, count in summary["files_breakdown"]
