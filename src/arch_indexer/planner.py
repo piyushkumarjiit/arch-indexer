@@ -32,6 +32,7 @@ from arch_indexer.mermaid_gen import (
     _module_names,
     diagram_ids,
 )
+from arch_indexer.module_identity import load_module_options
 from arch_indexer.plugins.base import module_with_parents
 from arch_indexer.plugins.infra_scanner import is_infra_file
 from arch_indexer.source_scope import filter_rows, in_scope
@@ -86,9 +87,10 @@ class Packet:
     diagram_ids: list[str]
     line_count: int
     symbol_count: int
+    over_budget: bool = False
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "assigned_modules": sorted(self.assigned_modules),
             "delta_slice": self.delta_slice,
             "draft_output_path": self.draft_output_path,
@@ -99,6 +101,10 @@ class Packet:
             "symbol_count": self.symbol_count,
             "target_doc": self.target_doc,
         }
+        if self.over_budget:
+            # An indivisible module (one package/file group) larger than a worker budget.
+            payload["over_budget"] = True
+        return payload
 
 
 @dataclass
@@ -130,6 +136,7 @@ def build_master_index(
     repo_path: str | Path,
     *,
     include_tests: bool = False,
+    module_depth: int | None = None,
 ) -> dict[str, Any]:
     """Generate master-index.json: compact deterministic summary for agents (SPEC 2.2, 4.3).
 
@@ -138,13 +145,14 @@ def build_master_index(
     """
     target_repo = Path(repo_path).resolve()
     file_rows = filter_rows(store.get_file_records(), include_tests, key="path")
-    modules_list, module_by_file, _tier_by_file = _build_modules(file_rows)
-
     cursor = store.conn.cursor()
     cursor.execute("SELECT file_path, COUNT(*) FROM symbols GROUP BY file_path")
     symbols_by_file = {
         row[0]: row[1] for row in cursor.fetchall() if in_scope(row[0], include_tests)
     }
+    modules_list, module_by_file, _tier_by_file = _build_modules(
+        file_rows, load_module_options(target_repo, module_depth), symbols_by_file
+    )
 
     cursor.execute("SELECT file_path, COUNT(*) FROM entrypoints GROUP BY file_path")
     entrypoints_by_file = {
@@ -882,6 +890,17 @@ def run_plan(
                 include_tests=include_tests,
             )
             packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
+
+    # A packet over budget means its module cannot be split further (a single flat package
+    # or a fixed --module-depth); say so instead of silently exceeding the budget.
+    for pkt in packets:
+        if pkt.line_count > max_lines_per_worker or pkt.symbol_count > max_symbols_per_worker:
+            pkt.over_budget = True
+            stderr.write(
+                f"Warning: packet {pkt.packet_id} exceeds the worker budget "
+                f"({pkt.line_count} lines / {pkt.symbol_count} symbols); its module cannot be "
+                "split further. Drop a fixed --module-depth or add a [modules.map] entry.\n"
+            )
 
     # Sort packets deterministically
     packets.sort(key=lambda p: (p.target_doc, p.packet_id))

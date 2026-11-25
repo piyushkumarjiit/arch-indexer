@@ -172,6 +172,7 @@ def run_index(
     docs_dir: str = "docs",
     auto_relocate_citations: bool = False,
     include_tests: bool = False,
+    module_depth: int | None = None,
     cache_dir: str | Path | None = None,
 ) -> int:
     """Index the target repository, diff it against the previous snapshot (spec 4, 5 and 7)."""
@@ -313,7 +314,9 @@ def run_index(
             )
 
         # Spec 6.1/6.3/7.1: deterministic graph.json plus the self-contained viewer.
-        graph = build_graph(store, target_repo, include_tests=include_tests)
+        graph = build_graph(
+            store, target_repo, include_tests=include_tests, module_depth=module_depth
+        )
         export_graph_artifacts(target_repo, graph, docs_dir)
 
         # Print one-line summary to stdout
@@ -328,7 +331,9 @@ def run_index(
         # Spec 5.3: deleted files are purged from every table. The index was just rebuilt
         # from disk, but purging keeps the guarantee explicit and idempotent.
         store.purge_files(full_delta.deleted_files)
-        master_index = build_master_index(store, target_repo, include_tests=include_tests)
+        master_index = build_master_index(
+            store, target_repo, include_tests=include_tests, module_depth=module_depth
+        )
 
     delta = _scoped_delta(full_delta, include_tests)
 

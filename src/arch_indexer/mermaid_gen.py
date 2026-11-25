@@ -265,10 +265,25 @@ def _flow_diagram(
         return "module"
 
     if len(visited) > max_nodes or len(selected) > max_edges:
+        # Collapse services to their module, except for the dominant module: collapsing
+        # that one would turn the whole flow into a single stub with no edges (gap G5).
+        services_by_module: dict[str, int] = {}
+        for node_id in visited:
+            if group_of(node_id) == "service":
+                module_id = str(nodes[node_id].get("module_id"))
+                services_by_module[module_id] = services_by_module.get(module_id, 0) + 1
+        total_services = sum(services_by_module.values())
+        dominant = {
+            module_id
+            for module_id, count in services_by_module.items()
+            if total_services > 1 and count * 2 > total_services
+        }
         remap = {
             node_id: str(nodes[node_id].get("module_id"))
             for node_id in visited
-            if group_of(node_id) == "service" and str(nodes[node_id].get("module_id")) in modules
+            if group_of(node_id) == "service"
+            and str(nodes[node_id].get("module_id")) in modules
+            and str(nodes[node_id].get("module_id")) not in dominant
         }
         if remap:
             visited = {remap.get(node_id, node_id) for node_id in visited}
@@ -277,18 +292,38 @@ def _flow_diagram(
 
     if len(visited) > max_nodes or len(selected) > max_edges:
         degree: dict[str, int] = {}
+        out_adjacency: dict[str, list[str]] = {}
         for edge in selected:
+            out_adjacency.setdefault(edge["source"], []).append(edge["target"])
             for endpoint in (edge["source"], edge["target"]):
                 degree[endpoint] = degree.get(endpoint, 0) + 1
-        ordered: list[str] = []
-        for group in ("entry", "boundary"):
-            ordered.extend(sorted(node_id for node_id in visited if group_of(node_id) == group))
-        ordered.extend(
-            sorted(
-                (node_id for node_id in visited if group_of(node_id) not in ("entry", "boundary")),
-                key=lambda node_id: (-degree.get(node_id, 0), node_id),
-            )
+        # Entrypoints may use at most a third of the node budget, preferring those that
+        # actually call something, so call edges always keep room (gap G5).
+        entries = sorted(
+            (node_id for node_id in visited if group_of(node_id) == "entry"),
+            key=lambda node_id: (-degree.get(node_id, 0), node_id),
         )
+        entry_cap = max(1, max_nodes // 3)
+        kept_entries = entries[:entry_cap]
+        if len(entries) > len(kept_entries):
+            notes.append(f"{len(entries) - len(kept_entries)} more entrypoints summarized")
+        # Fill the rest breadth-first from the kept entrypoints so every kept node is
+        # connected to a kept entrypoint; boundaries rank ahead of services per layer.
+        ordered = list(kept_entries)
+        seen = set(ordered)
+        frontier = list(kept_entries)
+        while frontier:
+            layer = sorted(
+                {t for n in frontier for t in out_adjacency.get(n, []) if t not in seen},
+                key=lambda node_id: (
+                    group_of(node_id) != "boundary",
+                    -degree.get(node_id, 0),
+                    node_id,
+                ),
+            )
+            seen.update(layer)
+            ordered.extend(layer)
+            frontier = layer
         kept = set(ordered[:max_nodes])
         selected = _dedup_flow_edges(selected, kept)
         selected = sorted(
