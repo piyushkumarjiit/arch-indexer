@@ -7,7 +7,6 @@ from typing import Any
 
 from arch_indexer.checks.citations import (
     CANONICAL_DOCS,
-    DocSection,
     check_citations,
     compute_auto_diagram_hashes,
     parse_doc_sections,
@@ -64,8 +63,8 @@ class DiagramSync:
     """Outcome of the zero-token AUTO-DIAGRAM repair that runs beside citation relocation."""
 
     updated_docs: list[str] = field(default_factory=list)
-    repaired: list[DocSection] = field(default_factory=list)
-    stale: list[DocSection] = field(default_factory=list)
+    repaired: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    stale: dict[tuple[str, str], set[str]] = field(default_factory=dict)
 
 
 def _graph_diagrams(target_repo: Path, docs_dir: str) -> dict[str, str]:
@@ -86,6 +85,8 @@ def _sync_drifted_diagrams(
     target_repo: Path,
     docs_dir: str,
     previous_state: dict[str, Any] | None,
+    *,
+    sync_unrecorded: bool = False,
 ) -> DiagramSync:
     """Repair AUTO-DIAGRAM blocks that drifted with the graph instead of with the source.
 
@@ -93,9 +94,10 @@ def _sync_drifted_diagrams(
     diagram differs from the block the last ``index`` wrote. The document itself was not
     touched, so the ordinary impact computation sees no change and the run would report
     up to date while ``check-mermaid`` fails. Only blocks that still carry the hash recorded
-    in ``state.json`` are regenerated; a block edited since the last index keeps its content
-    and is returned in ``stale`` so its section stays impacted (spec 7.1: graph output owns
-    the block, but the repair must not overwrite an edit a worker should see).
+    in ``state.json`` (or unrecorded blocks when ``sync_unrecorded`` is set on a non-empty
+    delta) are regenerated; a block edited since the last index keeps its content and is
+    returned in ``stale`` so its section stays impacted (spec 7.1: graph output owns the
+    block, but the repair must not overwrite an edit a worker should see).
     """
     from arch_indexer.mermaid_gen import (
         render_auto_diagram_block,
@@ -107,8 +109,8 @@ def _sync_drifted_diagrams(
         return DiagramSync()
     previous_hashes = (previous_state or {}).get("diagram_hashes") or {}
     updated_docs: list[str] = []
-    repaired: list[DocSection] = []
-    stale: list[DocSection] = []
+    repaired: dict[tuple[str, str], set[str]] = {}
+    stale: dict[tuple[str, str], set[str]] = {}
     for doc_name in CANONICAL_DOCS:
         doc_rel = f"{docs_dir}/{doc_name}"
         doc_path = target_repo / doc_rel
@@ -117,6 +119,7 @@ def _sync_drifted_diagrams(
         original = doc_path.read_text(encoding="utf-8", errors="replace")
         updated = original
         for section in parse_doc_sections(original, doc_rel):
+            key = (doc_rel, section.section_id)
             for diagram_id, current_hash in sorted(section.diagram_hashes.items()):
                 code = diagrams.get(diagram_id)
                 if code is None:
@@ -128,15 +131,13 @@ def _sync_drifted_diagrams(
                     diagram_id
                 )
                 if recorded is None:
-                    # No recorded hash: the document (or the assembler) added this block
-                    # since the last index. Its validity is the gates' business, not a
-                    # reason to dispatch a worker.
-                    continue
-                if recorded != current_hash:
-                    stale.append(section)
+                    if not sync_unrecorded:
+                        continue
+                elif recorded != current_hash:
+                    stale.setdefault(key, set()).add(diagram_id)
                     continue
                 updated = replace_auto_diagram_block(updated, diagram_id, block)
-                repaired.append(section)
+                repaired.setdefault(key, set()).add(diagram_id)
         if updated != original:
             doc_path.write_text(updated, encoding="utf-8")
             updated_docs.append(doc_rel)
@@ -360,7 +361,12 @@ def run_index(
     # disagree with a document that was left untouched. Blocks this tool wrote are
     # regenerated in place; a block edited since the last index stays as authored and its
     # section stays impacted through the ordinary hash comparison below.
-    diagram_sync = _sync_drifted_diagrams(target_repo, docs_dir, previous_state)
+    diagram_sync = _sync_drifted_diagrams(
+        target_repo,
+        docs_dir,
+        previous_state,
+        sync_unrecorded=not delta.is_first_run and not delta.is_empty(),
+    )
     if diagram_sync.updated_docs:
         print(
             f"Regenerated AUTO-DIAGRAM blocks in {len(diagram_sync.updated_docs)} document(s): "
@@ -374,9 +380,9 @@ def run_index(
         delta=delta,
         previous_state=previous_state,
         module_by_file=module_by_file,
+        repaired_diagrams=diagram_sync.repaired,
+        stale_diagrams=diagram_sync.stale,
     )
-    report.drop_repaired_diagram_impacts(diagram_sync.repaired)
-    report.note_diagram_impacts(diagram_sync.stale)
 
     write_json(cache_paths.index_delta_json, delta.to_payload(cache_paths.repo_id))
     write_json(cache_paths.impacted_sections_json, report.to_payload(delta, docs_dir=docs_dir))
@@ -390,10 +396,12 @@ def run_index(
     # only advanced after the relocation passes check-citations, so a failure (exit 3) keeps
     # the previous snapshot and the next run still sees the moves.
     if relocate_enabled:
-        relocated = relocate_citations(target_repo, moved_symbol_moves(delta), docs_dir=docs_dir)
+        relocated = relocate_citations(
+            target_repo, moved_symbol_moves(delta), docs_dir=docs_dir, cache_dir=cache_dir
+        )
         errors, _notes = check_citations(repo=target_repo, docs_dir=docs_dir, cache_dir=cache_dir)
         if errors:
-            for doc_rel in relocated:
+            for doc_rel in sorted(set(relocated) | set(diagram_sync.updated_docs)):
                 if doc_rel in original_docs:
                     (target_repo / doc_rel).write_bytes(original_docs[doc_rel])
             for error in errors:
@@ -408,13 +416,13 @@ def run_index(
             delta=delta,
             previous_state=previous_state,
             module_by_file=module_by_file,
+            repaired_diagrams=diagram_sync.repaired,
+            stale_diagrams=diagram_sync.stale,
         )
         print(
             f"Relocated citations in {len(relocated)} document(s): "
             f"{', '.join(relocated) if relocated else 'none'}"
         )
-        repaired.drop_repaired_diagram_impacts(diagram_sync.repaired)
-        repaired.note_diagram_impacts(diagram_sync.stale)
         write_json(
             cache_paths.state_json,
             current.to_state_payload(

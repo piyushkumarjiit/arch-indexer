@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -448,39 +449,6 @@ class ImpactReport:
     diagram_hashes: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     parsed_sections: list[DocSection] = field(default_factory=list)
 
-    def note_diagram_impacts(self, sections: Iterable[DocSection]) -> None:
-        """Record ``diagram_changed`` for sections whose AUTO-DIAGRAM block is stale.
-
-        A block that disagrees with ``docs/graph.json`` and was edited outside this tool is
-        never rewritten, so its section must stay in the impact report rather than letting
-        ``index`` claim the documents are up to date.
-        """
-        existing = {(entry["doc"], entry["section_id"]): entry for entry in self.sections}
-        for section in sections:
-            key = (section.doc, section.section_id)
-            entry = existing.get(key)
-            if entry is None:
-                entry = _impact_entry(section, [IMPACT_DIAGRAM_CHANGED], [])
-                self.sections.append(entry)
-                existing[key] = entry
-            elif IMPACT_DIAGRAM_CHANGED not in entry["reasons"]:
-                entry["reasons"] = sorted({*entry["reasons"], IMPACT_DIAGRAM_CHANGED})
-
-    def drop_repaired_diagram_impacts(self, sections: Iterable[DocSection]) -> None:
-        """Clear ``diagram_changed`` for sections whose diagram this run regenerated."""
-        repaired = {(section.doc, section.section_id) for section in sections}
-        kept: list[dict[str, Any]] = []
-        for entry in self.sections:
-            if (entry["doc"], entry["section_id"]) in repaired and IMPACT_DIAGRAM_CHANGED in entry[
-                "reasons"
-            ]:
-                remaining = [r for r in entry["reasons"] if r != IMPACT_DIAGRAM_CHANGED]
-                if not remaining:
-                    continue
-                entry["reasons"] = remaining
-            kept.append(entry)
-        self.sections = kept
-
     def to_payload(self, delta: Delta, docs_dir: str) -> dict[str, Any]:
         """Serialize as impacted-sections.json."""
         return {
@@ -544,6 +512,8 @@ def compute_impacted_sections(
     delta: Delta,
     previous_state: Mapping[str, Any] | None,
     module_by_file: Mapping[str, str],
+    repaired_diagrams: Mapping[tuple[str, str], AbstractSet[str]] | None = None,
+    stale_diagrams: Mapping[tuple[str, str], AbstractSet[str]] | None = None,
 ) -> ImpactReport:
     """Map a delta onto documentation sections using the four rules in spec 5.5."""
     parsed: list[DocSection] = []
@@ -649,14 +619,24 @@ def compute_impacted_sections(
         if matched_modules:
             reasons.add(IMPACT_MODULE_ADDED)
             impacted_modules |= matched_modules
+        section_tuple = (section.doc, section.section_id)
+        repaired_ids = (repaired_diagrams or {}).get(section_tuple, ())
+        stale_ids = (stale_diagrams or {}).get(section_tuple, ())
         previous_section_hashes = (previous_hashes.get(section.doc) or {}).get(section.section_id)
         # Only compare against hashes state.json recorded at the previous index run. A
         # section with no recorded hash (e.g. just written by the docs assembler) is not
         # a change, otherwise every injected diagram would trigger a spurious worker run.
-        if previous_section_hashes is not None and previous_section_hashes != dict(
-            section.diagram_hashes
-        ):
+        if stale_ids:
             reasons.add(IMPACT_DIAGRAM_CHANGED)
+        elif previous_section_hashes is not None:
+            unrepaired_ids = (
+                set(previous_section_hashes) | set(section.diagram_hashes)
+            ) - set(repaired_ids)
+            if any(
+                previous_section_hashes.get(diagram_id) != section.diagram_hashes.get(diagram_id)
+                for diagram_id in unrepaired_ids
+            ):
+                reasons.add(IMPACT_DIAGRAM_CHANGED)
         # A required section that was never written stays impacted until it has a body.
         if not section.has_body and not section.exempt:
             reasons.add(IMPACT_EMPTY_SECTION)

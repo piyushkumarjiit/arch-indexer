@@ -377,8 +377,18 @@ def replace_auto_diagram_block(doc_text: str, diagram_id: str, block: str) -> st
     slots, so a zero-token repair of a drifted diagram cannot reshape a document that
     was authored against a different set of diagrams.
     """
+    from arch_indexer.checks.citations import mask_fenced_code_blocks
 
-    def _replace(match: re.Match[str]) -> str:
-        return block if match.group("id").strip() == diagram_id else match.group(0)
-
-    return AUTO_DIAGRAM_BLOCK_RE.sub(_replace, doc_text)
+    masked_text = mask_fenced_code_blocks(doc_text)
+    parts: list[str] = []
+    last_end = 0
+    for match in AUTO_DIAGRAM_BLOCK_RE.finditer(masked_text):
+        if match.group("id").strip() != diagram_id:
+            continue
+        parts.append(doc_text[last_end : match.start()])
+        parts.append(block)
+        last_end = match.end()
+    if not parts:
+        return doc_text
+    parts.append(doc_text[last_end:])
+    return "".join(parts)
