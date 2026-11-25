@@ -1,0 +1,25 @@
+{
+  "data_stores": [],
+  "edges": [],
+  "external_sinks": [],
+  "generated_at_commit": "634d4e3909b32f4e701254e7b8975ec246cbcff3",
+  "include_tests": false,
+  "modules": [
+    {
+      "file_count": 1,
+      "id": "mod:app",
+      "language": "python",
+      "name": "app",
+      "path": "src",
+      "tier": "tree-sitter"
+    }
+  ],
+  "nodes": [],
+  "repo_name": "python",
+  "schema_version": "1.0",
+  "tier_summary": {
+    "scip_files": 0,
+    "treesitter_files": 1
+  },
+  "unresolved_refs_count": 0
+}

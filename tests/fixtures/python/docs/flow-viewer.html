@@ -1,0 +1,2992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Flow Viewer</title>
+  <style>
+/* arch-indexer flow-viewer stylesheet */
+:root {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border-color: #334155;
+  --accent-blue: #38bdf8;
+  --accent-cyan: #06b6d4;
+  --accent-emerald: #10b981;
+  --accent-amber: #f59e0b;
+  --accent-rose: #f43f5e;
+  --accent-indigo: #6366f1;
+  --accent-purple: #a855f7;
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Header & Top Bar */
+.topbar {
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  height: 56px;
+  z-index: 20;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-badge {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.repo-name {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  padding-left: 8px;
+  border-left: 1px solid var(--border-color);
+}
+
+.topbar-center {
+  flex: 1;
+  max-width: 460px;
+  margin: 0 20px;
+  position: relative;
+}
+
+.search-box {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 12px;
+  gap: 8px;
+}
+
+.search-box input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-family);
+}
+
+.search-box input::placeholder {
+  color: var(--text-muted);
+}
+
+.search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  display: none;
+  z-index: 50;
+}
+
+.search-dropdown.active {
+  display: block;
+}
+
+.search-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.search-item:hover {
+  background-color: var(--bg-tertiary);
+}
+
+.search-item-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.search-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-item-sub {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.btn:hover {
+  background-color: #475569;
+  border-color: #64748b;
+}
+
+.btn-primary {
+  background-color: #2563eb;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background-color: #1d4ed8;
+}
+
+/* Breadcrumb Bar */
+.breadcrumb-bar {
+  background-color: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border-color);
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  z-index: 10;
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.crumb {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.crumb:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+
+.crumb.active {
+  background-color: rgba(56, 189, 248, 0.15);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.crumb-sep {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.zoom-level-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--accent-cyan);
+}
+
+/* App Main Layout */
+.app-body {
+  display: flex;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Filter Sidebar */
+.sidebar {
+  width: 250px;
+  background-color: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  z-index: 15;
+  transition: transform 0.2s ease;
+}
+
+.sidebar.collapsed {
+  transform: translateX(-100%);
+  position: absolute;
+  height: 100%;
+}
+
+.sidebar-section {
+  padding: 14px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sidebar-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.filter-item input {
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.filter-item:hover {
+  color: var(--text-primary);
+}
+
+.count-pill {
+  margin-left: auto;
+  background-color: var(--bg-primary);
+  padding: 1px 5px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+/* Center Graph Canvas */
+.canvas-area {
+  flex: 1;
+  position: relative;
+  background-color: var(--bg-primary);
+  overflow: hidden;
+}
+
+.graph-svg {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+.graph-svg.dragging {
+  cursor: grabbing;
+}
+
+/* Floating Zoom Controls */
+.canvas-controls {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+}
+
+.control-btn {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.control-btn:hover {
+  background-color: var(--bg-tertiary);
+}
+
+/* Side Inspector Panel */
+.inspector-panel {
+  width: 340px;
+  background-color: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  transform: translateX(100%);
+  transition: transform 0.25s ease-in-out;
+  z-index: 20;
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+  overflow-y: auto;
+  user-select: text;
+}
+
+.inspector-panel.open {
+  transform: translateX(0);
+}
+
+.inspector-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inspector-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.close-btn:hover {
+  color: var(--text-primary);
+}
+
+.inspector-content {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.detail-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.detail-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background-color: var(--bg-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--accent-blue);
+}
+
+.links-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.link-item {
+  font-size: 12px;
+  padding: 4px 8px;
+  background-color: var(--bg-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+
+.link-item:hover {
+  border-color: var(--accent-blue);
+}
+
+/* Trace Walkthrough Bar */
+.trace-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background-color: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  padding: 12px 20px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 25;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.trace-bar.active {
+  display: flex;
+}
+
+.trace-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.trace-badge {
+  background-color: rgba(6, 182, 212, 0.15);
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.trace-step-text {
+  font-size: 13px;
+  font-weight: 500;
+  user-select: text;
+}
+
+.trace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* SVG Graph Elements */
+.svg-edge {
+  fill: none;
+  stroke: #475569;
+  stroke-width: 1.5;
+  transition: stroke 0.2s, stroke-width 0.2s;
+  cursor: pointer;
+}
+
+.svg-edge:hover {
+  stroke: var(--accent-blue);
+  stroke-width: 2.5;
+}
+
+.svg-edge.in-trace {
+  stroke: var(--accent-cyan);
+  stroke-width: 3;
+}
+
+.svg-edge.dimmed {
+  opacity: 0.15;
+}
+
+.svg-edge-label {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  fill: var(--text-muted);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.svg-node {
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.svg-node rect.node-box {
+  fill: var(--bg-secondary);
+  stroke: var(--border-color);
+  stroke-width: 1.5;
+  rx: 6;
+  ry: 6;
+  transition: all 0.2s;
+}
+
+.svg-node:hover rect.node-box {
+  stroke: var(--accent-blue);
+  fill: var(--bg-tertiary);
+}
+
+.svg-node.selected rect.node-box {
+  stroke: #facc15;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.5));
+}
+
+.svg-node.in-trace rect.node-box {
+  stroke: var(--accent-cyan);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 8px rgba(6, 182, 212, 0.6));
+}
+
+.svg-node.dimmed {
+  opacity: 0.2;
+}
+
+/* Kind-specific colors */
+.kind-entrypoint rect.node-box { border-left: 4px solid var(--accent-blue); stroke-left-color: var(--accent-blue); }
+.kind-datastore rect.node-box { stroke: var(--accent-emerald); }
+.kind-external_sink rect.node-box { stroke: var(--accent-amber); }
+.kind-module rect.node-box { stroke: var(--accent-indigo); }
+.kind-file_group rect.node-box { stroke: var(--text-muted); }
+.kind-file rect.node-box { stroke: var(--accent-cyan); }
+.kind-frontend_caller rect.node-box { stroke: var(--accent-purple); }
+
+.node-title {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--text-primary);
+  pointer-events: none;
+}
+
+.node-sub {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  fill: var(--text-muted);
+  pointer-events: none;
+}
+
+.node-badge {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  fill: var(--accent-blue);
+  text-anchor: end;
+  pointer-events: none;
+}
+
+.kind-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.badge-entrypoint { background-color: rgba(56, 189, 248, 0.2); color: var(--accent-blue); }
+.badge-service { background-color: rgba(99, 102, 241, 0.2); color: var(--accent-indigo); }
+.badge-datastore { background-color: rgba(16, 185, 129, 0.2); color: var(--accent-emerald); }
+.badge-external_sink { background-color: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+.badge-module { background-color: rgba(168, 85, 247, 0.2); color: var(--accent-purple); }
+.badge-file_group { background-color: rgba(148, 163, 184, 0.2); color: var(--text-secondary); }
+.badge-file { background-color: rgba(6, 182, 212, 0.2); color: var(--accent-cyan); }
+.badge-frontend_caller { background-color: rgba(244, 63, 94, 0.2); color: var(--accent-rose); }
+
+  </style>
+</head>
+<body>
+  <!-- Top Navbar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span>ARCH</span>
+        <span class="brand-badge">Viewer</span>
+      </div>
+      <span class="repo-name" id="repo-title">Loading...</span>
+    </div>
+
+    <div class="topbar-center">
+      <div class="search-box">
+        <span>🔍</span>
+        <input type="text" id="search-input" placeholder="Search routes, services, files..." autocomplete="off">
+      </div>
+      <div class="search-dropdown" id="search-dropdown"></div>
+    </div>
+
+    <div class="topbar-right">
+      <button class="btn" id="btn-load-file">📂 Load graph.json</button>
+      <input type="file" id="file-input" accept=".json,application/json" style="display:none">
+    </div>
+  </header>
+
+  <!-- Breadcrumb Navigation Bar -->
+  <div class="breadcrumb-bar">
+    <div class="breadcrumbs" id="breadcrumbs">
+      <div class="crumb active">System</div>
+    </div>
+    <div class="zoom-level-badge" id="zoom-level-badge">system</div>
+  </div>
+
+  <!-- App Body Layout -->
+  <div class="app-body">
+    <!-- Filter Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Modules</div>
+        <div class="filter-group" id="filter-modules"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Node Kinds</div>
+        <div class="filter-group" id="filter-kinds"></div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Indexing Tiers</div>
+        <div class="filter-group" id="filter-tiers"></div>
+      </div>
+    </aside>
+
+    <!-- Canvas SVG Viewport -->
+    <main class="canvas-area">
+      <svg id="canvas-svg" class="graph-svg">
+        <g id="viewport"></g>
+      </svg>
+
+      <!-- Zoom / Pan Controls -->
+      <div class="canvas-controls">
+        <button class="control-btn" id="btn-zoom-in" title="Zoom In">+</button>
+        <button class="control-btn" id="btn-zoom-out" title="Zoom Out">&minus;</button>
+        <button class="control-btn" id="btn-zoom-reset" title="Reset View">&#x2318;</button>
+      </div>
+
+      <!-- Guided Trace Walkthrough Bar -->
+      <div class="trace-bar" id="trace-bar">
+        <div class="trace-info">
+          <span class="trace-badge">Trace Mode</span>
+          <span class="trace-step-text" id="trace-step-text">Tracing flow...</span>
+        </div>
+        <div class="trace-actions">
+          <button class="btn" id="btn-prev-step">&larr; Prev Step</button>
+          <button class="btn btn-primary" id="btn-next-step">Next Step &rarr;</button>
+          <button class="btn" id="btn-exit-trace">&times; Exit Trace</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Side Inspector Panel -->
+    <aside class="inspector-panel" id="inspector-panel">
+      <div class="inspector-header">
+        <span class="inspector-title">Inspector</span>
+        <button class="close-btn" id="btn-close-inspector">&times;</button>
+      </div>
+      <div class="inspector-content" id="inspector-content">
+        <div style="color:var(--text-muted);font-size:13px;">Select a node or edge to inspect details.</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Embedded Architecture Graph Data -->
+  <script id="arch-graph-data" type="application/json">{"data_stores": [], "edges": [], "external_sinks": [], "generated_at_commit": "634d4e3909b32f4e701254e7b8975ec246cbcff3", "include_tests": false, "modules": [{"file_count": 1, "id": "mod:app", "language": "python", "name": "app", "path": "src", "tier": "tree-sitter"}], "nodes": [], "repo_name": "python", "schema_version": "1.0", "tier_summary": {"scip_files": 0, "treesitter_files": 1}, "unresolved_refs_count": 0}</script>
+
+  <!-- Inlined Viewer Scripts -->
+  <script>
+/**
+ * arch-indexer flow-viewer logic module
+ * Pure JavaScript logic for hierarchy derivation, state management,
+ * deterministic layered layout, guided flow traces, and node focus.
+ * Works in Node.js (CommonJS) and browser.
+ */
+
+(function (root, factory) {
+  if (typeof module === "object" && module.exports) {
+    module.exports = factory();
+  } else {
+    root.ArchViewerLogic = factory();
+  }
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  /**
+   * Helper to safely extract directory path from a file path.
+   */
+  function getDirectory(filePath) {
+    if (!filePath) return "";
+    const idx = filePath.lastIndexOf("/");
+    return idx >= 0 ? filePath.substring(0, idx) : "";
+  }
+
+  /**
+   * Helper to extract filename basename.
+   */
+  function getBasename(filePath) {
+    if (!filePath) return "";
+    const idx = filePath.lastIndexOf("/");
+    return idx >= 0 ? filePath.substring(idx + 1) : filePath;
+  }
+
+  const FILTER_KINDS = [
+    "entrypoint",
+    "service",
+    "module",
+    "datastore",
+    "external_sink",
+    "frontend_caller",
+  ];
+
+  const FILTER_TIERS = ["scip", "tree-sitter"];
+
+  function isBoundaryKind(node) {
+    const kind = (node && node.kind) || "";
+    return kind === "datastore" || kind === "external_sink";
+  }
+
+  function isLeafNode(node) {
+    return Boolean(node) && (node.level === "symbol" || isBoundaryKind(node));
+  }
+
+  function aggregatedEdgeKinds(edge) {
+    return Array.from(
+      new Set((edge.underlying || []).map((underlying) => underlying.kind).filter(Boolean))
+    ).sort();
+  }
+
+  function collectDescendantLeafIds(hierarchy, node, result) {
+    const ids = result || [];
+    if (!node) return ids;
+    if (isLeafNode(node)) {
+      ids.push(node.id);
+      return ids;
+    }
+    (node.children || []).forEach((childId) =>
+      collectDescendantLeafIds(hierarchy, hierarchy.nodeLookup.get(childId), ids)
+    );
+    return ids;
+  }
+
+  /**
+   * Build complete 5-level hierarchy tree and lookup tables from graph data.
+   * Levels: system -> module -> file_group (directory) -> file -> symbol/endpoint
+   * Plus data_stores and external_sinks.
+   */
+  function buildHierarchy(graph) {
+    const modules = graph.modules || [];
+    const nodes = graph.nodes || [];
+    const edges = graph.edges || [];
+    const dataStores = graph.data_stores || [];
+    const externalSinks = graph.external_sinks || [];
+
+    // Master node lookup: every node at any level has an entry
+    const nodeLookup = new Map();
+    // Maps each node ID to its ancestor chain: [ { level, id, label }, ... ]
+    const ancestorMap = new Map();
+
+    // Map module paths to module IDs for auto-assignment if node.module_id is missing
+    const moduleByPath = new Map();
+    modules.forEach((mod) => {
+      if (mod.path) {
+        moduleByPath.set(mod.path.replace(/\/+$/, ""), mod.id);
+      }
+    });
+
+    // 1. System level container
+    const systemNode = {
+      id: "system",
+      level: "system",
+      label: graph.repo_name || "System",
+      kind: "system",
+      children: [],
+    };
+    nodeLookup.set("system", systemNode);
+    ancestorMap.set("system", [{ level: "system", id: "system", label: systemNode.label }]);
+
+    // 2. Add data stores to system level and lookup
+    dataStores.forEach((ds) => {
+      const node = {
+        id: ds.id,
+        level: "system",
+        kind: "datastore",
+        label: ds.label || ds.id,
+        storeKind: ds.kind,
+        evidence: ds.evidence || [],
+        tier: ds.tier || null,
+        file: (ds.evidence && ds.evidence[0]) ? ds.evidence[0].split(":")[0] : "",
+        line: (ds.evidence && ds.evidence[0]) ? parseInt(ds.evidence[0].split(":")[1], 10) : 0,
+      };
+      nodeLookup.set(ds.id, node);
+      ancestorMap.set(ds.id, [
+        { level: "system", id: "system", label: systemNode.label },
+        { level: "system", id: ds.id, label: node.label },
+      ]);
+      systemNode.children.push(ds.id);
+    });
+
+    // 3. Add external sinks to system level and lookup
+    externalSinks.forEach((ext) => {
+      const node = {
+        id: ext.id,
+        level: "system",
+        kind: "external_sink",
+        label: ext.label || ext.id,
+        sinkKind: ext.kind,
+        evidence: ext.evidence || [],
+        tier: ext.tier || null,
+        file: (ext.evidence && ext.evidence[0]) ? ext.evidence[0].split(":")[0] : "",
+        line: (ext.evidence && ext.evidence[0]) ? parseInt(ext.evidence[0].split(":")[1], 10) : 0,
+      };
+      nodeLookup.set(ext.id, node);
+      ancestorMap.set(ext.id, [
+        { level: "system", id: "system", label: systemNode.label },
+        { level: "system", id: ext.id, label: node.label },
+      ]);
+      systemNode.children.push(ext.id);
+    });
+
+    // 4. Map modules
+    const moduleMap = new Map();
+    modules.forEach((mod) => {
+      const modNode = {
+        id: mod.id,
+        level: "module",
+        kind: "module",
+        label: mod.name || mod.id,
+        language: mod.language,
+        path: mod.path,
+        tier: mod.tier || "scip",
+        fileCount: mod.file_count || 0,
+        symbolCount: 0,
+        children: [], // will contain directory IDs
+        files: new Set(),
+      };
+      moduleMap.set(mod.id, modNode);
+      nodeLookup.set(mod.id, modNode);
+      ancestorMap.set(mod.id, [
+        { level: "system", id: "system", label: systemNode.label },
+        { level: "module", id: mod.id, label: modNode.label },
+      ]);
+      systemNode.children.push(mod.id);
+    });
+
+    // Helper to find module ID for a file
+    function resolveModuleId(node) {
+      if (node.module_id && moduleMap.has(node.module_id)) {
+        return node.module_id;
+      }
+      if (node.file) {
+        // Match longest prefix against module paths
+        let bestModId = null;
+        let longestPath = -1;
+        for (const [modPath, modId] of moduleByPath.entries()) {
+          if (
+            (node.file === modPath || node.file.startsWith(`${modPath}/`)) &&
+            modPath.length > longestPath
+          ) {
+            longestPath = modPath.length;
+            bestModId = modId;
+          }
+        }
+        if (bestModId) return bestModId;
+      }
+      // If no module found, check if synthetic root module exists or create it
+      if (!moduleMap.has("mod:root")) {
+        const rootMod = {
+          id: "mod:root",
+          level: "module",
+          kind: "module",
+          label: "root",
+          path: "",
+          fileCount: 0,
+          symbolCount: 0,
+          children: [],
+          files: new Set(),
+        };
+        moduleMap.set("mod:root", rootMod);
+        nodeLookup.set("mod:root", rootMod);
+        ancestorMap.set("mod:root", [
+          { level: "system", id: "system", label: systemNode.label },
+          { level: "module", id: "mod:root", label: "root" },
+        ]);
+        systemNode.children.push("mod:root");
+      }
+      return "mod:root";
+    }
+
+    // 5. Build directories (file groups) and files
+    const dirMap = new Map();
+    const fileMap = new Map();
+
+    nodes.forEach((node) => {
+      // Data stores or external sinks embedded in nodes array
+      if (isBoundaryKind(node)) {
+        if (!nodeLookup.has(node.id)) {
+          nodeLookup.set(node.id, {
+            ...node,
+            level: "system",
+          });
+          ancestorMap.set(node.id, [
+            { level: "system", id: "system", label: systemNode.label },
+            { level: "system", id: node.id, label: node.label || node.id },
+          ]);
+          systemNode.children.push(node.id);
+        }
+        return;
+      }
+
+      const modId = resolveModuleId(node);
+      const modNode = moduleMap.get(modId);
+      const filePath = node.file || `unknown/${node.id}`;
+      modNode.files.add(filePath);
+
+      const dirPath = getDirectory(filePath) || modNode.path || ".";
+      const dirId = `dir:${dirPath}`;
+      const fileId = `file:${filePath}`;
+
+      // Create Directory (file group) if not exists
+      if (!dirMap.has(dirId)) {
+        const dirLabel = getBasename(dirPath) || dirPath;
+        const dirNode = {
+          id: dirId,
+          level: "file_group",
+          kind: "file_group",
+          label: dirLabel + "/",
+          fullPath: dirPath,
+          moduleId: modId,
+          fileCount: 0,
+          symbolCount: 0,
+          children: [], // will contain file IDs
+          files: new Set(),
+        };
+        dirMap.set(dirId, dirNode);
+        nodeLookup.set(dirId, dirNode);
+        modNode.children.push(dirId);
+        ancestorMap.set(dirId, [
+          { level: "system", id: "system", label: systemNode.label },
+          { level: "module", id: modId, label: modNode.label },
+          { level: "file_group", id: dirId, label: dirNode.label },
+        ]);
+      }
+      const dirNode = dirMap.get(dirId);
+      dirNode.files.add(filePath);
+
+      // Create File node if not exists
+      if (!fileMap.has(fileId)) {
+        const fileLabel = getBasename(filePath);
+        const fileNodeObj = {
+          id: fileId,
+          level: "file",
+          kind: "file",
+          label: fileLabel,
+          filePath: filePath,
+          dirId: dirId,
+          moduleId: modId,
+          symbolCount: 0,
+          children: [], // will contain leaf symbol IDs
+        };
+        fileMap.set(fileId, fileNodeObj);
+        nodeLookup.set(fileId, fileNodeObj);
+        dirNode.children.push(fileId);
+        ancestorMap.set(fileId, [
+          { level: "system", id: "system", label: systemNode.label },
+          { level: "module", id: modId, label: modNode.label },
+          { level: "file_group", id: dirId, label: dirNode.label },
+          { level: "file", id: fileId, label: fileNodeObj.label },
+        ]);
+      }
+      const fileNodeObj = fileMap.get(fileId);
+
+      // 6. Leaf symbol/endpoint node
+      const leafNode = {
+        ...node,
+        level: "symbol",
+        fileId: fileId,
+        dirId: dirId,
+        moduleId: modId,
+      };
+      nodeLookup.set(node.id, leafNode);
+      fileNodeObj.children.push(node.id);
+      ancestorMap.set(node.id, [
+        { level: "system", id: "system", label: systemNode.label },
+        { level: "module", id: modId, label: modNode.label },
+        { level: "file_group", id: dirId, label: dirNode.label },
+        { level: "file", id: fileId, label: fileNodeObj.label },
+        { level: "symbol", id: node.id, label: node.label || node.id },
+      ]);
+
+      // Increment counts
+      modNode.symbolCount++;
+      dirNode.symbolCount++;
+      fileNodeObj.symbolCount++;
+    });
+
+    // Update file counts on modules and directories
+    moduleMap.forEach((modNode) => {
+      modNode.fileCount = modNode.files.size;
+    });
+    dirMap.forEach((dirNode) => {
+      dirNode.fileCount = dirNode.files.size;
+    });
+
+    // Precompute incoming and outgoing edge lists for each leaf node
+    const outgoing = new Map();
+    const incoming = new Map();
+
+    edges.forEach((edge) => {
+      if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+      if (!incoming.has(edge.target)) incoming.set(edge.target, []);
+      outgoing.get(edge.source).push(edge);
+      incoming.get(edge.target).push(edge);
+    });
+
+    return {
+      systemNode,
+      modules: Array.from(moduleMap.values()),
+      dataStores,
+      externalSinks,
+      nodeLookup,
+      ancestorMap,
+      outgoingEdges: outgoing,
+      incomingEdges: incoming,
+      rawGraph: graph,
+    };
+  }
+
+  /**
+   * Resolve which node represents a given leaf node ID at a specific hierarchy level.
+   */
+  function mapNodeToLevel(hierarchy, nodeId, targetLevel, targetScope) {
+    const ancestors = hierarchy.ancestorMap.get(nodeId);
+    if (!ancestors) return nodeId;
+
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const crumb = ancestors[i];
+      if (crumb.level === targetLevel) {
+        return crumb.id;
+      }
+    }
+    // If targetLevel is not in ancestors (e.g. datastore/sink at module level)
+    return nodeId;
+  }
+
+  /**
+   * Filter semantics, defined once here for every group (modules, kinds, tiers):
+   * each group holds the explicit set of selected values. All values selected means no
+   * restriction; an empty set excludes every leaf in that group (the UI shows an empty
+   * state). A container is visible when at least one leaf beneath it passes all groups;
+   * an aggregate edge is visible when at least one underlying raw edge connects leaves
+   * that pass all groups. A container with no leaves is visible only when every group is
+   * fully selected.
+   */
+
+  /**
+   * Check whether a leaf node (symbol, data store, external sink) passes the filters.
+   */
+  function leafPassesFilters(node, activeFilters) {
+    if (!node) return false;
+    if (activeFilters.modules) {
+      if (activeFilters.modules.size === 0) return false;
+      if (node.moduleId && !activeFilters.modules.has(node.moduleId)) return false;
+    }
+    if (activeFilters.kinds) {
+      if (activeFilters.kinds.size === 0 || !activeFilters.kinds.has(node.kind)) return false;
+    }
+    if (activeFilters.tiers) {
+      if (activeFilters.tiers.size === 0) return false;
+      if (node.tier && !activeFilters.tiers.has(node.tier)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Check whether every filter group holds all of its selectable values.
+   */
+  function areAllFilterGroupsSelected(hierarchy, activeFilters) {
+    if (activeFilters.modules) {
+      const selected = activeFilters.modules;
+      if (!hierarchy.modules.every((mod) => selected.has(mod.id))) return false;
+    }
+    if (activeFilters.kinds && !FILTER_KINDS.every((kind) => activeFilters.kinds.has(kind))) {
+      return false;
+    }
+    if (activeFilters.tiers && !FILTER_TIERS.every((tier) => activeFilters.tiers.has(tier))) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Get visible nodes and aggregated edges for a given zoom level and scope.
+   */
+  function getHierarchyScope(hierarchy, level, scopeId, filters) {
+    const activeFilters = filters || { modules: null, kinds: null, tiers: null };
+    const nodeLookup = hierarchy.nodeLookup;
+    let nodeIds = [];
+    let boundaryNodeIds = new Set();
+
+    const passesLeaf = (node) => leafPassesFilters(node, activeFilters);
+    const allGroupsSelected = areAllFilterGroupsSelected(hierarchy, activeFilters);
+
+    const leafPresenceCache = new Map();
+    function hasLeaves(node) {
+      if (!node) return false;
+      if (leafPresenceCache.has(node.id)) return leafPresenceCache.get(node.id);
+      const result = isLeafNode(node)
+        ? true
+        : (node.children || []).some((childId) => hasLeaves(nodeLookup.get(childId)));
+      leafPresenceCache.set(node.id, result);
+      return result;
+    }
+
+    const passingLeafCache = new Map();
+    function hasPassingLeaf(node) {
+      if (!node) return false;
+      if (passingLeafCache.has(node.id)) return passingLeafCache.get(node.id);
+      let result;
+      if (isLeafNode(node)) {
+        result = passesLeaf(node);
+      } else if (!hasLeaves(node)) {
+        result = allGroupsSelected;
+      } else {
+        result = (node.children || []).some((childId) =>
+          hasPassingLeaf(nodeLookup.get(childId))
+        );
+      }
+      passingLeafCache.set(node.id, result);
+      return result;
+    }
+
+    if (level === "system") {
+      // Root level: modules + data stores + external sinks + frontend callers
+      hierarchy.systemNode.children.forEach((id) => nodeIds.push(id));
+    } else if (level === "module") {
+      // Drilled into a module: show directory (file_group) children
+      const modNode = nodeLookup.get(scopeId);
+      if (modNode && modNode.children) {
+        nodeIds.push(...modNode.children);
+      }
+      // Include connected data stores and external sinks as boundary context
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
+    } else if (level === "file_group") {
+      // Drilled into a directory: show file children
+      const dirNode = nodeLookup.get(scopeId);
+      if (dirNode && dirNode.children) {
+        nodeIds.push(...dirNode.children);
+      }
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
+    } else if (level === "file") {
+      // Drilled into a file: show symbol/endpoint children
+      const fileNode = nodeLookup.get(scopeId);
+      if (fileNode && fileNode.children) {
+        nodeIds.push(...fileNode.children);
+      }
+      collectConnectedSinksAndStores(hierarchy, scopeId, boundaryNodeIds, passesLeaf);
+    } else if (level === "symbol") {
+      // Focus on symbol and its 1-hop upstream and downstream neighbors
+      nodeIds.push(scopeId);
+      const outEdges = hierarchy.outgoingEdges.get(scopeId) || [];
+      const inEdges = hierarchy.incomingEdges.get(scopeId) || [];
+      outEdges.forEach((e) => nodeIds.push(e.target));
+      inEdges.forEach((e) => nodeIds.push(e.source));
+      nodeIds = Array.from(new Set(nodeIds));
+    }
+
+    // Merge boundary nodes (data stores / external sinks) into nodeIds
+    boundaryNodeIds.forEach((id) => {
+      if (!nodeIds.includes(id)) {
+        nodeIds.push(id);
+      }
+    });
+
+    let visibleNodes = nodeIds
+      .map((id) => nodeLookup.get(id))
+      .filter((n) => hasPassingLeaf(n));
+
+    // Create a Set of visible IDs for fast lookup
+    const visibleIdSet = new Set(visibleNodes.map((n) => n.id));
+
+    // Aggregate edges between visible nodes
+    const rawEdges = hierarchy.rawGraph.edges || [];
+    const edgeMap = new Map();
+
+    rawEdges.forEach((edge) => {
+      if (
+        !hasPassingLeaf(nodeLookup.get(edge.source)) ||
+        !hasPassingLeaf(nodeLookup.get(edge.target))
+      ) {
+        return;
+      }
+      const srcMapped = mapToVisible(hierarchy, edge.source, visibleIdSet);
+      const tgtMapped = mapToVisible(hierarchy, edge.target, visibleIdSet);
+      if (srcMapped && tgtMapped && srcMapped !== tgtMapped) {
+        const edgeKey = `${srcMapped}->${tgtMapped}`;
+        if (!edgeMap.has(edgeKey)) {
+          edgeMap.set(edgeKey, {
+            source: srcMapped,
+            target: tgtMapped,
+            count: 0,
+            underlying: [],
+          });
+        }
+        const aggEdge = edgeMap.get(edgeKey);
+        aggEdge.count++;
+        aggEdge.underlying.push(edge);
+      }
+    });
+
+    // Deterministic sort of nodes and edges
+    visibleNodes.sort((a, b) => a.id.localeCompare(b.id));
+    const visibleEdges = Array.from(edgeMap.values());
+    visibleEdges.forEach((edge) => {
+      edge.kinds = aggregatedEdgeKinds(edge);
+    });
+    visibleEdges.sort((a, b) => {
+      const keyA = `${a.source}->${a.target}`;
+      const keyB = `${b.source}->${b.target}`;
+      return keyA.localeCompare(keyB);
+    });
+
+    return {
+      level,
+      scopeId,
+      nodes: visibleNodes,
+      edges: visibleEdges,
+    };
+  }
+
+  /**
+   * Helper to find visible ancestor of a leaf node.
+   */
+  function mapToVisible(hierarchy, nodeId, visibleIdSet) {
+    if (visibleIdSet.has(nodeId)) return nodeId;
+    const ancestors = hierarchy.ancestorMap.get(nodeId);
+    if (!ancestors) return null;
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      if (visibleIdSet.has(ancestors[i].id)) {
+        return ancestors[i].id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Helper to collect data stores and sinks connected to descendants of a scope node.
+   */
+  function collectConnectedSinksAndStores(hierarchy, scopeId, boundarySet, leafPasses) {
+    const scopeNode = hierarchy.nodeLookup.get(scopeId);
+    if (!scopeNode) return;
+
+    // Collect all descendant leaf IDs
+    const descendantIds = [];
+    function collectLeafs(n) {
+      if (!n) return;
+      if (n.level === "symbol") {
+        descendantIds.push(n.id);
+      } else if (n.children) {
+        n.children.forEach((cid) => collectLeafs(hierarchy.nodeLookup.get(cid)));
+      }
+    }
+    collectLeafs(scopeNode);
+
+    const addBoundary = (id) => {
+      const boundary = hierarchy.nodeLookup.get(id);
+      if (boundary && isBoundaryKind(boundary) && leafPasses(boundary)) {
+        boundarySet.add(id);
+      }
+    };
+
+    // For each passing leaf, check outgoing/incoming edges to datastores or sinks
+    descendantIds.forEach((lid) => {
+      const leaf = hierarchy.nodeLookup.get(lid);
+      if (!leafPasses(leaf)) return;
+      const outs = hierarchy.outgoingEdges.get(lid) || [];
+      outs.forEach((e) => addBoundary(e.target));
+      const ins = hierarchy.incomingEdges.get(lid) || [];
+      ins.forEach((e) => addBoundary(e.source));
+    });
+  }
+
+  /**
+   * Trace guided flow from an Entrypoint to all reachable Data Stores and External Sinks.
+   * Returns step-by-step path, auth metadata, and file:line citations.
+   */
+  function traceFlow(graph, entrypointId) {
+    const nodes = graph.nodes || [];
+    const edges = graph.edges || [];
+    const dataStores = graph.data_stores || [];
+    const externalSinks = graph.external_sinks || [];
+
+    const nodeMap = new Map();
+    nodes.forEach((n) => nodeMap.set(n.id, n));
+    dataStores.forEach((d) => nodeMap.set(d.id, { ...d, kind: "datastore" }));
+    externalSinks.forEach((e) => nodeMap.set(e.id, { ...e, kind: "external_sink" }));
+
+    const entryNode = nodeMap.get(entrypointId);
+    if (!entryNode) {
+      return {
+        entrypointId,
+        entrypoint: null,
+        reachableSinks: [],
+        reachableNodes: [],
+        reachableEdges: [],
+        paths: [],
+        steps: [],
+      };
+    }
+
+    // Build forward and backward adjacency maps
+    const forwardAdj = new Map();
+    const backwardAdj = new Map();
+
+    edges.forEach((edge) => {
+      if (!forwardAdj.has(edge.source)) forwardAdj.set(edge.source, []);
+      forwardAdj.get(edge.source).push(edge);
+
+      if (!backwardAdj.has(edge.target)) backwardAdj.set(edge.target, []);
+      backwardAdj.get(edge.target).push(edge);
+    });
+
+    const isTarget = (id) => {
+      const n = nodeMap.get(id);
+      return Boolean(n) && isBoundaryKind(n);
+    };
+
+    // 1. Forward BFS from entrypointId tracking shortest path tree via parent pointers
+    const visitedForward = new Set([entrypointId]);
+    const parentMap = new Map(); // childId -> { from: parentId, edge }
+    const queue = [entrypointId];
+    const reachedSinks = [];
+    const reachedSinkIds = new Set();
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+
+      if (isTarget(current) && current !== entrypointId) {
+        if (!reachedSinkIds.has(current)) {
+          reachedSinkIds.add(current);
+          reachedSinks.push(nodeMap.get(current));
+        }
+        // Targets are sinks, don't expand further downstream from them
+        continue;
+      }
+
+      const nextEdges = forwardAdj.get(current) || [];
+      for (const e of nextEdges) {
+        if (!visitedForward.has(e.target)) {
+          visitedForward.add(e.target);
+          parentMap.set(e.target, { from: current, edge: e });
+          queue.push(e.target);
+        }
+      }
+    }
+
+    // 2. Backward BFS from reached sinks within the forward-reachable subgraph
+    let reachableNodesSet;
+    let reachableEdgesSet;
+
+    if (reachedSinks.length > 0) {
+      const visitedBackward = new Set(reachedSinkIds);
+      const queueBack = Array.from(reachedSinkIds);
+
+      while (queueBack.length > 0) {
+        const current = queueBack.shift();
+        const incomingEdges = backwardAdj.get(current) || [];
+        for (const e of incomingEdges) {
+          const u = e.source;
+          if (visitedForward.has(u) && !visitedBackward.has(u)) {
+            visitedBackward.add(u);
+            queueBack.push(u);
+          }
+        }
+      }
+
+      // Nodes on any path from entrypoint to a sink: intersection of visitedForward & visitedBackward
+      reachableNodesSet = new Set();
+      visitedForward.forEach((id) => {
+        if (visitedBackward.has(id)) {
+          reachableNodesSet.add(id);
+        }
+      });
+      // Always ensure entrypoint is in reachableNodes
+      reachableNodesSet.add(entrypointId);
+
+      // Edges connecting nodes in reachableNodesSet
+      reachableEdgesSet = new Set();
+      edges.forEach((e) => {
+        if (reachableNodesSet.has(e.source) && reachableNodesSet.has(e.target)) {
+          reachableEdgesSet.add(`${e.source}->${e.target}`);
+        }
+      });
+    } else {
+      // If no sinks reached, include the entire forward reachable closure
+      reachableNodesSet = visitedForward;
+      reachableEdgesSet = new Set();
+      edges.forEach((e) => {
+        if (visitedForward.has(e.source) && visitedForward.has(e.target)) {
+          reachableEdgesSet.add(`${e.source}->${e.target}`);
+        }
+      });
+    }
+
+    // 3. Reconstruct shortest path(s) using parent pointers for the step walkthrough
+    const paths = [];
+    if (reachedSinks.length > 0) {
+      // Build a path for each reached sink (deterministic sort by sink ID)
+      reachedSinks.sort((a, b) => a.id.localeCompare(b.id));
+      reachedSinks.forEach((sink) => {
+        const path = [];
+        let curr = sink.id;
+        while (curr) {
+          path.push(curr);
+          if (curr === entrypointId) break;
+          const p = parentMap.get(curr);
+          curr = p ? p.from : null;
+        }
+        if (path[path.length - 1] === entrypointId) {
+          path.reverse();
+          paths.push(path);
+        }
+      });
+    }
+
+    const primaryPath = paths.length > 0 ? paths[0] : [entrypointId];
+
+    // 4. Build step walkthrough
+    const steps = [];
+    primaryPath.forEach((nodeId, idx) => {
+      const n = nodeMap.get(nodeId) || { id: nodeId, label: nodeId, kind: "unknown" };
+      let fileLine = "";
+      if (n.file && n.line) {
+        fileLine = `${n.file}:${n.line}`;
+      } else if (n.evidence && n.evidence.length > 0) {
+        fileLine = n.evidence[0];
+      }
+
+      const authGuards = (n.metadata && n.metadata.auth) || [];
+
+      steps.push({
+        stepIndex: idx + 1,
+        nodeId: n.id,
+        label: n.label || n.id,
+        kind: n.kind,
+        fileLine,
+        auth: authGuards,
+        tier: n.tier || "scip",
+        description:
+          n.kind === "entrypoint"
+            ? `Entrypoint: ${n.label}${authGuards.length ? ` (Auth: ${authGuards.join(", ")})` : ""}`
+            : n.kind === "datastore"
+            ? `Data Store: ${n.label}`
+            : n.kind === "external_sink"
+            ? `External Sink: ${n.label}`
+            : `Service: ${n.label}`,
+      });
+    });
+
+    return {
+      entrypointId,
+      entrypoint: entryNode,
+      reachableSinks: reachedSinks,
+      reachableNodes: Array.from(reachableNodesSet).sort(),
+      reachableEdges: Array.from(reachableEdgesSet).sort(),
+      paths,
+      steps,
+    };
+  }
+
+  /**
+   * Deterministic layered layout algorithm by kind:
+   * Layer 0: Frontend (frontend_caller)
+   * Layer 1: Entrypoints (entrypoint)
+   * Layer 2: Services / Modules / Files / File Groups
+   * Layer 3: Data Stores & External Sinks (datastore, external_sink)
+   */
+  function computeLayeredLayout(nodes, edges, options) {
+    const opts = options || {};
+    const colGap = opts.colGap || 140;
+    const rowGap = opts.rowGap || 40;
+    const nodeWidth = opts.nodeWidth || 220;
+    const nodeHeight = opts.nodeHeight || 70;
+    const paddingX = opts.paddingX || 60;
+    const paddingY = opts.paddingY || 60;
+
+    // 1. Group nodes into layers
+    const layers = [[], [], [], []];
+
+    function getLayerIndex(node) {
+      const kind = (node.kind || "").toLowerCase();
+      if (kind === "frontend_caller") return 0;
+      if (kind === "entrypoint") return 1;
+      if (isBoundaryKind(node)) return 3;
+      return 2; // default: services, modules, directories, files
+    }
+
+    nodes.forEach((node) => {
+      const lIdx = getLayerIndex(node);
+      layers[lIdx].push(node);
+    });
+
+    // 2. Deterministic sorting inside each layer by ID
+    for (let l = 0; l < 4; l++) {
+      layers[l].sort((a, b) => a.id.localeCompare(b.id));
+    }
+
+    // 3. Compute (x, y) coordinates
+    const layoutNodes = [];
+    const nodeCoordMap = new Map();
+
+    // Find max layer height to center smaller columns vertically
+    let maxHeight = 0;
+    layers.forEach((layer) => {
+      const h = layer.length * nodeHeight + Math.max(0, layer.length - 1) * rowGap;
+      if (h > maxHeight) maxHeight = h;
+    });
+
+    layers.forEach((layer, layerIdx) => {
+      const colX = paddingX + layerIdx * (nodeWidth + colGap);
+      const colHeight = layer.length * nodeHeight + Math.max(0, layer.length - 1) * rowGap;
+      const startY = paddingY + Math.max(0, (maxHeight - colHeight) / 2);
+
+      layer.forEach((node, rowIdx) => {
+        const x = colX;
+        const y = startY + rowIdx * (nodeHeight + rowGap);
+        const layoutNode = {
+          ...node,
+          x,
+          y,
+          width: nodeWidth,
+          height: nodeHeight,
+          layer: layerIdx,
+        };
+        layoutNodes.push(layoutNode);
+        nodeCoordMap.set(node.id, layoutNode);
+      });
+    });
+
+    // 4. Compute edge routes (smooth cubic bezier curves)
+    const layoutEdges = [];
+
+    edges.forEach((edge) => {
+      const srcNode = nodeCoordMap.get(edge.source);
+      const tgtNode = nodeCoordMap.get(edge.target);
+
+      if (srcNode && tgtNode) {
+        let x1, y1, x2, y2, pathD;
+
+        if (tgtNode.x > srcNode.x) {
+          // Standard left-to-right edge
+          x1 = srcNode.x + srcNode.width;
+          y1 = srcNode.y + srcNode.height / 2;
+          x2 = tgtNode.x;
+          y2 = tgtNode.y + tgtNode.height / 2;
+          const dx = (x2 - x1) * 0.5;
+          pathD = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+        } else if (tgtNode.x === srcNode.x) {
+          // Same column edge: route outward to the right
+          x1 = srcNode.x + srcNode.width;
+          y1 = srcNode.y + srcNode.height / 2;
+          x2 = tgtNode.x + tgtNode.width;
+          y2 = tgtNode.y + tgtNode.height / 2;
+          const cx = Math.max(x1, x2) + 40;
+          pathD = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+        } else {
+          // Backward edge: route over or under
+          x1 = srcNode.x;
+          y1 = srcNode.y + srcNode.height / 2;
+          x2 = tgtNode.x + tgtNode.width;
+          y2 = tgtNode.y + tgtNode.height / 2;
+          const cy = Math.min(y1, y2) - 40;
+          pathD = `M ${x1} ${y1} C ${x1 - 30} ${cy}, ${x2 + 30} ${cy}, ${x2} ${y2}`;
+        }
+
+        layoutEdges.push({
+          ...edge,
+          x1,
+          y1,
+          x2,
+          y2,
+          d: pathD,
+        });
+      }
+    });
+
+    // Compute bounding box
+    const totalWidth = paddingX * 2 + 4 * nodeWidth + 3 * colGap;
+    const totalHeight = paddingY * 2 + maxHeight;
+
+    return {
+      nodes: layoutNodes,
+      edges: layoutEdges,
+      width: totalWidth,
+      height: Math.max(400, totalHeight),
+    };
+  }
+
+  /**
+   * Search across all nodes in the hierarchy.
+   */
+  function searchNodes(graph, query, limit) {
+    if (!query || !query.trim()) return [];
+    const maxResults = limit || 20;
+    const q = query.trim().toLowerCase();
+    const results = [];
+
+    const nodes = graph.nodes || [];
+    const modules = graph.modules || [];
+    const dataStores = graph.data_stores || [];
+    const externalSinks = graph.external_sinks || [];
+
+    // Search nodes
+    for (const n of nodes) {
+      const idMatch = (n.id || "").toLowerCase().includes(q);
+      const labelMatch = (n.label || "").toLowerCase().includes(q);
+      const symbolMatch = (n.symbol || "").toLowerCase().includes(q);
+      const fileMatch = (n.file || "").toLowerCase().includes(q);
+
+      if (idMatch || labelMatch || symbolMatch || fileMatch) {
+        results.push({
+          id: n.id,
+          label: n.label || n.id,
+          kind: n.kind,
+          file: n.file,
+          line: n.line,
+          symbol: n.symbol,
+          score: labelMatch ? 1 : symbolMatch ? 2 : idMatch ? 3 : 4,
+        });
+      }
+    }
+
+    // Search modules
+    for (const m of modules) {
+      if ((m.name || "").toLowerCase().includes(q) || (m.id || "").toLowerCase().includes(q)) {
+        results.push({
+          id: m.id,
+          label: m.name || m.id,
+          kind: "module",
+          file: m.path,
+          score: 1,
+        });
+      }
+    }
+
+    // Search stores and sinks
+    for (const ds of dataStores) {
+      if ((ds.label || "").toLowerCase().includes(q) || (ds.id || "").toLowerCase().includes(q)) {
+        results.push({
+          id: ds.id,
+          label: ds.label || ds.id,
+          kind: "datastore",
+          score: 1,
+        });
+      }
+    }
+
+    for (const ext of externalSinks) {
+      if ((ext.label || "").toLowerCase().includes(q) || (ext.id || "").toLowerCase().includes(q)) {
+        results.push({
+          id: ext.id,
+          label: ext.label || ext.id,
+          kind: "external_sink",
+          score: 1,
+        });
+      }
+    }
+
+    results.sort((a, b) => a.score - b.score || a.id.localeCompare(b.id));
+    return results.slice(0, maxResults);
+  }
+
+  /**
+   * Get detailed metadata for the side panel inspection.
+   */
+  function getNodeDetails(hierarchy, nodeId) {
+    const node = hierarchy.nodeLookup.get(nodeId);
+    if (!node) return null;
+
+    const leafScoped = isLeafNode(node);
+    const leafIds = leafScoped ? [node.id] : collectDescendantLeafIds(hierarchy, node);
+
+    const mapOtherEndpoint = (otherId) => {
+      if (leafScoped) return otherId;
+      const ancestors = hierarchy.ancestorMap.get(otherId);
+      if (!ancestors) return otherId;
+      for (let i = ancestors.length - 1; i >= 0; i--) {
+        if (ancestors[i].level === node.level) return ancestors[i].id;
+      }
+      return otherId;
+    };
+
+    const aggregateConnected = (direction) => {
+      const entries = new Map();
+      leafIds.forEach((leafId) => {
+        const edges =
+          (direction === "out"
+            ? hierarchy.outgoingEdges.get(leafId)
+            : hierarchy.incomingEdges.get(leafId)) || [];
+        edges.forEach((edge) => {
+          const mappedId = mapOtherEndpoint(direction === "out" ? edge.target : edge.source);
+          if (!leafScoped && mappedId === node.id) return;
+          if (!entries.has(mappedId)) {
+            const other = hierarchy.nodeLookup.get(mappedId);
+            entries.set(mappedId, {
+              id: mappedId,
+              label: other ? other.label || other.id : mappedId,
+              kind: other ? other.kind : "unknown",
+              kinds: new Set(),
+              count: 0,
+              file: edge.file,
+              line: edge.line,
+            });
+          }
+          const entry = entries.get(mappedId);
+          if (edge.kind) entry.kinds.add(edge.kind);
+          entry.count++;
+        });
+      });
+      return Array.from(entries.values())
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          kind: entry.kind,
+          edgeKind: Array.from(entry.kinds).sort().join(", "),
+          count: entry.count,
+          file: entry.file,
+          line: entry.line,
+        }));
+    };
+
+    const uses = aggregateConnected("out");
+    const usedBy = aggregateConnected("in");
+
+    let tier = node.tier || null;
+    if (!leafScoped) {
+      const leafTiers = Array.from(
+        new Set(
+          leafIds
+            .map((leafId) => hierarchy.nodeLookup.get(leafId))
+            .map((leaf) => leaf && leaf.tier)
+            .filter(Boolean)
+        )
+      ).sort();
+      if (leafTiers.length > 0) tier = leafTiers.join(", ");
+    }
+
+    let citation = "";
+    if (node.file && node.line) {
+      citation = `${node.file}:${node.line}`;
+    } else if (node.evidence && node.evidence.length > 0) {
+      citation = node.evidence.join(", ");
+    }
+
+    const authGuards = (node.metadata && node.metadata.auth) || [];
+
+    return {
+      id: node.id,
+      label: node.label || node.id,
+      kind: node.kind,
+      level: node.level,
+      isLeaf: leafScoped,
+      tier,
+      citation,
+      file: node.file,
+      line: node.line,
+      symbol: node.symbol,
+      auth: authGuards,
+      fileCount: node.fileCount || 0,
+      symbolCount: node.symbolCount || 0,
+      metadata: node.metadata || {},
+      evidence: node.evidence || [],
+      uses,
+      usedBy,
+      canDrillDown: Boolean(node.children && node.children.length > 0),
+    };
+  }
+
+  /**
+   * Complete ViewerState class managing zoom levels, breadcrumbs, selection, and filters.
+   */
+  class ViewerState {
+    constructor(graph) {
+      this.graph = graph;
+      this.hierarchy = buildHierarchy(graph);
+      this.currentLevel = "system";
+      this.currentScope = "system";
+      this.selectedNodeId = null;
+      this.breadcrumbs = [{ level: "system", id: "system", label: this.hierarchy.systemNode.label }];
+      this.filters = {
+        modules: new Set(this.hierarchy.modules.map((mod) => mod.id)),
+        kinds: new Set(FILTER_KINDS),
+        tiers: new Set(FILTER_TIERS),
+      };
+      this.trace = null;
+    }
+
+    setBreadcrumbs(ancestors, scopeId) {
+      const systemCrumb = {
+        level: "system",
+        id: "system",
+        label: this.hierarchy.systemNode.label,
+      };
+      if (scopeId === "system") {
+        this.breadcrumbs = [systemCrumb];
+        return;
+      }
+      const scopeIndex = ancestors.findIndex((crumb) => crumb.id === scopeId);
+      this.breadcrumbs = scopeIndex >= 0 ? ancestors.slice(0, scopeIndex + 1) : [systemCrumb];
+    }
+
+    /**
+     * Drill down one level into a node.
+     */
+    drillDown(nodeId) {
+      if (this.trace) this.stopTrace();
+      const node = this.hierarchy.nodeLookup.get(nodeId);
+      if (!node) return false;
+
+      let nextLevel = null;
+      if (node.kind === "module" || node.level === "module") {
+        nextLevel = "module";
+      } else if (node.kind === "file_group" || node.level === "file_group") {
+        nextLevel = "file_group";
+      } else if (node.kind === "file" || node.level === "file") {
+        nextLevel = "file";
+      } else if (
+        node.level === "symbol" ||
+        node.kind === "service" ||
+        node.kind === "entrypoint" ||
+        node.kind === "frontend_caller"
+      ) {
+        nextLevel = "symbol";
+      }
+
+      if (!nextLevel) return false;
+
+      const ancestors = this.hierarchy.ancestorMap.get(nodeId);
+      if (!ancestors) return false;
+
+      this.selectedNodeId = nodeId;
+      this.setBreadcrumbs(ancestors, nodeId);
+      const scope = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = scope.level;
+      this.currentScope = scope.id;
+      return true;
+    }
+
+    /**
+     * Navigate up one level in hierarchy.
+     */
+    goUp() {
+      if (this.trace) this.stopTrace();
+      if (this.breadcrumbs.length <= 1) return false;
+      this.breadcrumbs.pop();
+      const parent = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = parent.level;
+      this.currentScope = parent.id;
+      this.selectedNodeId = parent.id === "system" ? null : parent.id;
+      return true;
+    }
+
+    /**
+     * Jump directly to a breadcrumb index.
+     */
+    goToBreadcrumb(index) {
+      if (this.trace) this.stopTrace();
+      if (index < 0 || index >= this.breadcrumbs.length) return false;
+      this.breadcrumbs = this.breadcrumbs.slice(0, index + 1);
+      const target = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = target.level;
+      this.currentScope = target.id;
+      this.selectedNodeId = target.id === "system" ? null : target.id;
+      return true;
+    }
+
+    /**
+     * Focus on a node by ID (for #node=<id> routing or search selection).
+     * Navigates the hierarchy so the node is visible, selects it, and sets breadcrumbs.
+     */
+    focusNode(nodeId) {
+      if (this.trace) this.stopTrace();
+      const node = this.hierarchy.nodeLookup.get(nodeId);
+      if (!node) return false;
+
+      const ancestors = this.hierarchy.ancestorMap.get(nodeId);
+      if (!ancestors || ancestors.length === 0) return false;
+
+      this.selectedNodeId = nodeId;
+
+      const parentLevels = {
+        symbol: "file",
+        file: "file_group",
+        file_group: "module",
+        module: "system",
+      };
+      const parentLevel = parentLevels[node.level];
+      let scopeId = "system";
+      if (parentLevel && parentLevel !== "system") {
+        const parent = ancestors.find((crumb) => crumb.level === parentLevel);
+        if (parent) {
+          scopeId = parent.id;
+        }
+      }
+
+      this.setBreadcrumbs(ancestors, scopeId);
+      const scope = this.breadcrumbs[this.breadcrumbs.length - 1];
+      this.currentLevel = scope.level;
+      this.currentScope = scope.id;
+      return true;
+    }
+
+    /**
+     * Start guided flow trace mode for an entrypoint.
+     */
+    startTrace(entrypointId) {
+      this.trace = traceFlow(this.graph, entrypointId);
+      return this.trace;
+    }
+
+    /**
+     * Stop guided flow trace mode.
+     */
+    stopTrace() {
+      this.trace = null;
+    }
+
+    /**
+     * Get current view nodes and layout.
+     */
+    getCurrentView(options) {
+      if (this.trace) {
+        // Trace mode: isolate and display the full transitive trace subgraph
+        const traceNodeIds = new Set(this.trace.reachableNodes);
+        const traceNodes = [];
+        traceNodeIds.forEach((id) => {
+          const n = this.hierarchy.nodeLookup.get(id);
+          if (n) traceNodes.push(n);
+        });
+
+        const rawEdges = this.graph.edges || [];
+        const edgeMap = new Map();
+
+        rawEdges.forEach((e) => {
+          if (traceNodeIds.has(e.source) && traceNodeIds.has(e.target)) {
+            const key = `${e.source}->${e.target}`;
+            if (!edgeMap.has(key)) {
+              edgeMap.set(key, {
+                source: e.source,
+                target: e.target,
+                count: 0,
+                underlying: [],
+              });
+            }
+            const agg = edgeMap.get(key);
+            agg.count++;
+            agg.underlying.push(e);
+          }
+        });
+
+        traceNodes.sort((a, b) => a.id.localeCompare(b.id));
+        const edgesList = Array.from(edgeMap.values());
+        edgesList.forEach((edge) => {
+          edge.kinds = aggregatedEdgeKinds(edge);
+        });
+        edgesList.sort((a, b) => {
+          return `${a.source}->${a.target}`.localeCompare(`${b.source}->${b.target}`);
+        });
+
+        const layout = computeLayeredLayout(traceNodes, edgesList, options);
+        return {
+          level: "trace",
+          scopeId: this.trace.entrypointId,
+          breadcrumbs: this.breadcrumbs,
+          selectedNodeId: this.selectedNodeId,
+          nodes: layout.nodes,
+          edges: layout.edges,
+          width: layout.width,
+          height: layout.height,
+          trace: this.trace,
+        };
+      }
+
+      const scopeData = getHierarchyScope(
+        this.hierarchy,
+        this.currentLevel,
+        this.currentScope,
+        this.filters
+      );
+      const layout = computeLayeredLayout(scopeData.nodes, scopeData.edges, options);
+      return {
+        level: this.currentLevel,
+        scopeId: this.currentScope,
+        breadcrumbs: this.breadcrumbs,
+        selectedNodeId: this.selectedNodeId,
+        nodes: layout.nodes,
+        edges: layout.edges,
+        width: layout.width,
+        height: layout.height,
+        trace: this.trace,
+      };
+    }
+  }
+
+  return {
+    buildHierarchy,
+    getHierarchyScope,
+    traceFlow,
+    computeLayeredLayout,
+    searchNodes,
+    getNodeDetails,
+    ViewerState,
+    areAllFilterGroupsSelected,
+    FILTER_KINDS,
+    FILTER_TIERS,
+  };
+});
+
+  </script>
+  <script>
+/**
+ * arch-indexer flow-viewer interactive UI controller
+ * Handles DOM events, SVG rendering, pan/zoom, search, inspector, trace mode, and file picker.
+ */
+
+(function () {
+  "use strict";
+
+  let state = null;
+  let svgEl = null;
+  let viewportEl = null;
+  let transform = { x: 40, y: 40, scale: 1.0 };
+  let isPanning = false;
+  let startX = 0;
+  let startY = 0;
+  let activeTraceStep = 0;
+
+  function init() {
+    svgEl = document.getElementById("canvas-svg");
+    viewportEl = document.getElementById("viewport");
+
+    // Load initial graph data from script tag
+    const dataEl = document.getElementById("arch-graph-data");
+    let initialGraph = null;
+    if (dataEl && dataEl.textContent) {
+      try {
+        initialGraph = JSON.parse(dataEl.textContent);
+      } catch (e) {
+        console.error("Failed to parse initial graph JSON:", e);
+      }
+    }
+
+    if (!initialGraph) {
+      initialGraph = {
+        schema_version: "1.0",
+        repo_name: "No Graph Loaded",
+        modules: [],
+        nodes: [],
+        edges: [],
+        data_stores: [],
+        external_sinks: [],
+      };
+    }
+
+    setupState(initialGraph);
+    setupPanZoom();
+    setupSearch();
+    setupFilePicker();
+    setupControls();
+
+    // Check for #node= in hash on load
+    handleHashChange();
+    window.addEventListener("hashchange", handleHashChange);
+  }
+
+  function setupState(graph) {
+    state = new ArchViewerLogic.ViewerState(graph);
+
+    // Update UI headers
+    const repoTitle = document.getElementById("repo-title");
+    if (repoTitle) repoTitle.textContent = graph.repo_name || "Repository Architecture";
+
+    setupFilterCheckboxes();
+    render();
+  }
+
+  function setupFilterCheckboxes() {
+    const modulesContainer = document.getElementById("filter-modules");
+    const kindsContainer = document.getElementById("filter-kinds");
+    const tiersContainer = document.getElementById("filter-tiers");
+
+    function selectedValues(container) {
+      return new Set(
+        Array.from(container.querySelectorAll("input"))
+          .filter((input) => input.checked)
+          .map((input) => input.value)
+      );
+    }
+
+    if (modulesContainer) {
+      modulesContainer.innerHTML = "";
+      state.hierarchy.modules.forEach((mod) => {
+        const label = document.createElement("label");
+        label.className = "filter-item";
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = mod.id;
+        input.checked = state.filters.modules.has(mod.id);
+
+        const span = document.createElement("span");
+        span.textContent = mod.name || mod.label || mod.id;
+
+        const count = document.createElement("span");
+        count.className = "count-pill";
+        count.textContent = String(mod.fileCount || 0);
+
+        label.appendChild(input);
+        label.appendChild(span);
+        label.appendChild(count);
+
+        input.addEventListener("change", () => {
+          state.filters.modules = selectedValues(modulesContainer);
+          render();
+        });
+        modulesContainer.appendChild(label);
+      });
+    }
+
+    if (kindsContainer) {
+      kindsContainer.innerHTML = "";
+      ArchViewerLogic.FILTER_KINDS.forEach((k) => {
+        const label = document.createElement("label");
+        label.className = "filter-item";
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = k;
+        input.checked = state.filters.kinds.has(k);
+
+        const span = document.createElement("span");
+        span.textContent = k.replace("_", " ");
+
+        label.appendChild(input);
+        label.appendChild(span);
+
+        input.addEventListener("change", () => {
+          state.filters.kinds = selectedValues(kindsContainer);
+          render();
+        });
+        kindsContainer.appendChild(label);
+      });
+    }
+
+    if (tiersContainer) {
+      tiersContainer.innerHTML = "";
+      ArchViewerLogic.FILTER_TIERS.forEach((t) => {
+        const label = document.createElement("label");
+        label.className = "filter-item";
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = t;
+        input.checked = state.filters.tiers.has(t);
+
+        const span = document.createElement("span");
+        span.textContent = t === "scip" ? "SCIP" : t === "tree-sitter" ? "Tree-sitter" : t;
+
+        label.appendChild(input);
+        label.appendChild(span);
+
+        input.addEventListener("change", () => {
+          state.filters.tiers = selectedValues(tiersContainer);
+          render();
+        });
+        tiersContainer.appendChild(label);
+      });
+    }
+  }
+
+  function render() {
+    if (!state.trace) activeTraceStep = 0;
+    updateTraceBar();
+    renderBreadcrumbs();
+    renderGraph();
+  }
+
+  function renderBreadcrumbs() {
+    const container = document.getElementById("breadcrumbs");
+    const zoomBadge = document.getElementById("zoom-level-badge");
+    if (!container) return;
+
+    container.innerHTML = "";
+    if (zoomBadge) {
+      zoomBadge.textContent = state.trace ? "flow trace" : state.currentLevel.replace("_", " ");
+    }
+
+    state.breadcrumbs.forEach((crumb, idx) => {
+      const isLast = idx === state.breadcrumbs.length - 1;
+      const crumbEl = document.createElement("div");
+      crumbEl.className = `crumb ${isLast ? "active" : ""}`;
+      crumbEl.textContent = crumb.label || crumb.id;
+      crumbEl.addEventListener("click", () => {
+        state.goToBreadcrumb(idx);
+        render();
+      });
+      container.appendChild(crumbEl);
+
+      if (!isLast) {
+        const sep = document.createElement("span");
+        sep.className = "crumb-sep";
+        sep.textContent = "›";
+        container.appendChild(sep);
+      }
+    });
+  }
+
+  function renderGraph() {
+    const view = state.getCurrentView();
+    if (!viewportEl) return;
+
+    viewportEl.innerHTML = "";
+
+    if (view.nodes.length === 0) {
+      const filtersHideNodes = !ArchViewerLogic.areAllFilterGroupsSelected(
+        state.hierarchy,
+        state.filters
+      );
+      const message = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      message.setAttribute("x", "40");
+      message.setAttribute("y", "80");
+      message.setAttribute("fill", "#64748b");
+      message.setAttribute("font-size", "16");
+      message.textContent = filtersHideNodes
+        ? "No nodes match the selected filters."
+        : "No nodes in this graph.";
+      viewportEl.appendChild(message);
+      return;
+    }
+
+    // 1. Defs (markers for arrowheads)
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    defs.innerHTML = `
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b" />
+      </marker>
+      <marker id="arrow-trace" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1 L 10 5 L 0 9 z" fill="#06b6d4" />
+      </marker>
+    `;
+    viewportEl.appendChild(defs);
+
+    const edgesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    edgesGroup.setAttribute("class", "edges-layer");
+    viewportEl.appendChild(edgesGroup);
+
+    const nodesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    nodesGroup.setAttribute("class", "nodes-layer");
+    viewportEl.appendChild(nodesGroup);
+
+    // Determine trace highlights
+    const isTraceActive = Boolean(state.trace);
+    const traceNodeSet = new Set(state.trace ? state.trace.reachableNodes : []);
+    const traceEdgeSet = new Set(state.trace ? state.trace.reachableEdges : []);
+    const currentStepNodeId =
+      isTraceActive && state.trace.steps[activeTraceStep]
+        ? state.trace.steps[activeTraceStep].nodeId
+        : null;
+
+    // 2. Render Edges
+    view.edges.forEach((edge) => {
+      const edgeKey = `${edge.source}->${edge.target}`;
+      const inTrace = isTraceActive && traceEdgeSet.has(edgeKey);
+      const isDimmed = isTraceActive && !inTrace;
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", edge.d);
+      path.setAttribute("class", `svg-edge ${inTrace ? "in-trace" : ""} ${isDimmed ? "dimmed" : ""}`);
+      path.setAttribute("marker-end", inTrace ? "url(#arrow-trace)" : "url(#arrow)");
+
+      path.addEventListener("click", () => {
+        showEdgeDetails(edge);
+      });
+      edgesGroup.appendChild(path);
+
+      if (edge.count && edge.count > 1) {
+        const midX = (edge.x1 + edge.x2) / 2;
+        const midY = (edge.y1 + edge.y2) / 2 - 6;
+        const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        txt.setAttribute("x", midX);
+        txt.setAttribute("y", midY);
+        txt.setAttribute("class", "svg-edge-label");
+        txt.textContent = `${edge.count} edges`;
+        edgesGroup.appendChild(txt);
+      }
+    });
+
+    // 3. Render Nodes
+    view.nodes.forEach((node) => {
+      const isSelected = state.selectedNodeId === node.id;
+      const inTrace = isTraceActive && traceNodeSet.has(node.id);
+      const isCurrentStep = node.id === currentStepNodeId;
+      const isDimmed = isTraceActive && !inTrace;
+
+      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      g.setAttribute("class", `svg-node kind-${node.kind} ${isSelected ? "selected" : ""} ${inTrace ? "in-trace" : ""} ${isDimmed ? "dimmed" : ""}`);
+      g.setAttribute("data-id", node.id);
+      g.setAttribute("transform", `translate(${node.x}, ${node.y})`);
+
+      // Rect box
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("class", "node-box");
+      rect.setAttribute("width", node.width);
+      rect.setAttribute("height", node.height);
+      if (isCurrentStep) {
+        rect.style.stroke = "#f59e0b";
+        rect.style.strokeWidth = "3px";
+      }
+      g.appendChild(rect);
+
+      // Title
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      title.setAttribute("class", "node-title");
+      title.setAttribute("x", 12);
+      title.setAttribute("y", 28);
+      title.textContent = truncate(node.label || node.id, 24);
+      g.appendChild(title);
+
+      // Subtitle / Citation / Count
+      const sub = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      sub.setAttribute("class", "node-sub");
+      sub.setAttribute("x", 12);
+      sub.setAttribute("y", 48);
+
+      if (node.level === "module") {
+        sub.textContent = `${node.fileCount || 0} files, ${node.symbolCount || 0} symbols`;
+      } else if (node.level === "file_group") {
+        sub.textContent = `${node.fileCount || 0} files`;
+      } else if (node.level === "file") {
+        sub.textContent = `${node.symbolCount || 0} symbols`;
+      } else if (node.file && node.line) {
+        sub.textContent = `${truncate(node.file, 20)}:${node.line}`;
+      } else if (node.evidence && node.evidence[0]) {
+        sub.textContent = truncate(node.evidence[0], 25);
+      } else {
+        sub.textContent = node.kind.replace("_", " ");
+      }
+      g.appendChild(sub);
+
+      // Kind badge on right top
+      const badge = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      badge.setAttribute("class", "node-badge");
+      badge.setAttribute("x", node.width - 12);
+      badge.setAttribute("y", 22);
+      badge.textContent = (node.tier || node.kind || "").substring(0, 8);
+      g.appendChild(badge);
+
+      // Click to select
+      g.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selectNode(node.id);
+      });
+
+      // Double-click to drill down
+      g.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        if (state.drillDown(node.id)) {
+          render();
+        }
+      });
+
+      nodesGroup.appendChild(g);
+    });
+
+    updateTransform();
+  }
+
+  function selectNode(nodeId) {
+    state.selectedNodeId = nodeId;
+    const details = ArchViewerLogic.getNodeDetails(state.hierarchy, nodeId);
+    showInspector(details);
+    renderGraph();
+  }
+
+  function navigateToNode(nodeId) {
+    if (!state || !nodeId || !state.focusNode(nodeId)) return false;
+    render();
+    selectNode(nodeId);
+    const target = `#node=${encodeURIComponent(nodeId)}`;
+    if (window.location.hash !== target) {
+      window.location.hash = target;
+    }
+    return true;
+  }
+
+  function showInspector(details) {
+    const panel = document.getElementById("inspector-panel");
+    const content = document.getElementById("inspector-content");
+    if (!panel || !content) return;
+
+    if (!details) {
+      panel.classList.remove("open");
+      return;
+    }
+
+    content.innerHTML = `
+      <div class="detail-row">
+        <span class="detail-label">Kind</span>
+        <div><span class="kind-badge badge-${escapeHtml(details.kind)}">${escapeHtml(details.kind.replace("_", " "))}</span></div>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">ID</span>
+        <span class="detail-value detail-mono">${escapeHtml(details.id)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Label</span>
+        <span class="detail-value" style="font-weight:600">${escapeHtml(details.label)}</span>
+      </div>
+      ${
+        details.symbol
+          ? `<div class="detail-row">
+              <span class="detail-label">Symbol</span>
+              <span class="detail-value detail-mono">${escapeHtml(details.symbol)}</span>
+            </div>`
+          : ""
+      }
+      ${
+        details.citation
+          ? `<div class="detail-row">
+              <span class="detail-label">Citation</span>
+              <span class="detail-value detail-mono">${escapeHtml(details.citation)}</span>
+            </div>`
+          : ""
+      }
+      <div class="detail-row">
+        <span class="detail-label">Indexing Tier</span>
+        <span class="detail-value">${escapeHtml(details.tier)}</span>
+      </div>
+      ${
+        details.auth && details.auth.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Auth Guards</span>
+              <div class="tag-list">${details.auth.map((a) => `<span class="tag">${escapeHtml(a)}</span>`).join("")}</div>
+            </div>`
+          : ""
+      }
+      ${
+        details.canDrillDown
+          ? `<div class="detail-row">
+              <button class="btn btn-primary" id="btn-inspector-drill" style="width:100%">Drill Down</button>
+            </div>`
+          : ""
+      }
+      ${
+        details.isLeaf && (details.kind === "entrypoint" || details.uses.length > 0)
+          ? `<div class="detail-row">
+              <button class="btn" id="btn-inspector-trace" style="width:100%">🔍 Trace Flow From Here</button>
+            </div>`
+          : ""
+      }
+      <div class="detail-row">
+        <span class="detail-label">Uses (${details.uses.length})</span>
+        <div class="links-list" id="inspector-uses">
+          ${details.uses.map((u) => `<div class="link-item" data-id="${escapeHtml(u.id)}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
+        </div>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Used By (${details.usedBy.length})</span>
+        <div class="links-list" id="inspector-used-by">
+          ${details.usedBy.map((u) => `<div class="link-item" data-id="${escapeHtml(u.id)}"><span>${escapeHtml(u.label)}</span><span class="count-pill">${escapeHtml(u.edgeKind)}</span></div>`).join("")}
+        </div>
+      </div>
+    `;
+
+    panel.classList.add("open");
+
+    const drillBtn = document.getElementById("btn-inspector-drill");
+    if (drillBtn) {
+      drillBtn.addEventListener("click", () => {
+        if (state.drillDown(details.id)) {
+          render();
+        }
+      });
+    }
+
+    const traceBtn = document.getElementById("btn-inspector-trace");
+    if (traceBtn) {
+      traceBtn.addEventListener("click", () => {
+        startTrace(details.id);
+      });
+    }
+
+    content.querySelectorAll(".link-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const targetId = el.getAttribute("data-id");
+        if (targetId) {
+          navigateToNode(targetId);
+        }
+      });
+    });
+  }
+
+  function showEdgeDetails(edge) {
+    const panel = document.getElementById("inspector-panel");
+    const content = document.getElementById("inspector-content");
+    if (!panel || !content) return;
+
+    const underlying = edge.underlying || [];
+    const kinds = (edge.kinds || []).join(", ");
+    const citations = Array.from(
+      new Set(
+        underlying
+          .map((u) => (u.file && u.line ? `${u.file}:${u.line}` : ""))
+          .filter((citation) => citation)
+      )
+    );
+    const tiers = Array.from(new Set(underlying.map((u) => u.tier).filter((tier) => tier)));
+
+    content.innerHTML = `
+      <div class="detail-row">
+        <span class="detail-label">Edge Connection</span>
+        <span class="detail-value detail-mono">${escapeHtml(edge.source)} &rarr; ${escapeHtml(edge.target)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Kind</span>
+        <span class="detail-value">${escapeHtml(kinds)}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Underlying Edges</span>
+        <span class="detail-value">${edge.count || 1}</span>
+      </div>
+      ${
+        citations.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Citation</span>
+              <span class="detail-value detail-mono">${escapeHtml(citations.join(", "))}</span>
+            </div>`
+          : ""
+      }
+      ${
+        tiers.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Indexing Tier</span>
+              <span class="detail-value">${escapeHtml(tiers.join(", "))}</span>
+            </div>`
+          : ""
+      }
+      <div class="detail-row">
+        <div class="links-list">
+          <div class="link-item" data-id="${escapeHtml(edge.source)}"><span>Source: ${escapeHtml(edge.source)}</span></div>
+          <div class="link-item" data-id="${escapeHtml(edge.target)}"><span>Target: ${escapeHtml(edge.target)}</span></div>
+        </div>
+      </div>
+    `;
+
+    content.querySelectorAll(".link-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const targetId = el.getAttribute("data-id");
+        if (targetId) {
+          navigateToNode(targetId);
+        }
+      });
+    });
+
+    panel.classList.add("open");
+  }
+
+  function startTrace(entrypointId) {
+    state.startTrace(entrypointId);
+    activeTraceStep = 0;
+    render();
+  }
+
+  function updateTraceBar() {
+    const bar = document.getElementById("trace-bar");
+    if (!bar) return;
+
+    if (!state.trace) {
+      bar.classList.remove("active");
+      return;
+    }
+
+    const steps = state.trace.steps || [];
+    const currentStep = steps[activeTraceStep];
+
+    const stepText = document.getElementById("trace-step-text");
+    if (stepText && currentStep) {
+      const authText =
+        currentStep.auth && currentStep.auth.length > 0
+          ? ` Auth: ${currentStep.auth.join(", ")}`
+          : "";
+      stepText.textContent = `Step ${activeTraceStep + 1} of ${steps.length}: ${currentStep.label} (${currentStep.kind}) ${currentStep.fileLine ? `[${currentStep.fileLine}]` : ""}${authText}`;
+    }
+
+    bar.classList.add("active");
+  }
+
+  function setupPanZoom() {
+    if (!svgEl) return;
+
+    svgEl.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".svg-node") || e.target.closest(".svg-edge")) return;
+      isPanning = true;
+      startX = e.clientX - transform.x;
+      startY = e.clientY - transform.y;
+      svgEl.classList.add("dragging");
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!isPanning) return;
+      transform.x = e.clientX - startX;
+      transform.y = e.clientY - startY;
+      updateTransform();
+    });
+
+    window.addEventListener("mouseup", () => {
+      isPanning = false;
+      if (svgEl) svgEl.classList.remove("dragging");
+    });
+
+    svgEl.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+      const mouseX = e.clientX - svgEl.getBoundingClientRect().left;
+      const mouseY = e.clientY - svgEl.getBoundingClientRect().top;
+
+      const newScale = Math.min(Math.max(0.1, transform.scale * zoomFactor), 4.0);
+
+      transform.x = mouseX - (mouseX - transform.x) * (newScale / transform.scale);
+      transform.y = mouseY - (mouseY - transform.y) * (newScale / transform.scale);
+      transform.scale = newScale;
+
+      updateTransform();
+    });
+  }
+
+  function updateTransform() {
+    if (!viewportEl) return;
+    viewportEl.setAttribute(
+      "transform",
+      `translate(${transform.x}, ${transform.y}) scale(${transform.scale})`
+    );
+  }
+
+  function resetView() {
+    transform = { x: 40, y: 40, scale: 1.0 };
+    updateTransform();
+  }
+
+  function setupSearch() {
+    const input = document.getElementById("search-input");
+    const dropdown = document.getElementById("search-dropdown");
+    if (!input || !dropdown) return;
+
+    input.addEventListener("input", () => {
+      const q = input.value;
+      if (!q.trim()) {
+        dropdown.classList.remove("active");
+        dropdown.innerHTML = "";
+        return;
+      }
+
+      const results = ArchViewerLogic.searchNodes(state.graph, q);
+      dropdown.innerHTML = "";
+
+      if (results.length === 0) {
+        dropdown.innerHTML = `<div class="search-item" style="color:var(--text-muted)">No matches found</div>`;
+      } else {
+        results.forEach((res) => {
+          const item = document.createElement("div");
+          item.className = "search-item";
+
+          const info = document.createElement("div");
+          info.className = "search-item-info";
+
+          const labelSpan = document.createElement("span");
+          labelSpan.className = "search-item-label";
+          labelSpan.textContent = res.label || res.id;
+
+          const subSpan = document.createElement("span");
+          subSpan.className = "search-item-sub";
+          subSpan.textContent = res.file ? `${res.file}:${res.line || 0}` : res.id;
+
+          info.appendChild(labelSpan);
+          info.appendChild(subSpan);
+
+          const badge = document.createElement("span");
+          badge.className = `kind-badge badge-${res.kind}`;
+          badge.textContent = res.kind || "";
+
+          item.appendChild(info);
+          item.appendChild(badge);
+
+          item.addEventListener("click", () => {
+            dropdown.classList.remove("active");
+            input.value = "";
+            navigateToNode(res.id);
+          });
+          dropdown.appendChild(item);
+        });
+      }
+      dropdown.classList.add("active");
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".topbar-center")) {
+        dropdown.classList.remove("active");
+      }
+    });
+  }
+
+  function setupFilePicker() {
+    const btn = document.getElementById("btn-load-file");
+    const fileInput = document.getElementById("file-input");
+    if (!btn || !fileInput) return;
+
+    btn.addEventListener("click", () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const newGraph = JSON.parse(event.target.result);
+          setupState(newGraph);
+          resetView();
+          window.location.hash = "";
+        } catch (err) {
+          alert("Error parsing graph JSON: " + err.message);
+        }
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  function setupControls() {
+    const btnZoomIn = document.getElementById("btn-zoom-in");
+    const btnZoomOut = document.getElementById("btn-zoom-out");
+    const btnZoomReset = document.getElementById("btn-zoom-reset");
+    const btnCloseInspector = document.getElementById("btn-close-inspector");
+    const btnPrevStep = document.getElementById("btn-prev-step");
+    const btnNextStep = document.getElementById("btn-next-step");
+    const btnExitTrace = document.getElementById("btn-exit-trace");
+
+    if (btnZoomIn) {
+      btnZoomIn.addEventListener("click", () => {
+        transform.scale = Math.min(4.0, transform.scale * 1.25);
+        updateTransform();
+      });
+    }
+
+    if (btnZoomOut) {
+      btnZoomOut.addEventListener("click", () => {
+        transform.scale = Math.max(0.1, transform.scale * 0.8);
+        updateTransform();
+      });
+    }
+
+    if (btnZoomReset) {
+      btnZoomReset.addEventListener("click", resetView);
+    }
+
+    if (btnCloseInspector) {
+      btnCloseInspector.addEventListener("click", () => {
+        const panel = document.getElementById("inspector-panel");
+        if (panel) panel.classList.remove("open");
+        state.selectedNodeId = null;
+        renderGraph();
+      });
+    }
+
+    if (btnPrevStep) {
+      btnPrevStep.addEventListener("click", () => {
+        if (!state.trace) return;
+        if (activeTraceStep > 0) {
+          activeTraceStep--;
+          render();
+        }
+      });
+    }
+
+    if (btnNextStep) {
+      btnNextStep.addEventListener("click", () => {
+        if (!state.trace) return;
+        if (activeTraceStep < state.trace.steps.length - 1) {
+          activeTraceStep++;
+          render();
+        }
+      });
+    }
+
+    if (btnExitTrace) {
+      btnExitTrace.addEventListener("click", () => {
+        state.stopTrace();
+        render();
+      });
+    }
+  }
+
+  function handleHashChange() {
+    const hash = window.location.hash;
+    if (hash && hash.startsWith("#node=")) {
+      const raw = hash.substring(6);
+      let nodeId = raw;
+      try {
+        nodeId = decodeURIComponent(raw);
+      } catch (e) {
+        nodeId = raw;
+      }
+      if (state && state.focusNode(nodeId)) {
+        render();
+        selectNode(nodeId);
+      }
+    }
+  }
+
+  function truncate(str, max) {
+    if (!str) return "";
+    return str.length > max ? str.substring(0, max - 3) + "..." : str;
+  }
+
+  function escapeHtml(str) {
+    if (str == null) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  if (typeof document !== "undefined" && document.addEventListener) {
+    document.addEventListener("DOMContentLoaded", init);
+  }
+
+  if (typeof window !== "undefined") {
+    window.__archViewer = {
+      getState: () => state,
+      init,
+      handleHashChange,
+      render,
+      selectNode,
+      navigateToNode,
+      startTrace,
+    };
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      init,
+      getState: () => state,
+      handleHashChange,
+      render,
+      navigateToNode,
+      escapeHtml,
+    };
+  }
+})();
+
+  </script>
+</body>
+</html>
