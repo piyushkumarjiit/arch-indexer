@@ -385,6 +385,91 @@ def test_entrypoint_symbol_line_is_the_citation_definition_line(tmp_path: Path, 
     assert code == 0
 
 
+def test_entrypoint_symbol_line_falls_back_for_cross_file_handler(tmp_path: Path, capsys):
+    """Cross-file handlers keep symbol_line in the entrypoint's file so citations stay valid."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "routes.ts").write_text(
+        'import { getItems } from "./handlers";\napp.get("/items", getItems);\n',
+        encoding="utf-8",
+    )
+    (repo / "src" / "handlers.ts").write_text(
+        "\n" * 19 + "export function getItems() {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache"
+
+    with IndexStore.from_repo(repo, cache_dir_override=cache) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "src/routes.ts",
+                    "language": "typescript",
+                    "sha256": "a" * 64,
+                    "line_count": 2,
+                    "module": "src.routes",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "src/handlers.ts",
+                    "language": "typescript",
+                    "sha256": "b" * 64,
+                    "line_count": 22,
+                    "module": "src.handlers",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "src.handlers.getItems",
+                    "name": "getItems",
+                    "kind": "function",
+                    "file_path": "src/handlers.ts",
+                    "start_line": 20,
+                    "end_line": 22,
+                    "body_sha256": "c" * 64,
+                }
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "getItems",
+                    "method": "GET",
+                    "route_or_trigger": "/items",
+                    "file_path": "src/routes.ts",
+                    "line": 2,
+                    "symbol_fqname": "src.handlers.getItems",
+                    "auth_symbols_json": "[]",
+                }
+            ]
+        )
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--json", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    entrypoint = _json(out)["entrypoints"][0]
+    assert entrypoint["file_path"] == "src/routes.ts"
+    assert (entrypoint["line"], entrypoint["symbol_line"]) == (2, 2)
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert "symbol_line=" not in out
+
+    draft = repo / "docs" / ".drafts" / "packet.md"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(
+        f"Items are served[^1].\n\n[^1]: `{entrypoint['file_path']}:{entrypoint['symbol_line']}` \u2014 `getItems`\n",
+        encoding="utf-8",
+    )
+    code = main(
+        ["check-citations", str(repo), "--file", "docs/.drafts/packet.md", "--cache-dir", str(cache)]
+    )
+    assert code == 0
+
+
 def test_flow_trace_walks_calls_and_marks_sinks(tmp_path: Path, capsys):
     repo = tmp_path / "repo"
     _write_fixture(repo)

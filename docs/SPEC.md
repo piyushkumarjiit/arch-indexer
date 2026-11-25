@@ -337,6 +337,7 @@ arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
 
 `entrypoints` rows expose two line numbers. `line` is the discovery line (the decorator, route registration, CLI block or `__main__` guard), while `symbol_line` is the indexed definition line of `symbol_fqname` (falling back to `line` when no definition is resolvable). Documentation footnotes cite `symbol_line`, because `check-citations` verifies a symbol at its definition or within the span of its body, not on a decorator or trigger line. Text output appends `symbol_line=<n>` when it differs from `line`.
 
+```bash
 # 4. Bounded worker planning
 arch-indexer plan <repo> \
   [--max-lines-per-worker 15000] \

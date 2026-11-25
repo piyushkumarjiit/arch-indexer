@@ -37,7 +37,7 @@ SECTION_MARKER_RE = re.compile(r"<!--\s*SECTION:", re.IGNORECASE)
 SLICE_MARKER_RE = re.compile(r"<!--\s*SLICE:", re.IGNORECASE)
 AUTO_DIAGRAM_MARKER_RE = re.compile(r"<!--\s*AUTO-DIAGRAM:", re.IGNORECASE)
 MERMAID_FENCE_RE = re.compile(r"^\s*(?:```|~~~)\s*mermaid\b", re.IGNORECASE | re.MULTILINE)
-TRAILING_REFERENCES_RE = re.compile(r"(?m)^##\s+References\s*$")
+TRAILING_REFERENCES_RE = re.compile(r"(?m)^##[ \t]+References[ \t]*\s*\Z")
 
 
 class DraftFormatError(ValueError):
@@ -73,9 +73,6 @@ def _strip_trailing_references_block(text: str) -> str:
     """
     match = TRAILING_REFERENCES_RE.search(text)
     if match is None:
-        return text
-    trailing = text[match.end() :]
-    if trailing.strip():
         return text
     return text[: match.start()].rstrip() + "\n"
 

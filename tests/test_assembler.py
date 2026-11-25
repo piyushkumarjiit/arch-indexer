@@ -1141,6 +1141,34 @@ def test_assemble_still_rejects_prose_in_a_trailing_references_block(tmp_path):
     assert (drafts / "refs-prose.md").is_file()
 
 
+def test_assemble_accepts_trailing_references_after_earlier_references_heading(tmp_path):
+    """An earlier ## References line inside a section must not block stripping the trailing one."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "refs-nested.md",
+        "refs-nested",
+        ["design-sec2"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Example doc layout[^1]:\n\n"
+        "```markdown\n"
+        "## References\n"
+        "```\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Example doc layout[^1]:" in content
+    assert "```markdown\n## References\n```" in content
+    assert "[^1]: `src/app.py:1` — `alpha`" in content
+    assert not (drafts / "refs-nested.md").exists()
+
+
 @pytest.mark.parametrize(
     "draft_body",
     [

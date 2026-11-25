@@ -169,7 +169,7 @@ def _print_run_summary(delta: Delta, report: Any) -> None:
     """
     impacted = len(report.sections)
     missing = len(report.missing_sections)
-    if delta.is_empty():
+    if not delta.is_first_run and delta.is_empty():
         if impacted or missing:
             print(
                 f"No source changes: {impacted + missing} documentation section(s) still impacted"

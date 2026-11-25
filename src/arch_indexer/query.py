@@ -40,6 +40,7 @@ SELECT e.id, e.kind, e.name, e.method, e.route_or_trigger, e.file_path, e.line,
            SELECT s.start_line
            FROM symbols s
            WHERE s.fqname = e.symbol_fqname
+             AND s.file_path = e.file_path
            ORDER BY s.start_line ASC, s.end_line ASC
            LIMIT 1
        ) AS symbol_line

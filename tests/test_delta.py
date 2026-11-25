@@ -202,6 +202,19 @@ def test_unchanged_tree_with_empty_sections_never_reports_up_to_date(tmp_path: P
     assert "Impacted sections: 1" in captured.out
 
 
+def test_first_run_on_empty_repo_reports_first_run_summary(tmp_path: Path, capsys):
+    """A first run with zero in-scope files still prints the first-run summary."""
+    repo = tmp_path / "empty-repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    captured = capsys.readouterr()
+    assert "First run: 0 files added, 0 symbols indexed" in captured.out
+    assert "No source changes" not in captured.out
+    assert "documentation is up to date" not in captured.out.lower()
+
+
 def test_modified_symbol_body_impacts_only_citing_sections(tmp_path: Path, capsys):
     repo = _make_repo(tmp_path)
     cache = tmp_path / "cache"
