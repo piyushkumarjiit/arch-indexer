@@ -32,6 +32,28 @@ from arch_indexer.config import (
     get_runtimes_dir,
 )
 
+MIGRATION_DIR_NAMES = frozenset(
+    {"migration", "migrations", "flyway", "liquibase", "changelog", "changelogs"}
+)
+MIGRATION_DESCRIPTOR_SUFFIXES = (".sql", ".xml", ".yaml", ".yml", ".json")
+
+
+def is_sql_migration_file(rel_path: str) -> bool:
+    """Whether a path is SQL schema evidence: a ``*.sql`` file or a migration descriptor.
+
+    Flyway/Rails-style ``db/migration/*.sql`` trees are the common shape; Liquibase
+    keeps ``*.xml``/``*.yaml`` changelogs in a ``changelog`` directory, so descriptors
+    under a migration directory count too. Source files in a package that merely
+    happens to be called ``migration`` stay out by suffix.
+    """
+    path = PurePosixPath(str(rel_path).replace("\\", "/"))
+    if path.suffix.lower() == ".sql":
+        return True
+    if not any(part.lower() in MIGRATION_DIR_NAMES for part in path.parts[:-1]):
+        return False
+    return path.suffix.lower() in MIGRATION_DESCRIPTOR_SUFFIXES
+
+
 # Directories excluded from file scanning & language detection
 EXCLUDED_DIR_NAMES = {
     "node_modules",
@@ -148,7 +170,8 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
         if rel.endswith(".java") or basename == "pom.xml":
             matched["java"].append(rel)
 
-        # Infra: Dockerfile*, *compose*.y*ml, *.sh, *.tf, *.hcl, .github/workflows/*.y*ml
+        # Infra: Dockerfile*, *compose*.y*ml, *.sh, *.tf, *.hcl, .github/workflows/*.y*ml,
+        # SQL migrations (*.sql and migration-directory descriptors)
         if (
             fnmatch.fnmatch(basename, "Dockerfile*")
             or fnmatch.fnmatch(basename, "*compose*.yml")
@@ -156,6 +179,7 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
             or rel.endswith((".sh", ".tf", ".hcl"))
             or fnmatch.fnmatch(rel, ".github/workflows/*.yml")
             or fnmatch.fnmatch(rel, ".github/workflows/*.yaml")
+            or is_sql_migration_file(rel)
         ):
             matched["infra"].append(rel)
 

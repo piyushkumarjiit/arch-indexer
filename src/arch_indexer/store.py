@@ -1,11 +1,72 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from arch_indexer.config import RepoCachePaths
+
+UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
+
+
+def _repo_namespaces(modules: Iterable[str], fqnames: Iterable[str]) -> set[str]:
+    """Every package/module prefix that belongs to the indexed repository."""
+    namespaces: set[str] = set()
+    for module in modules:
+        parts = [part for part in UNRESOLVED_PREFIX_SPLIT_RE.split(str(module)) if part]
+        for size in range(1, len(parts) + 1):
+            namespaces.add(".".join(parts[:size]))
+            namespaces.add("/".join(parts[:size]))
+    for fqname in fqnames:
+        if fqname:
+            namespaces.add(str(fqname))
+    return namespaces
+
+
+def is_repo_internal_symbol(
+    raw_symbol: str,
+    namespaces: set[str],
+) -> bool:
+    """Whether an unresolved reference names a package or symbol owned by the repository.
+
+    A reference is external when its root package belongs to a third-party library
+    (``java.util``, ``org.springframework``); it is in-repo when the referenced name,
+    its parent symbol, or one of its package prefixes matches an indexed module or
+    symbol fqname. Only the second class signals a defect in the index.
+    """
+    symbol = str(raw_symbol).strip()
+    if not symbol:
+        return False
+    if symbol in namespaces:
+        return True
+    parent = symbol.rsplit(".", 1)[0]
+    if parent != symbol and parent in namespaces:
+        return True
+    parts = [part for part in UNRESOLVED_PREFIX_SPLIT_RE.split(symbol) if part]
+    for size in range(len(parts) - 1, 0, -1):
+        if ".".join(parts[:size]) in namespaces or "/".join(parts[:size]) in namespaces:
+            return True
+    return False
+
+
+def split_unresolved_refs(
+    raw_symbols: Iterable[str],
+    modules: Iterable[str],
+    fqnames: Iterable[str],
+) -> tuple[int, int]:
+    """Count unresolved references as ``(external, in_repo)``."""
+    namespaces = _repo_namespaces(modules, fqnames)
+    external = 0
+    in_repo = 0
+    for raw_symbol in raw_symbols:
+        if is_repo_internal_symbol(raw_symbol, namespaces):
+            in_repo += 1
+        else:
+            external += 1
+    return external, in_repo
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS files (
@@ -393,6 +454,17 @@ class IndexStore:
         cursor.execute("SELECT COUNT(*) FROM unresolved_refs")
         total_unresolved = cursor.fetchone()[0]
 
+        # Split unresolved references into external-library symbols (expected) and
+        # repository-owned symbols (a real index defect). Totals stay unchanged.
+        cursor.execute("SELECT DISTINCT module FROM files")
+        repo_modules = [row[0] for row in cursor.fetchall() if row[0]]
+        cursor.execute("SELECT fqname FROM symbols")
+        repo_fqnames = [row[0] for row in cursor.fetchall() if row[0]]
+        cursor.execute("SELECT raw_symbol FROM unresolved_refs")
+        unresolved_external, unresolved_in_repo = split_unresolved_refs(
+            (row[0] for row in cursor.fetchall()), repo_modules, repo_fqnames
+        )
+
         return {
             "total_files": total_files,
             "files_breakdown": files_breakdown,
@@ -401,6 +473,8 @@ class IndexStore:
             "total_entrypoints": total_entrypoints,
             "total_infra_artifacts": total_infra,
             "total_unresolved_refs": total_unresolved,
+            "unresolved_external_refs": unresolved_external,
+            "unresolved_in_repo_refs": unresolved_in_repo,
         }
 
     def format_summary(self) -> str:
@@ -416,5 +490,7 @@ class IndexStore:
             f"{summary['total_references']} references, "
             f"{summary['total_entrypoints']} entrypoints, "
             f"{summary['total_infra_artifacts']} infra artifacts, "
-            f"{summary['total_unresolved_refs']} unresolved refs"
+            f"{summary['total_unresolved_refs']} unresolved refs "
+            f"({summary['unresolved_external_refs']} external, "
+            f"{summary['unresolved_in_repo_refs']} in-repo)"
         )

@@ -1590,10 +1590,14 @@ def test_assemble_relative_drafts_dir_missing_in_repo_does_not_fall_back_to_cwd(
     monkeypatch.chdir(cwd)
 
     err = io.StringIO()
-    code = assemble(repo=repo, drafts_dir="drafts", out=io.StringIO(), err=err)
-    assert code == 1
+    out = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="drafts", out=out, err=err)
+    assert code == 0
+    # The missing in-repo drafts directory is created, never borrowed from the CWD
+    assert (repo / "drafts").is_dir() and not any((repo / "drafts").iterdir())
     assert (cwd_drafts / "d.md").is_file()
     assert not (repo / "docs").exists()
+    assert "nothing to assemble" in out.getvalue()
 
 
 def test_assemble_relative_diagrams_missing_in_repo_does_not_fall_back_to_cwd(
@@ -1682,3 +1686,49 @@ def test_assemble_unknown_section_exits_3_keeps_drafts_and_writes_nothing(tmp_pa
     assert (drafts / "good.md").is_file()
     assert (drafts / "bad.md").is_file()
     assert not (repo / "docs" / "DESIGN.md").exists()
+
+
+def test_assemble_bootstrap_creates_drafts_dir_and_reports_next_sections(tmp_path):
+    """G16: zero drafts is a bootstrap run that creates the drafts directory."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = io.StringIO()
+    err = io.StringIO()
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=out, err=err)
+
+    assert code == 0
+    assert err.getvalue() == ""
+    drafts = repo / "docs" / ".drafts"
+    assert drafts.is_dir()
+    assert list(drafts.iterdir()) == []
+    output = out.getvalue()
+    assert "Created drafts directory" in output
+    assert "nothing to assemble" in output
+    assert "docs/DESIGN.md: design-sec2" in output
+    assert "docs/USER_GUIDE.md: guide-sec2, guide-sec3" in output
+    assert not (repo / "docs" / "DESIGN.md").exists()
+    assert not (repo / "docs" / "USER_GUIDE.md").exists()
+
+
+def test_assemble_reports_missing_user_guide_once_across_both_gates(tmp_path):
+    """G16: a missing canonical document is reported once, not once per gate."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "d.md",
+        "d",
+        ["design-sec2"],
+        "Components prose[^1].\n\n[^1]: `src/app.py:1` — `alpha`\n",
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=out, err=err)
+
+    assert code == 0, out.getvalue() + err.getvalue()
+    output = out.getvalue()
+    assert output.count("docs/USER_GUIDE.md") == 1
+    assert "not found, skipping" not in output
+    assert (repo / "docs" / "DESIGN.md").is_file()
+    assert not (repo / "docs" / "USER_GUIDE.md").exists()

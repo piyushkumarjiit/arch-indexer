@@ -84,6 +84,16 @@ def _module_language(languages: list[str]) -> str:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
+def majority_tier(tiers: list[str]) -> str:
+    """Pick a module's tier by majority, not by its weakest file.
+
+    Ties resolve to the alphabetically first tier, so ``scip`` wins a 1:1 tie; the
+    choice is deterministic and never depends on file order.
+    """
+    counts = Counter(tiers)
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
 def _parse_json_list(raw: str | None) -> list[str]:
     """Parse a JSON list column, tolerating legacy NULL/empty values."""
     if not raw:
@@ -131,6 +141,7 @@ def _build_modules(
     modules = []
     for module_id in sorted(grouped):
         bucket = grouped[module_id]
+        tier_counts = Counter(bucket["tiers"])
         modules.append(
             {
                 "id": module_id,
@@ -138,9 +149,8 @@ def _build_modules(
                 "language": _module_language(bucket["languages"]),
                 "path": _common_dir(bucket["files"]),
                 "file_count": len(bucket["files"]),
-                "tier": (
-                    "scip" if all(tier == "scip" for tier in bucket["tiers"]) else "tree-sitter"
-                ),
+                "tier": majority_tier(bucket["tiers"]),
+                "tier_mix": {tier: tier_counts.get(tier, 0) for tier in ("scip", "tree-sitter")},
             }
         )
     return modules, module_by_file, tier_by_file
@@ -320,6 +330,10 @@ def _collect_infra_boundaries(infra_rows: list[dict[str, Any]]) -> dict[str, dic
             classified = classify_terraform(resource_type)
             if classified is not None:
                 add("datastore", *classified, evidence)
+        if summary.get("type") == "table":
+            table = summary.get("table")
+            if isinstance(table, str) and table:
+                add("datastore", "sql", "sql-schema", "SQL schema (migrations)", evidence)
     return boundaries
 
 
@@ -336,13 +350,11 @@ def build_graph(
     diagram domains and flow edges unless ``include_tests`` is set (trial gap S5).
     """
     repo = Path(repo_path)
-    file_rows = filter_rows(
-        _row_dicts(
-            store, "SELECT path, language, module, tier, line_count FROM files ORDER BY path"
-        ),
-        include_tests,
-        key="path",
+    all_file_rows = _row_dicts(
+        store, "SELECT path, language, module, tier, line_count FROM files ORDER BY path"
     )
+    file_rows = filter_rows(all_file_rows, include_tests, key="path")
+    tier_counts = Counter(row["tier"] for row in file_rows)
     symbol_counts = {
         row["file_path"]: row["n"]
         for row in _row_dicts(
@@ -536,8 +548,12 @@ def build_graph(
         "generated_at_commit": git_head(repo),
         "include_tests": include_tests,
         "tier_summary": {
-            "scip_files": sum(1 for row in file_rows if row["tier"] == "scip"),
-            "treesitter_files": sum(1 for row in file_rows if row["tier"] == "tree-sitter"),
+            "scip_files": tier_counts.get("scip", 0),
+            "treesitter_files": tier_counts.get("tree-sitter", 0),
+            # Same file set as modules/nodes; test files stay in index.db but are
+            # reported separately instead of silently changing third-party totals.
+            "total_files": len(file_rows),
+            "excluded_test_files": max(len(all_file_rows) - len(file_rows), 0),
         },
         "modules": modules,
         "nodes": nodes,

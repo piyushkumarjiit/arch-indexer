@@ -118,7 +118,7 @@ Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`) are n
 - **Python**: `*.py`, `pyproject.toml`, `requirements*.txt`, `setup.py`
 - **TypeScript / JavaScript**: `tsconfig*.json`, `package.json`, `*.ts`, `*.tsx`
 - **Java / Maven**: `pom.xml`, `*.java`
-- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`
+- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`, and SQL schema migrations (`*.sql` anywhere plus `*.xml`/`*.yaml`/`*.yml`/`*.json` descriptors under a `migration`/`migrations`/`flyway`/`liquibase`/`changelog` directory)
 
 ### 3.2 Pinned Tool Manifest (`toolchain.toml`)
 All external tools and parsers are pinned to exact versions:
@@ -166,7 +166,7 @@ Every indexed file row in `index.db` records:
 
 When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
 
-Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing.
+Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. The one-line `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working.
 
 ### 4.4 Memory & Timeout Controls (7 GB Host)
 All external indexer subprocesses receive strict, configurable caps:
@@ -183,7 +183,7 @@ Core tables:
 - `references(id PK, symbol_fqname, file_path, line, col, ref_kind)` (`call`, `import`, `type`, `read`, `write`)
 - `entrypoints(id PK, kind, name, method, route_or_trigger, file_path, line, symbol_fqname, auth_symbols_json)`
   - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
-- `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts).
+- `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` record at each `CREATE TABLE` line, and `migration_descriptor` records for Liquibase-style changelogs).
 - `unresolved_refs(id PK, file_path, line, raw_symbol, language)`
 
 ---
@@ -243,9 +243,22 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "repo_name": "string",
   "generated_at_commit": "git-sha-or-null",
   "include_tests": false,
-  "tier_summary": { "scip_files": 120, "treesitter_files": 15 },
+  "tier_summary": {
+    "scip_files": 120,
+    "treesitter_files": 15,
+    "total_files": 135,
+    "excluded_test_files": 8
+  },
   "modules": [
-    { "id": "mod:auth", "name": "auth", "language": "python", "path": "src/auth", "file_count": 12, "tier": "scip" }
+    {
+      "id": "mod:auth",
+      "name": "auth",
+      "language": "python",
+      "path": "src/auth",
+      "file_count": 12,
+      "tier": "scip",
+      "tier_mix": { "scip": 11, "tree-sitter": 1 }
+    }
   ],
   "nodes": [
     {
@@ -279,7 +292,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "unresolved_refs_count": 14
 }
 ```
-`nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+`nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. A module's `tier` is its **majority** tier (ties resolve to `scip`), with `tier_mix` carrying the per-tier file counts, so one Tier 2 file cannot mislabel a mostly Tier 1 module. `tier_summary` is built from exactly the file set that produced `modules` and `nodes` (test files excluded unless `include_tests` is set): `total_files` equals the sum of module `file_count`s, and `excluded_test_files` reports the test rows that stay in `index.db` but are out of the architecture. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before the stored index is rebuilt.
 
@@ -358,7 +371,7 @@ arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 ```
 
 > [!NOTE] Amendment: `assemble --diagrams`, `assemble --remove-slice` and path resolution
-> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text. When `docs/graph.json` exists, `assemble` derives the diagrams itself with `arch_indexer.mermaid_gen.generate_diagrams` and rewrites every slot in `docs/DESIGN.md` to that graph's deterministic output: slots the graph does not produce are removed and missing `flow-<domain>` slots are inserted in the section that owns them, so a freshly assembled document passes the `check-mermaid` AUTO-DIAGRAM gate. An explicit `--diagrams` mapping is applied first and the graph-derived diagrams then take precedence, so keys must match slot ids exactly (no alias spellings). Without `docs/graph.json`, slots are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory.
+> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text. When `docs/graph.json` exists, `assemble` derives the diagrams itself with `arch_indexer.mermaid_gen.generate_diagrams` and rewrites every slot in `docs/DESIGN.md` to that graph's deterministic output: slots the graph does not produce are removed and missing `flow-<domain>` slots are inserted in the section that owns them, so a freshly assembled document passes the `check-mermaid` AUTO-DIAGRAM gate. An explicit `--diagrams` mapping is applied first and the graph-derived diagrams then take precedence, so keys must match slot ids exactly (no alias spellings). Without `docs/graph.json`, slots are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory. A missing in-repo drafts directory is created instead of rejected: with zero `*.md` drafts and no `--remove-slice`, `assemble` creates the directory, prints the draft-packet contract and the canonical section ids that still have no body text, and exits `0` without running the gates or writing documents. A missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` is not a gate failure: both `check-citations` and `check-mermaid` consistently skip a missing canonical document, and `assemble` reports that skip once for both gates instead of printing one note per gate.
 
 ### 7.2 Exit Codes
 All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle exit code `2` as a **non-error signal**:
@@ -366,7 +379,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | Code | Name | Meaning |
 | :--- | :--- | :--- |
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
-| `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
+| `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path (outside the repository, the repository root, the docs directory or containing it), a `packet_id` declared by more than one draft, or unreadable repository. A missing in-repo drafts directory is created and zero drafts is a successful bootstrap (`assemble` exits `0`). |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including an `AUTO-DIAGRAM` block edited since the last index while the source tree is unchanged, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
@@ -405,7 +418,7 @@ Every footnote reference uses a strict machine-parseable format:
 (For non-symbol infra/config lines, the symbol token may be a literal key/directive, e.g., `` `Dockerfile:14` — `EXPOSE 8000` ``.)
 
 **`arch-indexer check-citations` algorithm**:
-1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, and verify no dangling footnote markers (`[^n]` without definition), uncited technical sections or empty required sections exist. In `docs/DESIGN.md`, a `SECTION` block whose body carries prose but no footnote reference is reported as `UNCITED_SECTION`, unless its start marker carries the `:exempt` flag (marker syntax in §9.2). In both documents, a `SECTION` block without the `:exempt` flag whose content is only headings, comments, fenced code or footnote definitions is reported as `EMPTY_SECTION`.
+1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md` (a missing canonical document is skipped with a note, never a failure), and verify no dangling footnote markers (`[^n]` without definition), uncited technical sections or empty required sections exist. In `docs/DESIGN.md`, a `SECTION` block whose body carries prose but no footnote reference is reported as `UNCITED_SECTION`, unless its start marker carries the `:exempt` flag (marker syntax in §9.2). In both documents, a `SECTION` block without the `:exempt` flag whose content is only headings, comments, fenced code or footnote definitions is reported as `EMPTY_SECTION`.
 2. For each `(file_path, line, symbol)`:
    - Verify `file_path` exists in `<repo>`.
    - Verify `1 <= line <= total_lines`.
@@ -415,7 +428,7 @@ Every footnote reference uses a strict machine-parseable format:
 3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`, `EMPTY_SECTION`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)
-No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
+No headless browser or Chromium dependency. A missing canonical document is skipped with a note, never a failure, matching `check-citations`; `assemble` reports the skip once for both gates. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
 - Verifies valid diagram declaration header (`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram-v2`).
 - Verifies non-empty body, balanced `subgraph`/`end` blocks, balanced quotes and bracket delimiters (`[...]`, `(...)`, `{...}`), valid node ID characters, and well-formed edge arrows (`-->`, `-.->`, `==>`, `-- text -->`).
 - When `docs/graph.json` exists, verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of that graph, and that every diagram the graph produces has a block in `docs/DESIGN.md` (detecting accidental manual or LLM edits to generated diagrams, and missing generated diagrams).

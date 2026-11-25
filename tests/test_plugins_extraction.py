@@ -2435,3 +2435,48 @@ flask_app.register_blueprint(users_bp, url_prefix="/v2/users")
         if r["ref_kind"] == "call" and r["symbol_fqname"].endswith("trace_only")
     ]
     assert len(trace_refs) == 1
+
+
+def test_infra_scanner_records_sql_migration_schema(tmp_path: Path):
+    """G17: SQL migrations produce schema artifacts the Data Model section can cite."""
+    repo = tmp_path / "repo"
+    migration = repo / "db" / "migration"
+    migration.mkdir(parents=True)
+    sql = migration / "V1__create_widget.sql"
+    sql.write_text(
+        "-- schema for widgets\n"
+        "CREATE TABLE widget (\n"
+        "    id INTEGER PRIMARY KEY\n"
+        ");\n"
+        "CREATE TABLE IF NOT EXISTS widget_audit (id INTEGER);\n",
+        encoding="utf-8",
+    )
+    changelog = repo / "db" / "changelog"
+    changelog.mkdir(parents=True)
+    (changelog / "changes.xml").write_text("<databaseChangeLog/>\n", encoding="utf-8")
+
+    scanner = InfraScanner()
+    units = scanner.detect(repo)
+    assert len(units) == 1
+    res = scanner.index_unit_tier2(units[0])
+
+    sql_artifacts = [a for a in res.infra_artifacts if a["kind"] == "sql_migration"]
+    summaries = [json.loads(a["summary_json"]) for a in sql_artifacts]
+    assert {summary["type"] for summary in summaries} >= {
+        "schema_migration",
+        "table",
+        "migration_descriptor",
+    }
+    file_summary = next(s for s in summaries if s["type"] == "schema_migration")
+    assert file_summary["tables"] == ["widget", "widget_audit"]
+    tables = [
+        (a["file_path"], a["line"], json.loads(a["summary_json"])["table"])
+        for a in sql_artifacts
+        if json.loads(a["summary_json"])["type"] == "table"
+    ]
+    assert tables == [
+        ("db/migration/V1__create_widget.sql", 2, "widget"),
+        ("db/migration/V1__create_widget.sql", 5, "widget_audit"),
+    ]
+    descriptor = next(s for s in summaries if s["type"] == "migration_descriptor")
+    assert descriptor["format"] == "xml"

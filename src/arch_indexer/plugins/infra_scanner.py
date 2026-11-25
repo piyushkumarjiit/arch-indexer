@@ -18,7 +18,7 @@ from arch_indexer.plugins.base import (
     IndexUnit,
     LanguagePlugin,
 )
-from arch_indexer.toolchain import get_repo_files
+from arch_indexer.toolchain import get_repo_files, is_sql_migration_file
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -44,6 +44,7 @@ def is_infra_file(rel_path: str) -> bool:
         or rel_path.endswith((".sh", ".tf", ".hcl"))
         or fnmatch.fnmatch(rel_path, ".github/workflows/*.yml")
         or fnmatch.fnmatch(rel_path, ".github/workflows/*.yaml")
+        or is_sql_migration_file(rel_path)
     )
 
 
@@ -276,7 +277,62 @@ class InfraScanner(LanguagePlugin):
                             }
                         )
 
-            # 4. Shell script
+            # 4. SQL schema migration (Flyway/Rails/Liquibase-style)
+            elif is_sql_migration_file(rel_path):
+                if rel_path.lower().endswith(".sql"):
+                    tables: list[tuple[int, str]] = []
+                    for idx, line in enumerate(lines, start=1):
+                        match = re.match(
+                            r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNLOGGED\s+)?TABLE\s+"
+                            r"(?:IF\s+NOT\s+EXISTS\s+)?([\w.\"`\[\]]+)",
+                            line,
+                            re.IGNORECASE,
+                        )
+                        if match:
+                            tables.append((idx, match.group(1).strip('"`[]\\')))
+                    infra_artifacts.append(
+                        {
+                            "kind": "sql_migration",
+                            "file_path": rel_path,
+                            "line": 1,
+                            "summary_json": json.dumps(
+                                {
+                                    "type": "schema_migration",
+                                    "tables": [name for _, name in tables],
+                                    "statement_count": sum(
+                                        1
+                                        for line in lines
+                                        if line.strip() and not line.strip().startswith("--")
+                                    ),
+                                }
+                            ),
+                        }
+                    )
+                    for idx, table in tables:
+                        infra_artifacts.append(
+                            {
+                                "kind": "sql_migration",
+                                "file_path": rel_path,
+                                "line": idx,
+                                "summary_json": json.dumps({"type": "table", "table": table}),
+                            }
+                        )
+                else:
+                    infra_artifacts.append(
+                        {
+                            "kind": "sql_migration",
+                            "file_path": rel_path,
+                            "line": 1,
+                            "summary_json": json.dumps(
+                                {
+                                    "type": "migration_descriptor",
+                                    "format": Path(rel_path).suffix.lower().lstrip("."),
+                                }
+                            ),
+                        }
+                    )
+
+            # 5. Shell script
             elif rel_path.endswith(".sh") or (lines and lines[0].startswith("#!")):
                 shebang = lines[0].strip() if (lines and lines[0].startswith("#!")) else "#!/bin/sh"
                 infra_artifacts.append(
@@ -288,7 +344,7 @@ class InfraScanner(LanguagePlugin):
                     }
                 )
 
-            # 5. CI Workflow
+            # 6. CI Workflow
             elif fnmatch.fnmatch(rel_path, ".github/workflows/*.yml") or fnmatch.fnmatch(
                 rel_path, ".github/workflows/*.yaml"
             ):

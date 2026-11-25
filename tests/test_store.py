@@ -295,3 +295,69 @@ def test_summary_and_formatting(tmp_path: Path):
     assert "1 unresolved refs" in formatted
 
     store.close()
+
+
+def test_unresolved_refs_split_external_from_in_repo(tmp_path):
+    """G13: the summary separates external-library refs from repo-owned unresolved refs."""
+    store = IndexStore(tmp_path / "index.db")
+    store.insert_files(
+        [
+            {
+                "path": "app/core/service.py",
+                "language": "python",
+                "sha256": "a" * 64,
+                "line_count": 10,
+                "module": "app.core.service",
+                "tier": "scip",
+            }
+        ]
+    )
+    store.insert_symbols(
+        [
+            {
+                "fqname": "app.core.service.run",
+                "name": "run",
+                "kind": "function",
+                "file_path": "app/core/service.py",
+                "start_line": 1,
+                "end_line": 2,
+                "body_sha256": "b" * 64,
+            }
+        ]
+    )
+    store.insert_unresolved_refs(
+        [
+            {
+                "file_path": "app/core/service.py",
+                "line": 2,
+                "raw_symbol": "requests",
+                "language": "python",
+            },
+            {
+                "file_path": "app/core/service.py",
+                "line": 3,
+                "raw_symbol": "java.util.List",
+                "language": "java",
+            },
+            {
+                "file_path": "app/core/service.py",
+                "line": 4,
+                "raw_symbol": "app.core.service.run",
+                "language": "python",
+            },
+            {
+                "file_path": "app/core/service.py",
+                "line": 5,
+                "raw_symbol": "app.core.missing.Thing",
+                "language": "python",
+            },
+        ]
+    )
+
+    summary = store.get_summary()
+    assert summary["total_unresolved_refs"] == 4
+    assert summary["unresolved_external_refs"] == 2
+    assert summary["unresolved_in_repo_refs"] == 2
+    formatted = store.format_summary()
+    assert "4 unresolved refs (2 external, 2 in-repo)" in formatted
+    store.close()

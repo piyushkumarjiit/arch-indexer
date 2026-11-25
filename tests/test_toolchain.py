@@ -1215,3 +1215,29 @@ def test_ensure_without_flag_never_downloads_runtimes(tmp_path):
     assert not (cache / "runtimes").exists()
     assert res["runtimes"] == []
     assert any("Host java >= 17 is absent" in warning for warning in res["warnings"])
+
+
+def test_sql_migrations_are_detected_as_infra(tmp_path):
+    """G17: *.sql files and migration-directory descriptors are infrastructure artifacts."""
+    from arch_indexer.toolchain import detect_repo_files, is_sql_migration_file
+
+    repo = tmp_path / "repo"
+    (repo / "db" / "migration").mkdir(parents=True)
+    (repo / "db" / "migration" / "V1__create_widget.sql").write_text(
+        "CREATE TABLE widget (id INTEGER);\n", encoding="utf-8"
+    )
+    (repo / "db" / "changelog").mkdir(parents=True)
+    (repo / "db" / "changelog" / "changes.xml").write_text(
+        "<databaseChangeLog/>\n", encoding="utf-8"
+    )
+    (repo / "src" / "migration").mkdir(parents=True)
+    (repo / "src" / "migration" / "Migrator.java").write_text(
+        "class Migrator {}\n", encoding="utf-8"
+    )
+
+    matched = detect_repo_files(repo)["infra"]
+    assert "db/migration/V1__create_widget.sql" in matched
+    assert "db/changelog/changes.xml" in matched
+    assert "src/migration/Migrator.java" not in matched
+    assert is_sql_migration_file("db/migration/V2__add_column.sql")
+    assert not is_sql_migration_file("src/migration/Migrator.java")
