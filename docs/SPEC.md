@@ -231,6 +231,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "schema_version": "1.0",
   "repo_name": "string",
   "generated_at_commit": "git-sha-or-null",
+  "include_tests": false,
   "tier_summary": { "scip_files": 120, "treesitter_files": 15 },
   "modules": [
     { "id": "mod:auth", "name": "auth", "language": "python", "path": "src/auth", "file_count": 12, "tier": "scip" }
@@ -268,6 +269,8 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 }
 ```
 `nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+
+**Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or work packets. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints` and `query module-summary` expose the same `--include-tests` opt-in.
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
@@ -309,14 +312,14 @@ arch-indexer index <repo> \
   [--offline] [--fetch-runtime] [--strict-tier1] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] \
-  [--docs-dir docs] [--auto-relocate-citations] [--cache-dir <dir>]
+  [--docs-dir docs] [--auto-relocate-citations] [--include-tests] [--cache-dir <dir>]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
 arch-indexer query <repo> refs <symbol> [--limit 100] [--json]
 arch-indexer query <repo> file-symbols <rel-path> [--json]
-arch-indexer query <repo> entrypoints [--module <mod>] [--json]
-arch-indexer query <repo> module-summary <mod> [--json]
+arch-indexer query <repo> entrypoints [--module <mod>] [--include-tests] [--json]
+arch-indexer query <repo> module-summary <mod> [--include-tests] [--json]
 arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
 
 # 4. Bounded worker planning

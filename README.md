@@ -26,15 +26,16 @@ pip install -e .   # add "[dev]" to also install pytest and ruff
 arch-indexer toolchain status --repo /path/to/repo
 arch-indexer toolchain ensure --repo /path/to/repo   # install missing pinned indexers (also run automatically by index without --offline)
 
-# Index a repository (Tier 1 SCIP, Tier 2 tree-sitter fallback)
-arch-indexer index /path/to/repo
+# Index a repository (Tier 1 SCIP, Tier 2 tree-sitter fallback; tests are indexed for references
+# but excluded from modules, packets, entrypoints and diagrams unless --include-tests is passed)
+arch-indexer index /path/to/repo [--include-tests]
 
 # Read-only queries over the local index (offline, deterministic)
 arch-indexer query /path/to/repo def <symbol> [--json]
 arch-indexer query /path/to/repo refs <symbol> [--limit 100] [--json]
 arch-indexer query /path/to/repo file-symbols <rel-path> [--json]
-arch-indexer query /path/to/repo entrypoints [--module <mod>] [--json]
-arch-indexer query /path/to/repo module-summary <mod> [--json]
+arch-indexer query /path/to/repo entrypoints [--module <mod>] [--include-tests] [--json]
+arch-indexer query /path/to/repo module-summary <mod> [--include-tests] [--json]
 arch-indexer query /path/to/repo flow-trace <entrypoint-id> [--depth 6] [--json]
 
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
@@ -97,6 +98,8 @@ The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-co
 - `file-symbols <rel-path>` lists the symbols defined in one indexed file.
 - `entrypoints [--module <mod>]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
 - `module-summary <mod>` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints.
+
+Test files (`tests/`, `test_*.py`, `*_test.go`, `*.test.ts`, `*.spec.ts`, `*Test.java`, ...) are always indexed so `def`/`refs` stay traceable, but they are not architecture: `entrypoints` and `module-summary` omit them unless `--include-tests` is passed, matching the `index` default.
 - `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root.
 
 ## Firstmate Integration

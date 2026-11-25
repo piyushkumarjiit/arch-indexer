@@ -17,6 +17,7 @@ from typing import Any
 
 from arch_indexer.config import get_cache_dir, get_repo_cache_id
 from arch_indexer.known_symbols import classify_sink
+from arch_indexer.source_scope import in_scope
 
 DEFAULT_QUERY_LIMIT: int = 100
 DEFAULT_FLOW_DEPTH: int = 6
@@ -207,13 +208,21 @@ def query_file_symbols(
     return file_dict, [_symbol_dict(row) for row in rows]
 
 
-def query_entrypoints(conn: sqlite3.Connection, module: str | None = None) -> list[dict[str, Any]]:
+def query_entrypoints(
+    conn: sqlite3.Connection,
+    module: str | None = None,
+    *,
+    include_tests: bool = False,
+) -> list[dict[str, Any]]:
     where = ""
     params: list[Any] = []
     if module is not None:
         clause, params = _prefix_clause("f.module", module)
-        known = conn.execute(f"SELECT COUNT(*) FROM files f WHERE {clause}", params).fetchone()[0]
-        if known == 0:
+        known = [
+            row[0]
+            for row in conn.execute(f"SELECT f.path FROM files f WHERE {clause}", params).fetchall()
+        ]
+        if not [path for path in known if in_scope(path, include_tests)]:
             raise QueryError(f"module not found: {module} (no indexed files in that module)")
         where = f"WHERE {clause}"
 
@@ -221,10 +230,12 @@ def query_entrypoints(conn: sqlite3.Connection, module: str | None = None) -> li
         f"{_ENTRYPOINT_SELECT} {where} ORDER BY e.file_path, e.line, e.kind, e.name, e.id",
         params,
     ).fetchall()
-    return [_entrypoint_dict(row) for row in rows]
+    return [_entrypoint_dict(row) for row in rows if in_scope(row["file_path"], include_tests)]
 
 
-def query_module_summary(conn: sqlite3.Connection, module: str) -> dict[str, Any]:
+def query_module_summary(
+    conn: sqlite3.Connection, module: str, *, include_tests: bool = False
+) -> dict[str, Any]:
     clause, params = _prefix_clause("module", module)
     files = [
         dict(row)
@@ -233,6 +244,7 @@ def query_module_summary(conn: sqlite3.Connection, module: str) -> dict[str, Any
             f"FROM files WHERE {clause} ORDER BY path",
             params,
         ).fetchall()
+        if in_scope(row["path"], include_tests)
     ]
     if not files:
         raise QueryError(f"module not found: {module} (no indexed files in that module)")
@@ -420,6 +432,7 @@ def run_query(
     limit: int = DEFAULT_QUERY_LIMIT,
     depth: int = DEFAULT_FLOW_DEPTH,
     as_json: bool = False,
+    include_tests: bool = False,
     cache_dir: str | Path | None = None,
 ) -> int:
     """Execute one query action, print its result, and return a process exit code."""
@@ -477,7 +490,7 @@ def run_query(
             return 0
 
         if action == "entrypoints":
-            entrypoints = query_entrypoints(conn, module)
+            entrypoints = query_entrypoints(conn, module, include_tests=include_tests)
             if as_json:
                 _print_json(
                     {
@@ -492,7 +505,7 @@ def run_query(
             return 0
 
         if action == "module-summary":
-            summary = query_module_summary(conn, module or "")
+            summary = query_module_summary(conn, module or "", include_tests=include_tests)
             if as_json:
                 _print_json(
                     {

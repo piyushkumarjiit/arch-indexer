@@ -34,6 +34,7 @@ from arch_indexer.mermaid_gen import (
 )
 from arch_indexer.plugins.base import module_with_parents
 from arch_indexer.plugins.infra_scanner import is_infra_file
+from arch_indexer.source_scope import filter_rows, in_scope
 from arch_indexer.storage.state import read_json, write_json
 from arch_indexer.store import IndexStore
 
@@ -127,18 +128,36 @@ def normalize_section_id(raw_id: str, heading: str, target_doc: str) -> str:
 def build_master_index(
     store: IndexStore,
     repo_path: str | Path,
+    *,
+    include_tests: bool = False,
 ) -> dict[str, Any]:
-    """Generate master-index.json: compact deterministic summary for agents (SPEC 2.2, 4.3)."""
+    """Generate master-index.json: compact deterministic summary for agents (SPEC 2.2, 4.3).
+
+    Test files stay in ``index.db`` but are excluded from modules and totals unless
+    ``include_tests`` is set (trial gap S5).
+    """
     target_repo = Path(repo_path).resolve()
-    file_rows = store.get_file_records()
+    file_rows = filter_rows(store.get_file_records(), include_tests, key="path")
     modules_list, module_by_file, _tier_by_file = _build_modules(file_rows)
 
     cursor = store.conn.cursor()
     cursor.execute("SELECT file_path, COUNT(*) FROM symbols GROUP BY file_path")
-    symbols_by_file = {row[0]: row[1] for row in cursor.fetchall()}
+    symbols_by_file = {
+        row[0]: row[1] for row in cursor.fetchall() if in_scope(row[0], include_tests)
+    }
 
     cursor.execute("SELECT file_path, COUNT(*) FROM entrypoints GROUP BY file_path")
-    entrypoints_by_file = {row[0]: row[1] for row in cursor.fetchall()}
+    entrypoints_by_file = {
+        row[0]: row[1] for row in cursor.fetchall() if in_scope(row[0], include_tests)
+    }
+
+    cursor.execute('SELECT file_path, COUNT(*) FROM "references" GROUP BY file_path')
+    references_by_file = {
+        row[0]: row[1] for row in cursor.fetchall() if in_scope(row[0], include_tests)
+    }
+
+    cursor.execute("SELECT file_path, COUNT(*) FROM infra_artifacts GROUP BY file_path")
+    infra_by_file = {row[0]: row[1] for row in cursor.fetchall() if in_scope(row[0], include_tests)}
 
     cursor.execute(
         "SELECT file_path, line, raw_symbol, language FROM unresolved_refs "
@@ -152,6 +171,7 @@ def build_master_index(
             "raw_symbol": row[2],
         }
         for row in cursor.fetchall()
+        if in_scope(row[0], include_tests)
     ]
 
     modules: list[dict[str, Any]] = []
@@ -180,25 +200,25 @@ def build_master_index(
         )
     modules.sort(key=lambda item: item["id"])
 
-    summary = store.get_summary()
     total_lines = sum(f["line_count"] for f in file_rows)
     scip_files = sum(1 for f in file_rows if f["tier"] == "scip")
     treesitter_files = sum(1 for f in file_rows if f["tier"] == "tree-sitter")
 
     summary_payload = {
         "scip_files": scip_files,
-        "total_entrypoints": summary["total_entrypoints"],
-        "total_files": summary["total_files"],
-        "total_infra_artifacts": summary["total_infra_artifacts"],
+        "total_entrypoints": sum(entrypoints_by_file.values()),
+        "total_files": len(file_rows),
+        "total_infra_artifacts": sum(infra_by_file.values()),
         "total_lines": total_lines,
-        "total_references": summary["total_references"],
-        "total_symbols": summary["total_symbols"],
-        "total_unresolved_refs": summary["total_unresolved_refs"],
+        "total_references": sum(references_by_file.values()),
+        "total_symbols": sum(symbols_by_file.values()),
+        "total_unresolved_refs": len(unresolved_refs),
         "treesitter_files": treesitter_files,
     }
 
     return {
         "generated_at_commit": git_head(target_repo),
+        "include_tests": include_tests,
         "modules": modules,
         "repo_name": target_repo.name,
         "schema_version": "1.0",
@@ -595,6 +615,9 @@ def run_plan(
         stderr.write(f"Error: Could not read JSON from '{graph_file}'.\n")
         return EXIT_ERROR
 
+    # pack/document only the files that shaped graph.json and master-index.json (gap S5)
+    include_tests = bool(graph.get("include_tests", False))
+
     # Read delta and state if present
     delta = read_json(cache_paths.index_delta_json) or {}
     state = read_json(cache_paths.state_json) or {}
@@ -638,7 +661,9 @@ def run_plan(
         if sec_id in REFERENCES_SECTION_IDS:
             continue
         raw_modules = [str(m) for m in entry.get("modules", [])]
-        cited_files = sorted(set(str(f) for f in entry.get("cited_files", [])))
+        cited_files = sorted(
+            set(str(f) for f in entry.get("cited_files", []) if in_scope(str(f), include_tests))
+        )
         resolved_modules: set[str] = set()
         for raw_mod in raw_modules:
             resolved_modules.update(
