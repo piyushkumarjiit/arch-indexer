@@ -361,3 +361,74 @@ def test_unresolved_refs_split_external_from_in_repo(tmp_path):
     formatted = store.format_summary()
     assert "4 unresolved refs (2 external, 2 in-repo)" in formatted
     store.close()
+
+
+def test_unresolved_refs_reverse_domain_tld_and_relative_imports(tmp_path):
+    """Reverse-domain TLDs stay external while relative JS/TS imports stay in-repo."""
+    store = IndexStore(tmp_path / "java_ts.db")
+    store.insert_files(
+        [
+            {
+                "path": "src/main/java/org/acme/orders/OrderService.java",
+                "language": "java",
+                "sha256": "a" * 64,
+                "line_count": 20,
+                "module": "org.acme.orders",
+                "tier": "scip",
+            },
+            {
+                "path": "web/src/App.tsx",
+                "language": "typescript",
+                "sha256": "b" * 64,
+                "line_count": 15,
+                "module": "web.src",
+                "tier": "tree-sitter",
+            },
+        ]
+    )
+    store.insert_unresolved_refs(
+        [
+            {
+                "file_path": "src/main/java/org/acme/orders/OrderService.java",
+                "line": 1,
+                "raw_symbol": "org.springframework.web.bind.annotation.RestController",
+                "language": "java",
+            },
+            {
+                "file_path": "src/main/java/org/acme/orders/OrderService.java",
+                "line": 2,
+                "raw_symbol": "org.slf4j.Logger",
+                "language": "java",
+            },
+            {
+                "file_path": "src/main/java/org/acme/orders/OrderService.java",
+                "line": 3,
+                "raw_symbol": "org.acme.orders.MissingHelper",
+                "language": "java",
+            },
+            {
+                "file_path": "web/src/App.tsx",
+                "line": 1,
+                "raw_symbol": "./missing",
+                "language": "typescript",
+            },
+            {
+                "file_path": "web/src/App.tsx",
+                "line": 2,
+                "raw_symbol": "../util",
+                "language": "typescript",
+            },
+            {
+                "file_path": "web/src/App.tsx",
+                "line": 3,
+                "raw_symbol": "react",
+                "language": "typescript",
+            },
+        ]
+    )
+
+    summary = store.get_summary()
+    assert summary["total_unresolved_refs"] == 6
+    assert summary["unresolved_external_refs"] == 3
+    assert summary["unresolved_in_repo_refs"] == 3
+    store.close()

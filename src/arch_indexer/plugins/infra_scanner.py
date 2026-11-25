@@ -20,6 +20,36 @@ from arch_indexer.plugins.base import (
 )
 from arch_indexer.toolchain import get_repo_files, is_sql_migration_file
 
+_SQL_TOKEN_RE = re.compile(
+    r"'(?:''|[^'])*'"
+    r"|--[^\n]*"
+    r"|/\*[\s\S]*?\*/"
+    r"|;",
+)
+
+
+def _count_sql_statements(content: str) -> int:
+    """Count non-empty SQL statements, ignoring comments and semicolons in strings."""
+    count = 0
+    has_code = False
+    pos = 0
+    for match in _SQL_TOKEN_RE.finditer(content):
+        if content[pos : match.start()].strip():
+            has_code = True
+        token = match.group(0)
+        if token == ";":
+            if has_code:
+                count += 1
+                has_code = False
+        elif token.startswith("'"):
+            has_code = True
+        pos = match.end()
+    if content[pos:].strip():
+        has_code = True
+    if has_code:
+        count += 1
+    return count
+
 
 class _ComposeLoader(yaml.SafeLoader):
     """Safe loader that keeps integer scalars as text.
@@ -299,11 +329,7 @@ class InfraScanner(LanguagePlugin):
                                 {
                                     "type": "schema_migration",
                                     "tables": [name for _, name in tables],
-                                    "statement_count": sum(
-                                        1
-                                        for line in lines
-                                        if line.strip() and not line.strip().startswith("--")
-                                    ),
+                                    "statement_count": _count_sql_statements(content),
                                 }
                             ),
                         }

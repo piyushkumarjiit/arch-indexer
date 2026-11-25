@@ -1234,10 +1234,26 @@ def test_sql_migrations_are_detected_as_infra(tmp_path):
     (repo / "src" / "migration" / "Migrator.java").write_text(
         "class Migrator {}\n", encoding="utf-8"
     )
+    (repo / "services" / "migration").mkdir(parents=True)
+    (repo / "services" / "migration" / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (repo / "packages" / "migrations").mkdir(parents=True)
+    (repo / "packages" / "migrations" / "package.json").write_text("{}\n", encoding="utf-8")
+    (repo / "packages" / "migrations" / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (repo / "docs" / "changelog").mkdir(parents=True)
+    (repo / "docs" / "changelog" / "releases.json").write_text("[]\n", encoding="utf-8")
+    (repo / "liquibase").mkdir(parents=True)
+    (repo / "liquibase" / "master.yaml").write_text("databaseChangeLog: []\n", encoding="utf-8")
 
     matched = detect_repo_files(repo)["infra"]
     assert "db/migration/V1__create_widget.sql" in matched
     assert "db/changelog/changes.xml" in matched
+    assert "liquibase/master.yaml" in matched
     assert "src/migration/Migrator.java" not in matched
+    assert "services/migration/pom.xml" not in matched
+    assert "packages/migrations/package.json" not in matched
+    assert "packages/migrations/tsconfig.json" not in matched
+    assert "docs/changelog/releases.json" not in matched
     assert is_sql_migration_file("db/migration/V2__add_column.sql")
     assert not is_sql_migration_file("src/migration/Migrator.java")
+    assert not is_sql_migration_file("db/migration/pom.xml")
+    assert not is_sql_migration_file("docs/changelog/releases.json")

@@ -32,26 +32,36 @@ from arch_indexer.config import (
     get_runtimes_dir,
 )
 
+DB_MIGRATION_DIR_NAMES = frozenset({"flyway", "liquibase"})
 MIGRATION_DIR_NAMES = frozenset(
     {"migration", "migrations", "flyway", "liquibase", "changelog", "changelogs"}
 )
-MIGRATION_DESCRIPTOR_SUFFIXES = (".sql", ".xml", ".yaml", ".yml", ".json")
+DB_CONTEXT_DIR_NAMES = frozenset({"db", "database", "databases", "sql", "schema", "schemas"})
+MIGRATION_DESCRIPTOR_SUFFIXES = (".xml", ".yaml", ".yml", ".json")
+_NON_MIGRATION_MANIFESTS = frozenset({"pom.xml", "package.json", "package-lock.json"})
 
 
 def is_sql_migration_file(rel_path: str) -> bool:
     """Whether a path is SQL schema evidence: a ``*.sql`` file or a migration descriptor.
 
     Flyway/Rails-style ``db/migration/*.sql`` trees are the common shape; Liquibase
-    keeps ``*.xml``/``*.yaml`` changelogs in a ``changelog`` directory, so descriptors
-    under a migration directory count too. Source files in a package that merely
-    happens to be called ``migration`` stay out by suffix.
+    keeps ``*.xml``/``*.yaml`` changelogs in a ``db/changelog`` or ``liquibase``
+    directory, so descriptors under those directories count too. Project manifests
+    and non-DB files in generic ``migration``/``changelog`` directories stay out.
     """
     path = PurePosixPath(str(rel_path).replace("\\", "/"))
-    if path.suffix.lower() == ".sql":
+    suffix = path.suffix.lower()
+    if suffix == ".sql":
         return True
-    if not any(part.lower() in MIGRATION_DIR_NAMES for part in path.parts[:-1]):
+    if suffix not in MIGRATION_DESCRIPTOR_SUFFIXES:
         return False
-    return path.suffix.lower() in MIGRATION_DESCRIPTOR_SUFFIXES
+    name_lower = path.name.lower()
+    if name_lower in _NON_MIGRATION_MANIFESTS or fnmatch.fnmatch(name_lower, "tsconfig*.json"):
+        return False
+    ancestors = {part.lower() for part in path.parts[:-1]}
+    if ancestors & DB_MIGRATION_DIR_NAMES:
+        return True
+    return bool(ancestors & MIGRATION_DIR_NAMES and ancestors & DB_CONTEXT_DIR_NAMES)
 
 
 # Directories excluded from file scanning & language detection

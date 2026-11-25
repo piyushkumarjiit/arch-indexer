@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from arch_indexer.config import RepoCachePaths
+from arch_indexer.module_identity import REVERSE_DOMAIN_TLDS
 
 UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
 
@@ -16,7 +17,8 @@ def _repo_namespaces(modules: Iterable[str], fqnames: Iterable[str]) -> set[str]
     namespaces: set[str] = set()
     for module in modules:
         parts = [part for part in UNRESOLVED_PREFIX_SPLIT_RE.split(str(module)) if part]
-        for size in range(1, len(parts) + 1):
+        start = 2 if len(parts) > 1 and parts[0].lower() in REVERSE_DOMAIN_TLDS else 1
+        for size in range(start, len(parts) + 1):
             namespaces.add(".".join(parts[:size]))
             namespaces.add("/".join(parts[:size]))
     for fqname in fqnames:
@@ -39,6 +41,8 @@ def is_repo_internal_symbol(
     symbol = str(raw_symbol).strip()
     if not symbol:
         return False
+    if symbol in (".", "..") or symbol.startswith(("./", "../")):
+        return True
     if symbol in namespaces:
         return True
     parent = symbol.rsplit(".", 1)[0]

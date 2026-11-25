@@ -2469,6 +2469,7 @@ def test_infra_scanner_records_sql_migration_schema(tmp_path: Path):
     }
     file_summary = next(s for s in summaries if s["type"] == "schema_migration")
     assert file_summary["tables"] == ["widget", "widget_audit"]
+    assert file_summary["statement_count"] == 2
     tables = [
         (a["file_path"], a["line"], json.loads(a["summary_json"])["table"])
         for a in sql_artifacts
