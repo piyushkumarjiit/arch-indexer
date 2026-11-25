@@ -175,7 +175,12 @@ def parse_version_ranges(spec: str) -> list[VersionRange]:
 
 @dataclass
 class MavenRequirement:
-    """The Maven versions a repository declares it needs."""
+    """The Maven versions a repository declares it needs.
+
+    Each inner tuple holds the ranges of one ``<version>`` spec, which Maven ORs
+    together; the outer list holds the separate ``RequireMavenVersion`` rules,
+    which Maven ANDs.
+    """
 
     ranges: list[tuple[VersionRange, ...]] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
