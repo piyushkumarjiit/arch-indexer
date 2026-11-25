@@ -37,7 +37,7 @@ arch-indexer/
 │   │   ├── python_plugin.py         # Tier 1: scip-python | Tier 2: tree-sitter-python
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
-│   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows
+│   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows, SQL migrations
 │   ├── store.py                     # SQLite schema & record persistence
 │   ├── indexer.py                   # Two-tier indexing orchestration & fallback recording
 │   ├── storage/
@@ -118,7 +118,7 @@ Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`) are n
 - **Python**: `*.py`, `pyproject.toml`, `requirements*.txt`, `setup.py`
 - **TypeScript / JavaScript**: `tsconfig*.json`, `package.json`, `*.ts`, `*.tsx`
 - **Java / Maven**: `pom.xml`, `*.java`
-- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`, and SQL schema migrations (`*.sql` anywhere plus `*.xml`/`*.yaml`/`*.yml`/`*.json` descriptors under a `migration`/`migrations`/`flyway`/`liquibase`/`changelog` directory)
+- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`, and SQL schema migrations: any `*.sql` file, plus `*.xml`/`*.yaml`/`*.yml`/`*.json` descriptors under a `flyway`/`liquibase` directory or under a `db`/`database`/`sql`/`schema` directory that also carries a `migration(s)`/`changelog(s)` segment (project manifests such as `pom.xml`, `package.json` and `tsconfig*.json` never count)
 
 ### 3.2 Pinned Tool Manifest (`toolchain.toml`)
 All external tools and parsers are pinned to exact versions:
@@ -292,7 +292,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "unresolved_refs_count": 14
 }
 ```
-`nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. A module's `tier` is its **majority** tier (ties resolve to `scip`), with `tier_mix` carrying the per-tier file counts, so one Tier 2 file cannot mislabel a mostly Tier 1 module. `tier_summary` is built from exactly the file set that produced `modules` and `nodes` (test files excluded unless `include_tests` is set): `total_files` equals the sum of module `file_count`s, and `excluded_test_files` reports the test rows that stay in `index.db` but are out of the architecture. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+`nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. A module's `tier` is its **majority** tier (ties resolve to `scip`), with `tier_mix` carrying the per-tier file counts, so one Tier 2 file cannot mislabel a mostly Tier 1 module. `tier_summary` is built from exactly the file set that produced `modules` and `nodes` (test files excluded unless `include_tests` is set): `total_files` equals the sum of module `file_count`s, and `excluded_test_files` reports the test rows that stay in `index.db` but are out of the architecture. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts, so each SQL table found in a migration contributes evidence to the single `sql`/`sql-schema` data store. The exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before the stored index is rebuilt.
 
@@ -400,7 +400,7 @@ Prose must be direct, concise, and readable without inline file-path clutter. Ev
    - `## 4. Data Model` (schemas, entities, persistence stores, migrations/lifecycle)
    - `## 5. Interfaces & Entry Points` (HTTP APIs, CLI commands, workers/queues, webhooks, frontend callers)
    - `## 6. Security` (authN/authZ enforcement, input validation, secrets handling, auditability—separating implemented controls from unverified areas)
-   - `## 7. Deployment & Infrastructure` (Docker, Compose, Shell, Terraform/HCL, CI/CD, runtime boundaries)
+   - `## 7. Deployment & Infrastructure` (Docker, Compose, Shell, SQL schema migrations, Terraform/HCL, CI/CD, runtime boundaries)
    - `## 8. Known Gaps & Limitations` (missing auth checks, scalability bottlenecks, unresolved external refs, Tier 2 fallback coverage notes)
    - `## References` (footnote definitions)
 

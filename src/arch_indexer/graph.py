@@ -302,7 +302,7 @@ def _collect_boundaries(
 
 
 def _collect_infra_boundaries(infra_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Detect data stores from Docker/Compose/Terraform infrastructure artifacts."""
+    """Detect data stores from Docker/Compose/Terraform artifacts and SQL migrations."""
     boundaries: dict[str, dict[str, Any]] = {}
 
     def add(boundary: str, kind: str, canonical: str, label: str, evidence: str) -> None:

@@ -36,7 +36,8 @@ def is_repo_internal_symbol(
     A reference is external when its root package belongs to a third-party library
     (``java.util``, ``org.springframework``); it is in-repo when the referenced name,
     its parent symbol, or one of its package prefixes matches an indexed module or
-    symbol fqname. Only the second class signals a defect in the index.
+    symbol fqname. Relative imports (``./x``, ``../x``, ``.``, ``..``) are always
+    in-repo. Only the in-repo class signals a defect in the index.
     """
     symbol = str(raw_symbol).strip()
     if not symbol:
