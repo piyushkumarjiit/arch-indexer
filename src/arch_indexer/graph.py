@@ -21,6 +21,7 @@ from arch_indexer.graph_rules import (
     classify_token,
     edge_kind_for_token,
 )
+from arch_indexer.source_scope import filter_rows
 from arch_indexer.store import IndexStore
 from arch_indexer.viewer import render_viewer
 
@@ -339,44 +340,72 @@ def _collect_infra_boundaries(infra_rows: list[dict[str, Any]]) -> dict[str, dic
     return boundaries
 
 
-def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
-    """Build the deterministic SPEC 6.1 graph payload from an open index."""
+def build_graph(
+    store: IndexStore,
+    repo_path: str | Path,
+    *,
+    include_tests: bool = False,
+) -> dict[str, Any]:
+    """Build the deterministic SPEC 6.1 graph payload from an open index.
+
+    Test files stay in ``index.db`` but are excluded from modules, entrypoint nodes,
+    diagram domains and flow edges unless ``include_tests`` is set (trial gap S5).
+    """
     repo = Path(repo_path)
-    file_rows = _row_dicts(store, "SELECT path, language, module, tier FROM files ORDER BY path")
+    file_rows = filter_rows(
+        _row_dicts(store, "SELECT path, language, module, tier FROM files ORDER BY path"),
+        include_tests,
+        key="path",
+    )
     modules, module_by_file, tier_by_file = _build_modules(file_rows)
 
-    symbol_rows = _row_dicts(
-        store,
-        "SELECT fqname, name, kind, file_path, start_line, end_line "
-        "FROM symbols ORDER BY file_path, start_line, fqname",
+    symbol_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT fqname, name, kind, file_path, start_line, end_line "
+            "FROM symbols ORDER BY file_path, start_line, fqname",
+        ),
+        include_tests,
     )
     symbols_by_fqname = {row["fqname"]: row for row in symbol_rows}
     symbols_by_file = _symbol_index(symbol_rows)
 
-    entrypoint_rows = _row_dicts(
-        store,
-        "SELECT kind, name, method, route_or_trigger, file_path, line, symbol_fqname, "
-        "auth_symbols_json FROM entrypoints "
-        "ORDER BY file_path, line, kind, name, method, route_or_trigger",
+    entrypoint_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT kind, name, method, route_or_trigger, file_path, line, symbol_fqname, "
+            "auth_symbols_json FROM entrypoints "
+            "ORDER BY file_path, line, kind, name, method, route_or_trigger",
+        ),
+        include_tests,
     )
     entrypoint_nodes, handler_to_nodes = _entrypoint_nodes(
         entrypoint_rows, module_by_file, tier_by_file
     )
 
-    ref_rows = _row_dicts(
-        store,
-        'SELECT symbol_fqname, file_path, line, ref_kind FROM "references" '
-        "ORDER BY file_path, line, col, symbol_fqname, ref_kind",
+    ref_rows = filter_rows(
+        _row_dicts(
+            store,
+            'SELECT symbol_fqname, file_path, line, ref_kind FROM "references" '
+            "ORDER BY file_path, line, col, symbol_fqname, ref_kind",
+        ),
+        include_tests,
     )
-    unresolved_rows = _row_dicts(
-        store,
-        "SELECT file_path, line, raw_symbol, language FROM unresolved_refs "
-        "ORDER BY file_path, line, raw_symbol",
+    unresolved_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT file_path, line, raw_symbol, language FROM unresolved_refs "
+            "ORDER BY file_path, line, raw_symbol",
+        ),
+        include_tests,
     )
-    infra_rows = _row_dicts(
-        store,
-        "SELECT kind, file_path, line, summary_json FROM infra_artifacts "
-        "ORDER BY file_path, line, kind",
+    infra_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT kind, file_path, line, summary_json FROM infra_artifacts "
+            "ORDER BY file_path, line, kind",
+        ),
+        include_tests,
     )
 
     boundaries, boundary_candidates = _collect_boundaries(
@@ -511,6 +540,7 @@ def build_graph(store: IndexStore, repo_path: str | Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "repo_name": repo.name,
         "generated_at_commit": git_head(repo),
+        "include_tests": include_tests,
         "tier_summary": {
             "scip_files": sum(1 for row in file_rows if row["tier"] == "scip"),
             "treesitter_files": sum(1 for row in file_rows if row["tier"] == "tree-sitter"),

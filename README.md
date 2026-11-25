@@ -26,15 +26,16 @@ pip install -e .   # add "[dev]" to also install pytest and ruff
 arch-indexer toolchain status --repo /path/to/repo
 arch-indexer toolchain ensure --repo /path/to/repo   # install missing pinned indexers (also run automatically by index without --offline)
 
-# Index a repository (Tier 1 SCIP, Tier 2 tree-sitter fallback)
-arch-indexer index /path/to/repo
+# Index a repository (Tier 1 SCIP, Tier 2 tree-sitter fallback; tests are indexed for references
+# but excluded from modules, packets, entrypoints and diagrams unless --include-tests is passed)
+arch-indexer index /path/to/repo [--include-tests]
 
 # Read-only queries over the local index (offline, deterministic)
 arch-indexer query /path/to/repo def <symbol> [--json]
 arch-indexer query /path/to/repo refs <symbol> [--limit 100] [--json]
 arch-indexer query /path/to/repo file-symbols <rel-path> [--json]
-arch-indexer query /path/to/repo entrypoints [--module <mod>] [--json]
-arch-indexer query /path/to/repo module-summary <mod> [--json]
+arch-indexer query /path/to/repo entrypoints [--module <mod>] [--include-tests] [--json]
+arch-indexer query /path/to/repo module-summary <mod> [--include-tests] [--json]
 arch-indexer query /path/to/repo flow-trace <entrypoint-id> [--depth 6] [--json]
 
 # Validation gates (offline; exits 0 on clean, 3 on validation failure)
@@ -55,11 +56,13 @@ arch-indexer assemble /path/to/repo --drafts-dir docs/.drafts [--docs-dir docs] 
 
 `index` discovers Python, TypeScript/JavaScript and Java/Maven units plus infrastructure units with a pure-Python scanner, writes `<cache>/repos/<id>/index.db`, and prints a one-line index summary followed by a delta summary and, when any section is impacted, an impacted-section count. Language units use their pinned Tier 1 SCIP indexer when available (installed automatically by `toolchain ensure` unless `--offline` is passed; add `--fetch-runtime` to also fetch the pinned portable JDK/Maven) and its runtime is available; otherwise they use the Tier 2 `tree-sitter` parser, while infrastructure units always use the pure-Python scanner. Every file row records its `tier` (`scip` or `tree-sitter`) and, for a Tier 2 fallback, the `fallback_reason`. The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/arch-indexer`; set `ARCH_INDEXER_CACHE` or pass `--cache-dir` to override it.
 
+Test files are indexed so `def` and `refs` stay traceable, but they are not architecture: unless `--include-tests` is passed, they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. [Section 6.1 of the spec](docs/SPEC.md) lists the exact path patterns.
+
 Each run also writes `<cache>/repos/<id>/master-index.json`, the compact module, file, symbol, entrypoint and unresolved-reference summary that `plan` and the workers read. It then snapshots the indexed tree to `<cache>/repos/<id>/state.json` (file and symbol signatures, the module-to-section map and the hashes of generated diagram blocks; see [section 5.1 of the spec](docs/SPEC.md)) and diffs the snapshot against the previous run into `index-delta.json` and `impacted-sections.json` next to `index.db`:
 
-- **First run** (no `state.json`, or `--force-full`): every file is reported as added, every existing section is impacted (a canonical document with no sections contributes its full canonical outline), and `index` exits `2` (`DELTA_DETECTED`).
+- **First run** (no `state.json`, or `--force-full`): every non-test file is reported as added, every existing section is impacted (a canonical document with no sections contributes its full canonical outline), and `index` exits `2` (`DELTA_DETECTED`).
 - **Unchanged repository with up-to-date documents**: the delta is empty and `index` exits `0` (`NO_CHANGES`), so no workers are needed.
-- **Changes**: added/modified/deleted files and added/modified/moved/deleted symbols are reported. Deleted files are purged from every `index.db` table and every section citing them is impacted. Sections covering a module with new files or symbols are impacted through the stored module-to-section map, newly added modules without a covering section are listed under `missing_sections`, and a changed `AUTO-DIAGRAM` block marks its section impacted even when the source tree is unchanged.
+- **Changes**: added/modified/deleted non-test files and symbols are reported. Deleted files are purged from every `index.db` table and every section citing them is impacted. Sections covering a module with new files or symbols are impacted through the stored module-to-section map, newly added modules without a covering section are listed under `missing_sections`, and a changed `AUTO-DIAGRAM` block marks its section impacted even when the source tree is unchanged.
 - **Line-shift-only changes**: when the only difference is moved symbols (same body, visibility and decorators, unchanged file content signature, new line numbers; see [section 5.4 of the spec](docs/SPEC.md)), `index --auto-relocate-citations` rewrites the shifted `file:line` footnotes in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, re-runs `check-citations` and updates `state.json`. It exits `0` when no section remains impacted, `2` when a relocated document still has an impacted section (a changed `AUTO-DIAGRAM` block or a missing canonical section), and `3` (`VALIDATION_FAILED`) when citations still fail.
 
 A required section whose body is still empty is impacted with the `empty_section` reason on every run, so an unchanged repository whose documents are not yet complete keeps exiting `2` until those sections are written.
@@ -84,7 +87,7 @@ arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 
 ### Graph and flow viewer
 
-`arch-indexer index` exports the deterministic SPEC 6.1 graph to `docs/graph.json` and writes `docs/flow-viewer.html` from the same payload. The graph is built only from `index.db` plus the repository name and git HEAD, with sorted modules, nodes, edges, data stores and external sinks, so repeated runs over an unchanged repository produce byte-identical files. The indexer records entrypoint auth guards, indexing tiers, and data-store/external-sink evidence, and counts unresolved references; `graph.json` is the single input for both Mermaid generation and the viewer.
+`arch-indexer index` exports the deterministic SPEC 6.1 graph to `docs/graph.json` and writes `docs/flow-viewer.html` from the same payload. The graph is built only from `index.db` plus the repository name, git HEAD and the resolved test scope, with sorted modules, nodes, edges, data stores and external sinks, so repeated runs over an unchanged repository produce byte-identical files. The indexer records entrypoint auth guards, indexing tiers, and data-store/external-sink evidence, and counts unresolved references; `graph.json` is the single input for both Mermaid generation and the viewer.
 
 The same payload generates the Mermaid diagrams: `module-overview` (`flowchart LR` of modules, data stores and external sinks) and one `flow-<domain>` diagram per entrypoint domain (`flowchart TD` from entrypoints through services to data stores and sinks). Generation is deterministic and respects the generator's fixed node/edge budgets (35 nodes and 60 edges); when a graph exceeds a budget, service nodes are aggregated to their modules or the diagram is truncated, with a note pointing at `docs/flow-viewer.html`. `check-mermaid` regenerates each `AUTO-DIAGRAM` block from `docs/graph.json` and fails on any manual edit or missing block.
 
@@ -97,9 +100,11 @@ The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-co
 - `def <symbol>` resolves an exact fqname, then an exact name, then a dotted suffix.
 - `refs <symbol> [--limit 100]` lists imports, calls and other references; the limit caps output (`--json` reports the untruncated `count` and `truncated`). A symbol that is defined in the index but has no references exits `0` with an empty result.
 - `file-symbols <rel-path>` lists the symbols defined in one indexed file.
-- `entrypoints [--module <mod>]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
-- `module-summary <mod>` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints.
+- `entrypoints [--module <mod>] [--include-tests]` lists detected HTTP routes, CLI commands, `__main__` blocks and frontend API callers with their numeric `id`.
+- `module-summary <mod> [--include-tests]` prints a module's file, symbol and entrypoint counts followed by its files, symbols and entrypoints.
 - `flow-trace <entrypoint-id> [--depth 6]` walks `call` references breadth-first from the entrypoint's symbol, printing the root as `0 file:line symbol` and each call as `depth file:line caller -> callee`. It stops at a bounded depth and marks callees that have no definition in the index and match the known data-store or external-sink client symbols (kept in `src/arch_indexer/known_symbols.py`) as `[datastore]` or `[external-sink]`. Callees defined in the repository are always expanded, never marked, and an entrypoint whose code has no indexed enclosing symbol (an `if __name__ == "__main__"` block, a file-level argparse CLI, or a module-level TypeScript `fetch`/`axios` call) fails instead of guessing a root.
+
+Test files are outside the default architecture scope (see [Indexing](#indexing)); `entrypoints` and `module-summary` include them when `--include-tests` is passed.
 
 ## Firstmate Integration
 

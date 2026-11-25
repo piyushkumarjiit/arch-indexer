@@ -151,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Automatically repair shifted line citations",
     )
+    index_parser.add_argument(
+        "--include-tests",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat test files as architecture too (modules, packets, entrypoints, diagrams); "
+            "tests are always indexed for query def/refs"
+        ),
+    )
     index_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 3. query
@@ -185,12 +194,24 @@ def build_parser() -> argparse.ArgumentParser:
     # query entrypoints
     q_entry = query_sub.add_parser("entrypoints", help="List discovered entrypoints")
     q_entry.add_argument("--module", default=None, help="Optional module filter")
+    q_entry.add_argument(
+        "--include-tests",
+        action="store_true",
+        default=False,
+        help="Include entrypoints discovered in test files",
+    )
     q_entry.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_entry.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query module-summary
     q_mod = query_sub.add_parser("module-summary", help="Summarize module contents and flows")
     q_mod.add_argument("module", help="Module identifier")
+    q_mod.add_argument(
+        "--include-tests",
+        action="store_true",
+        default=False,
+        help="Include test files in the module summary",
+    )
     q_mod.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_mod.add_argument("--cache-dir", default=None, help="Cache directory override")
 
@@ -349,6 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 chunk_files=args.chunk_files,
                 docs_dir=args.docs_dir,
                 auto_relocate_citations=args.auto_relocate_citations,
+                include_tests=args.include_tests,
                 cache_dir=args.cache_dir,
             )
         except (OSError, RuntimeError, ValueError) as e:
@@ -394,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=getattr(args, "limit", DEFAULT_QUERY_LIMIT),
                 depth=getattr(args, "depth", DEFAULT_FLOW_DEPTH),
                 as_json=args.json,
+                include_tests=getattr(args, "include_tests", False),
                 cache_dir=args.cache_dir,
             )
         except QueryError as e:

@@ -54,6 +54,7 @@ arch-indexer/
 │   │       └── viewer_logic.js
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
+│   ├── source_scope.py              # Test-vs-product path classification for architecture outputs
 │   ├── checks/
 │   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
 │   │   └── mermaid.py               # Static Mermaid validator & AUTO-DIAGRAM verifier
@@ -197,16 +198,18 @@ On each `arch-indexer index <repo>` run:
    - `added_files`, `modified_files`, `deleted_files`
    - `added_symbols`, `modified_symbols` (body, visibility or decorator signature changed), `moved_symbols` (unchanged signature, changed `start_line`), `deleted_symbols`
 
+Unless `index --include-tests` was passed, test files (section 6.1) are excluded from every list in `index-delta.json` and from the module map that drives section impact mapping, so a test-only change routes no work to workers.
+
 ### 5.2 First Run (No Previous Index)
 - Detected when `state.json` does not exist (or `--force-full` is passed).
-- All indexed files are recorded under `added_files`.
+- All indexed non-test files are recorded under `added_files` (test files stay indexed for queries; see section 6.1).
 - Every existing section in `DESIGN.md` and `USER_GUIDE.md` is added to `impacted-sections.json`; a canonical document with no sections contributes its full canonical outline (section 8.1).
 - Exits with code **`2`** (`DELTA_DETECTED`).
 
 ### 5.3 Deleted-File Handling
 - Any path present in `state.json` but absent on disk is:
   1. Purged from `index.db` (`files`, `symbols`, `references`, `entrypoints`, `infra_artifacts`, `unresolved_refs`) and omitted from `graph.json`.
-  2. Listed under `deleted_files` (with its previously indexed symbols under `deleted_symbols`) in `index-delta.json`.
+  2. Listed under `deleted_files` (with its previously indexed symbols under `deleted_symbols`) in `index-delta.json`, unless it is a test file and `--include-tests` was not passed (section 6.1).
   3. Mapped via the citation index to every doc section that cited the deleted file or its symbols, adding those sections to `impacted-sections.json`.
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
 
@@ -232,6 +235,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "schema_version": "1.0",
   "repo_name": "string",
   "generated_at_commit": "git-sha-or-null",
+  "include_tests": false,
   "tier_summary": { "scip_files": 120, "treesitter_files": 15 },
   "modules": [
     { "id": "mod:auth", "name": "auth", "language": "python", "path": "src/auth", "file_count": 12, "tier": "scip" }
@@ -269,6 +273,8 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 }
 ```
 `nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+
+**Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints` and `query module-summary` expose the same `--include-tests` opt-in.
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
@@ -310,14 +316,14 @@ arch-indexer index <repo> \
   [--offline] [--fetch-runtime] [--strict-tier1] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] \
-  [--docs-dir docs] [--auto-relocate-citations] [--cache-dir <dir>]
+  [--docs-dir docs] [--auto-relocate-citations] [--include-tests] [--cache-dir <dir>]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
 arch-indexer query <repo> refs <symbol> [--limit 100] [--json]
 arch-indexer query <repo> file-symbols <rel-path> [--json]
-arch-indexer query <repo> entrypoints [--module <mod>] [--json]
-arch-indexer query <repo> module-summary <mod> [--json]
+arch-indexer query <repo> entrypoints [--module <mod>] [--include-tests] [--json]
+arch-indexer query <repo> module-summary <mod> [--include-tests] [--json]
 arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
 
 # 4. Bounded worker planning
