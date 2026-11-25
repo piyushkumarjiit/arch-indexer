@@ -626,6 +626,107 @@ def test_ensure_keeps_host_maven_that_satisfies_repo_requirement(tmp_path: Path)
     )
 
 
+def test_check_host_runtimes_marks_failing_or_unparseable_mvn_unavailable(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pom.xml").write_text("<project></project>")
+    manifest = {
+        "tools": {},
+        "runtimes": {**RUNTIMES, "maven": {"version": "3.9.16"}},
+    }
+
+    def run_fail(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "Error: JAVA_HOME is not defined\n")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def run_unparseable(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run_fail),
+    ):
+        failed = check_host_runtimes(repo)["mvn"]
+
+    assert failed.available is False
+    assert failed.version is None
+    assert "JAVA_HOME is not defined" in failed.message
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run_unparseable),
+    ):
+        unparseable = check_host_runtimes(repo)["mvn"]
+
+    assert unparseable.available is False
+    assert unparseable.version is None
+    assert "Unable to parse Maven version" in unparseable.message
+
+
+def test_portable_maven_is_not_adopted_or_fetched_when_it_violates_repo_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo, "[4.0.0,)")
+    cache = tmp_path / "cache"
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest = {
+        **_runtime_pin_manifest(jdk_bytes, maven_bytes),
+        "tools": _java_tools(coursier_bytes),
+    }
+
+    def run(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "Apache Maven 3.8.7\n", "")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        if "bootstrap" in cmd:
+            launcher = Path(cmd[cmd.index("-o") + 1])
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+        patch(
+            "arch_indexer.toolchain.urllib.request.urlopen",
+            side_effect=_runtime_downloads(jdk_bytes, maven_bytes, coursier_bytes),
+        ) as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    assert not (cache / "runtimes" / "apache-maven-test").exists()
+    assert not any(
+        call.args[0].full_url.endswith("maven.tar.gz") for call in urlopen.call_args_list
+    )
+    assert any("Maven runtime unavailable" in w for w in res["warnings"])
+
+    _seed_portable_runtime(cache, manifest)
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+    ):
+        report = get_toolchain_status(repo, cache_dir=cache)
+
+    assert report.runtimes["mvn"].available is False
+    assert report.runtimes["mvn"].version == "3.8.7"
+
+
 def test_tool_status_missing(tmp_path):
     cache = tmp_path / "cache"
     status = check_tool_status("scip-python", cache_dir=cache)

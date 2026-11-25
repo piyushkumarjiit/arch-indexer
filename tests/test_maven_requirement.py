@@ -58,6 +58,11 @@ def test_version_comparison_orders_numeric_and_qualifier_parts():
 def test_parse_maven_version_reads_mvn_first_line():
     assert parse_maven_version("Apache Maven 3.8.7 (b89d...)") == "3.8.7"
     assert parse_maven_version("Apache Maven 3.9.16") == "3.9.16"
+    assert parse_maven_version("3.9.16") == "3.9.16"
+    assert parse_maven_version("3.9.0-rc1") == "3.9.0-rc1"
+    assert parse_maven_version("available") is None
+    assert parse_maven_version("") is None
+    assert parse_maven_version("Error: JAVA_HOME is not defined correctly.") is None
 
 
 def test_parse_version_ranges_supports_brackets_and_bare_minimums():
@@ -178,3 +183,48 @@ def test_unresolved_property_is_not_treated_as_a_requirement(tmp_path: Path):
     )
 
     assert detect_maven_requirement(repo) is None
+
+
+def test_disjoint_ranges_in_one_spec_are_ored_while_separate_rules_are_anded(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write(
+        repo,
+        "pom.xml",
+        "<project><build><plugins><plugin><configuration><rules>"
+        "<requireMavenVersion><version>[3.8.1,3.8.4),[3.8.5,)</version></requireMavenVersion>"
+        "<requireMavenVersion><version>(,4.0.0)</version></requireMavenVersion>"
+        "</rules></configuration></plugin></plugins></build></project>",
+    )
+
+    requirement = detect_maven_requirement(repo)
+
+    assert requirement is not None
+    assert requirement.describe() == "[3.8.1,3.8.4),[3.8.5,), (,4.0.0)"
+    assert requirement.accepts("3.8.2") is True
+    assert requirement.accepts("3.8.4") is False
+    assert requirement.accepts("3.9.16") is True
+    assert requirement.accepts("4.0.0") is False
+
+
+def test_xml_comments_in_pom_are_ignored(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write(
+        repo,
+        "pom.xml",
+        "<project>"
+        "<properties>"
+        "<!-- <maven.min>4.0.0</maven.min> -->"
+        "<maven.min>3.9.0</maven.min>"
+        "</properties>"
+        "<build><plugins><plugin><configuration><rules>"
+        "<!-- <requireMavenVersion><version>[5.0.0,)</version></requireMavenVersion> -->"
+        "<requireMavenVersion><version>[${maven.min},4.0.0)</version></requireMavenVersion>"
+        "</rules></configuration></plugin></plugins></build></project>",
+    )
+
+    requirement = detect_maven_requirement(repo)
+
+    assert requirement is not None
+    assert requirement.describe() == "[3.9.0,4.0.0)"
+    assert requirement.accepts("3.9.16") is True
+    assert requirement.accepts("3.8.7") is False

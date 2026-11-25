@@ -1567,6 +1567,54 @@ def test_run_index_warns_loudly_when_every_unit_file_falls_back(tmp_path: Path, 
     )
 
 
+def test_java_tier1_preserves_maven_error_lines_past_verbose_info_banner(tmp_path: Path):
+    from arch_indexer.plugins.base import truncate_fallback_message
+
+    plugin = JavaPlugin()
+    unit = IndexUnit(
+        unit_id="java:root",
+        name="root",
+        language="java",
+        root_dir=FIXTURES_DIR / "java_maven",
+        files=[
+            FIXTURES_DIR / "java_maven" / "src" / "main" / "java" / "com" / "example" / "App.java"
+        ],
+        metadata={"pom": "pom.xml"},
+    )
+    fake_launcher = tmp_path / "fake-scip-java"
+    fake_launcher.touch()
+    mock_rt = {"java": MagicMock(available=True), "mvn": MagicMock(available=True)}
+    verbose_info = "\n".join(
+        f"[INFO] Scanning project lifecycle step {i} {'x' * 60}" for i in range(25)
+    )
+    maven_stdout = (
+        f"{verbose_info}\n"
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-enforcer-plugin:enforce\n"
+        "[ERROR] Detected Maven Version: 3.8.7 is not in the allowed range [3.9.0,4.0.0).\n"
+    )
+
+    with (
+        patch(
+            "arch_indexer.plugins.java_plugin._effective_runtimes",
+            return_value=(mock_rt, MagicMock(env={}), {}),
+        ),
+        patch("arch_indexer.plugins.java_plugin.check_tool_status") as mock_status,
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_launcher)
+        mock_run.return_value = MagicMock(returncode=1, stderr="", stdout=maven_stdout)
+        signal = plugin.index_unit_tier1(
+            unit,
+            {"cache_dir": tmp_path / "cache", "unit_timeout_sec": 30},
+        )
+
+    assert isinstance(signal, FallbackSignal)
+    assert signal.reason == "build_failure"
+    truncated = truncate_fallback_message(signal.message)
+    assert "Detected Maven Version: 3.8.7 is not in the allowed range [3.9.0,4.0.0)." in truncated
+    assert "[INFO]" not in truncated
+
+
 # 6. Preserve entrypoints from Tier 2 for Tier 1 units
 def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
     """Verify Tier 1 returns a real IndexResult with preserved and aligned entrypoints."""

@@ -110,8 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ARG",
         help=(
-            "Extra argument passed to Maven by scip-java after '--' (repeatable, e.g. "
-            "--maven-arg -Dmaven.repo.local=/path/.m2)"
+            "Extra argument passed to Maven by scip-java after '--' (repeatable; use '=' "
+            "when the argument starts with '-', e.g. --maven-arg=-Dmaven.repo.local=/path/.m2)"
         ),
     )
     index_parser.add_argument(

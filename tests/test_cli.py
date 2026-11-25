@@ -437,6 +437,17 @@ def test_cli_index_forwards_repeatable_maven_args_and_online_flag(tmp_path):
     assert kwargs["maven_online"] is True
 
 
+def test_cli_index_help_maven_arg_example_is_parseable(capsys):
+    assert main(["index", "--help"]) == EXIT_OK
+    help_text = capsys.readouterr().out
+    assert "--maven-arg=-Dmaven.repo.local=/path/.m2" in help_text
+
+    args = build_parser().parse_args(
+        ["index", "some/repo", "--maven-arg=-Dmaven.repo.local=/path/.m2"]
+    )
+    assert args.maven_args == ["-Dmaven.repo.local=/path/.m2"]
+
+
 def test_cli_query_units_parses():
     parser = build_parser()
 

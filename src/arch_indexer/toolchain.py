@@ -238,11 +238,15 @@ def _maven_status(
     version = parse_maven_version(version_text)
     required = requirement.describe() if requirement is not None else None
     if version is None:
+        raw = version_text.strip()
         return RuntimeStatus(
             name="mvn",
-            available=True,
-            version=version_text.strip() or None,
-            message=f"Unable to parse Maven version from {version_text.strip()}",
+            available=False,
+            message=(
+                f"Unable to parse Maven version from {raw}"
+                if raw
+                else "Unable to parse Maven version"
+            ),
             required=required,
             pinned_version=pinned_version,
         )
@@ -379,9 +383,20 @@ def check_host_runtimes(repo_path: str | Path | None = None) -> dict[str, Runtim
             res = subprocess.run(
                 [mvn_cmd, "--version"], capture_output=True, text=True, check=False
             )
-            raw = res.stdout.strip()
-            first_line = raw.splitlines()[0] if raw else "available"
-            runtimes["mvn"] = _maven_status(first_line, maven_requirement, maven_pin)
+            if res.returncode != 0:
+                detail = (res.stderr or res.stdout).strip()
+                first_line = detail.splitlines()[0] if detail else f"exit code {res.returncode}"
+                runtimes["mvn"] = RuntimeStatus(
+                    name="mvn",
+                    available=False,
+                    message=f"mvn --version failed: {first_line}",
+                    required=maven_requirement.describe() if maven_requirement else None,
+                    pinned_version=maven_pin,
+                )
+            else:
+                raw = res.stdout.strip()
+                first_line = raw.splitlines()[0] if raw else ""
+                runtimes["mvn"] = _maven_status(first_line, maven_requirement, maven_pin)
         except (subprocess.SubprocessError, OSError) as e:
             runtimes["mvn"] = RuntimeStatus(
                 name="mvn",
@@ -841,6 +856,7 @@ def _effective_runtimes(
     """
     manifest = load_toolchain_manifest()
     java_min = manifest["runtimes"]["java_min_version"]
+    maven_requirement = detect_maven_requirement(repo_path)
     runtimes = dict(check_host_runtimes(repo_path))
     installed = _ready_portable_runtimes(cache_dir)
 
@@ -865,7 +881,11 @@ def _effective_runtimes(
         )
 
     maven = installed.get("maven")
-    if maven is not None and not runtimes["mvn"].available:
+    if (
+        maven is not None
+        and not runtimes["mvn"].available
+        and (maven_requirement is None or maven_requirement.accepts(maven.version))
+    ):
         portable["maven"] = maven
         mvn_cmd = str(maven.executable)
         path_entries.append(str(maven.path / "bin"))
@@ -927,7 +947,16 @@ def _prepare_java_runtime(
         if not runtimes["java"].available:
             kinds.append("jdk")
         if maven_repo and not runtimes["mvn"].available:
-            kinds.append("maven")
+            maven_requirement = detect_maven_requirement(repo_path)
+            pinned_maven = runtimes["mvn"].pinned_version or load_toolchain_manifest()[
+                "runtimes"
+            ].get("maven", {}).get("version")
+            if (
+                maven_requirement is None
+                or pinned_maven is None
+                or maven_requirement.accepts(pinned_maven)
+            ):
+                kinds.append("maven")
         if kinds:
             downloaded = ensure_portable_runtimes(cache_dir, kinds=tuple(kinds))
             runtimes, runtime, portable = _effective_runtimes(cache_dir, repo_path=repo_path)

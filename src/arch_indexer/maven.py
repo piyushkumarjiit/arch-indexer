@@ -31,6 +31,7 @@ _SKIP_DIR_NAMES = {
     ".mypy_cache",
 }
 
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _ENFORCER_BLOCK_RE = re.compile(
     r"<requireMavenVersion\b[^>]*>(.*?)</requireMavenVersion>", re.DOTALL
 )
@@ -42,6 +43,7 @@ _RANGE_SPEC_RE = re.compile(r"[\[(][^\[\]()]*[\])]")
 _WRAPPER_URL_RE = re.compile(
     r"apache-maven-([0-9][^/\s]*?)(?:-(?:bin|src))?\.(?:zip|tar\.gz|tgz)\b"
 )
+_BARE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-][0-9A-Za-z_.-]+)?$")
 _LEADING_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)*)(.*)", re.DOTALL)
 _QUALIFIER_RE = re.compile(r"([a-z]+)(\d*)")
 
@@ -100,7 +102,9 @@ def parse_maven_version(version_text: str) -> str | None:
     if match:
         return match.group(1)
     stripped = version_text.strip()
-    return stripped or None
+    if _BARE_VERSION_RE.match(stripped):
+        return stripped
+    return None
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def parse_version_ranges(spec: str) -> list[VersionRange]:
 class MavenRequirement:
     """The Maven versions a repository declares it needs."""
 
-    ranges: list[VersionRange] = field(default_factory=list)
+    ranges: list[tuple[VersionRange, ...]] = field(default_factory=list)
     wrapper_version: str | None = None
     sources: list[str] = field(default_factory=list)
 
@@ -187,13 +191,16 @@ class MavenRequirement:
 
     def accepts(self, version: str) -> bool:
         if self.ranges:
-            return all(version_range.accepts(version) for version_range in self.ranges)
+            return all(
+                any(version_range.accepts(version) for version_range in group)
+                for group in self.ranges
+            )
         if self.wrapper_version is not None:
             return compare_versions(version, self.wrapper_version) >= 0
         return True
 
     def describe(self) -> str:
-        parts = [version_range.raw for version_range in self.ranges]
+        parts = [",".join(version_range.raw for version_range in group) for group in self.ranges]
         if self.wrapper_version is not None:
             parts.append(f">= {self.wrapper_version} (maven wrapper)")
         return ", ".join(parts)
@@ -260,11 +267,11 @@ def detect_maven_requirement(repo_path: str | Path | None) -> MavenRequirement |
         return None
 
     poms = _find_pom_files(repo)
-    pom_texts = [_read_text(pom) for pom in poms]
+    pom_texts = [_XML_COMMENT_RE.sub("", _read_text(pom)) for pom in poms]
     properties = _collect_properties(pom_texts)
 
     requirement = MavenRequirement()
-    seen_ranges: set[tuple[str, str | None, str | None]] = set()
+    seen_groups: set[tuple[VersionRange, ...]] = set()
     for pom, text in zip(poms, pom_texts, strict=True):
         rel_path = pom.relative_to(repo).as_posix()
         for block in _ENFORCER_BLOCK_RE.findall(text):
@@ -279,12 +286,11 @@ def detect_maven_requirement(repo_path: str | Path | None) -> MavenRequirement |
                 continue
             if rel_path not in requirement.sources:
                 requirement.sources.append(rel_path)
-            for version_range in ranges:
-                key = (version_range.raw, version_range.lower, version_range.upper)
-                if key in seen_ranges:
-                    continue
-                seen_ranges.add(key)
-                requirement.ranges.append(version_range)
+            group = tuple(ranges)
+            if group in seen_groups:
+                continue
+            seen_groups.add(group)
+            requirement.ranges.append(group)
 
     requirement.wrapper_version = _wrapper_version(repo)
     if requirement.is_empty:
