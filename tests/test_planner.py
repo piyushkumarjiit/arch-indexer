@@ -609,7 +609,7 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
     cache = tmp_path / "cache"
     assert main(["index", str(repo), "--offline", "--cache-dir", str(cache)]) == EXIT_DELTA_DETECTED
 
-    # Modify billing, and add a new module with two submodules under src/payments
+    # Modify billing and orders, and add a new module with two submodules under src/payments
     (repo / "src" / "billing" / "invoices.py").write_text(
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n\n"
@@ -618,6 +618,16 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
         "    a = 10\n"
         "    b = 20\n"
         "    return a + b\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "orders" / "cart.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n\n"
+        "@app.post('/orders/create')\n"
+        "def create_order():\n"
+        "    x = 10\n"
+        "    y = 20\n"
+        "    return x + y\n",
         encoding="utf-8",
     )
     (repo / "src" / "payments").mkdir(parents=True)
@@ -653,16 +663,20 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
     plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
     packets = {p["packet_id"]: p for p in plan["packets"]}
 
-    # Oversized section sharded using canonical module counts & diagram IDs. The orders
-    # slice has no delta on this incremental run, so it must not become a worker packet.
+    # Oversized section sharded using canonical module counts & diagram IDs
     assert "design-sec2-mod-billing" in packets
-    assert "design-sec2-mod-orders" not in packets
+    assert "design-sec2-mod-orders" in packets
     billing_pkt = packets["design-sec2-mod-billing"]
     assert billing_pkt["assigned_modules"] == ["billing"]
     assert billing_pkt["line_count"] == by_name["billing"]["line_count"]
     assert billing_pkt["symbol_count"] == by_name["billing"]["symbol_count"]
     assert billing_pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
     assert "flow-billing" in billing_pkt["pre_rendered_diagram_ids"]
+
+    orders_pkt = packets["design-sec2-mod-orders"]
+    assert orders_pkt["assigned_modules"] == ["orders"]
+    assert orders_pkt["line_count"] == by_name["orders"]["line_count"]
+    assert "flow-orders" in orders_pkt["pre_rendered_diagram_ids"]
 
     # Missing sections from multiple submodules in payments collapse to one canonical packet
     assert "design-sec2-mod-payments" in packets
