@@ -2,10 +2,9 @@
 
 A host ``mvn`` can be perfectly runnable and still be too old for the repository
 being indexed: ``maven-enforcer-plugin``'s ``RequireMavenVersion`` rule rejects it
-long before scip-java can build anything, and Maven itself refuses to run below
-the version pinned by ``.mvn/wrapper/maven-wrapper.properties``. This module reads
-those two declarations so the toolchain can validate the host Maven instead of
-assuming any ``mvn`` on ``PATH`` is usable.
+long before scip-java can build anything. This module reads those declarations so
+the toolchain can validate the host Maven instead of assuming any ``mvn`` on
+``PATH`` is usable.
 """
 
 from __future__ import annotations
@@ -40,9 +39,6 @@ _PROPERTIES_BLOCK_RE = re.compile(r"<properties\b[^>]*>(.*?)</properties>", re.D
 _PROPERTY_RE = re.compile(r"<([A-Za-z0-9_.\-]+)>\s*([^<]+?)\s*</\1>")
 _PROPERTY_REF_RE = re.compile(r"\$\{([^}]+)\}")
 _RANGE_SPEC_RE = re.compile(r"[\[(][^\[\]()]*[\])]")
-_WRAPPER_URL_RE = re.compile(
-    r"apache-maven-([0-9][^/\s]*?)(?:-(?:bin|src))?\.(?:zip|tar\.gz|tgz)\b"
-)
 _BARE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-][0-9A-Za-z_.-]+)?$")
 _LEADING_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)*)(.*)", re.DOTALL)
 _QUALIFIER_RE = re.compile(r"([a-z]+)(\d*)")
@@ -182,12 +178,11 @@ class MavenRequirement:
     """The Maven versions a repository declares it needs."""
 
     ranges: list[tuple[VersionRange, ...]] = field(default_factory=list)
-    wrapper_version: str | None = None
     sources: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not self.ranges and self.wrapper_version is None
+        return not self.ranges
 
     def accepts(self, version: str) -> bool:
         if self.ranges:
@@ -195,14 +190,10 @@ class MavenRequirement:
                 any(version_range.accepts(version) for version_range in group)
                 for group in self.ranges
             )
-        if self.wrapper_version is not None:
-            return compare_versions(version, self.wrapper_version) >= 0
         return True
 
     def describe(self) -> str:
         parts = [",".join(version_range.raw for version_range in group) for group in self.ranges]
-        if self.wrapper_version is not None:
-            parts.append(f">= {self.wrapper_version} (maven wrapper)")
         return ", ".join(parts)
 
 
@@ -245,20 +236,11 @@ def _resolve_properties(value: str, properties: dict[str, str]) -> str:
     return resolved
 
 
-def _wrapper_version(repo: Path) -> str | None:
-    properties_path = repo / ".mvn" / "wrapper" / "maven-wrapper.properties"
-    text = _read_text(properties_path)
-    match = _WRAPPER_URL_RE.search(text)
-    return match.group(1) if match else None
-
-
 def detect_maven_requirement(repo_path: str | Path | None) -> MavenRequirement | None:
     """Read the Maven version requirement a repository declares, if any.
 
     Ranges come from every ``RequireMavenVersion`` enforcer rule in the repository's
-    ``pom.xml`` files (properties resolved across those poms); when no enforcer rule
-    exists, the ``.mvn/wrapper/maven-wrapper.properties`` distribution version is
-    treated as a minimum requirement.
+    ``pom.xml`` files (properties resolved across those poms).
     """
     if repo_path is None:
         return None
@@ -292,9 +274,6 @@ def detect_maven_requirement(repo_path: str | Path | None) -> MavenRequirement |
             seen_groups.add(group)
             requirement.ranges.append(group)
 
-    requirement.wrapper_version = _wrapper_version(repo)
     if requirement.is_empty:
         return None
-    if requirement.wrapper_version is not None and not requirement.sources:
-        requirement.sources.append(".mvn/wrapper/maven-wrapper.properties")
     return requirement

@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from arch_indexer.maven import (
-    MavenRequirement,
     compare_versions,
     detect_maven_requirement,
     parse_maven_version,
@@ -86,13 +85,6 @@ def test_parse_version_ranges_supports_brackets_and_bare_minimums():
     assert exact[0].accepts("3.9.17") is False
 
 
-def test_requirement_without_ranges_uses_wrapper_as_minimum():
-    requirement = MavenRequirement(wrapper_version="3.9.16")
-    assert requirement.accepts("3.9.16") is True
-    assert requirement.accepts("3.10.0") is True
-    assert requirement.accepts("3.8.7") is False
-
-
 def test_detects_enforcer_range_with_properties(tmp_path: Path):
     repo = tmp_path / "repo"
     _write(repo, "pom.xml", ENFORCER_POM)
@@ -125,7 +117,7 @@ def test_detects_enforcer_range_in_module_pom(tmp_path: Path):
     assert requirement.sources == ["backend/pom.xml"]
 
 
-def test_detects_wrapper_version_when_no_enforcer_rule(tmp_path: Path):
+def test_wrapper_properties_alone_does_not_create_requirement(tmp_path: Path):
     repo = tmp_path / "repo"
     _write(repo, "pom.xml", "<project></project>")
     _write(
@@ -135,32 +127,7 @@ def test_detects_wrapper_version_when_no_enforcer_rule(tmp_path: Path):
         "apache-maven/3.9.16/apache-maven-3.9.16-bin.zip\n",
     )
 
-    requirement = detect_maven_requirement(repo)
-
-    assert requirement is not None
-    assert requirement.wrapper_version == "3.9.16"
-    assert requirement.accepts("3.8.7") is False
-    assert requirement.accepts("3.9.16") is True
-    assert requirement.sources == [".mvn/wrapper/maven-wrapper.properties"]
-
-
-def test_enforcer_range_wins_over_wrapper_when_both_present(tmp_path: Path):
-    repo = tmp_path / "repo"
-    _write(repo, "pom.xml", ENFORCER_POM)
-    _write(
-        repo,
-        ".mvn/wrapper/maven-wrapper.properties",
-        "distributionUrl=https\\://example.invalid/apache-maven-3.9.16-bin.tar.gz\n",
-    )
-
-    requirement = detect_maven_requirement(repo)
-
-    assert requirement is not None
-    assert requirement.ranges
-    # The enforcer range is authoritative; a wrapper newer than the range's floor
-    # does not make a satisfying host Maven unusable.
-    assert requirement.accepts("3.9.0") is True
-    assert requirement.wrapper_version == "3.9.16"
+    assert detect_maven_requirement(repo) is None
 
 
 def test_no_requirement_returns_none(tmp_path: Path):
