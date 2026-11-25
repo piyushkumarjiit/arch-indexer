@@ -245,7 +245,10 @@
       modNode.files.add(filePath);
 
       const dirPath = getDirectory(filePath) || modNode.path || ".";
-      const dirId = `dir:${dirPath}`;
+      // Scope the directory id by module: several modules can share one directory (for
+      // example every src/services/*.ts file), and a graph-wide `dir:<path>` id would let
+      // the first module claim the directory, leaving the others with no drill-down.
+      const dirId = `dir:${modId}:${dirPath}`;
       const fileId = `file:${filePath}`;
 
       // Create Directory (file group) if not exists

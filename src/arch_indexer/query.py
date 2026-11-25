@@ -215,39 +215,58 @@ def query_def(conn: sqlite3.Connection, symbol: str) -> list[dict[str, Any]]:
 
 
 def query_refs(
-    conn: sqlite3.Connection, symbol: str, limit: int = DEFAULT_QUERY_LIMIT
+    conn: sqlite3.Connection,
+    symbol: str,
+    limit: int = DEFAULT_QUERY_LIMIT,
+    *,
+    include_tests: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Return references to a symbol, capped at ``limit``, plus the untruncated total."""
+    """Return in-scope references to a symbol, capped at ``limit``, plus the total.
+
+    Test files stay in ``index.db`` so ``def``/``refs`` remain traceable, but a
+    ``refs`` query must respect the architecture scope: unless ``include_tests`` is
+    set, a reference located in a test file is not returned or counted.
+    """
     clause, params = _match_clause("symbol_fqname", symbol)
     where = f"WHERE {clause}"
-    total = conn.execute(f'SELECT COUNT(*) FROM "references" {where}', params).fetchone()[0]
+    candidate_total = conn.execute(f'SELECT COUNT(*) FROM "references" {where}', params).fetchone()[
+        0
+    ]
 
     fqnames: list[str] = []
-    if total == 0:
+    if candidate_total == 0:
         # A symbol defined in the index may only be referenced by its full fqname.
         fqnames = sorted({d["fqname"] for d in _find_definitions(conn, symbol)})
         if fqnames:
             placeholders = ", ".join("?" for _ in fqnames)
             where = f"WHERE symbol_fqname IN ({placeholders})"
             params = list(fqnames)
-            total = conn.execute(f'SELECT COUNT(*) FROM "references" {where}', params).fetchone()[0]
 
-    if total == 0:
-        if fqnames:
-            return [], 0
-        raise QueryError(f"symbol not found: {symbol} (no definition or reference in the index)")
-
+    references: list[dict[str, Any]] = []
+    total = 0
     rows = conn.execute(
         f"""
         SELECT symbol_fqname, file_path, line, col, ref_kind
         FROM "references"
         {where}
         ORDER BY file_path, line, col, ref_kind, symbol_fqname
-        LIMIT ?
         """,
-        [*params, limit],
-    ).fetchall()
-    return ([dict(row) for row in rows], total)
+        params,
+    )
+    for row in rows:
+        if not in_scope(row["file_path"], include_tests):
+            continue
+        total += 1
+        if len(references) < limit:
+            references.append(dict(row))
+
+    if total == 0:
+        if candidate_total == 0 and not fqnames:
+            raise QueryError(
+                f"symbol not found: {symbol} (no definition or reference in the index)"
+            )
+        return [], 0
+    return references, total
 
 
 def query_file_symbols(
@@ -350,10 +369,12 @@ def _normalize_entrypoint_id(entrypoint_id: str) -> int:
         ) from exc
 
 
-def _resolve_entrypoint(conn: sqlite3.Connection, entrypoint_id: str) -> dict[str, Any]:
+def _resolve_entrypoint(
+    conn: sqlite3.Connection, entrypoint_id: str, *, include_tests: bool = False
+) -> dict[str, Any]:
     ep_id = _normalize_entrypoint_id(entrypoint_id)
     row = conn.execute(f"{_ENTRYPOINT_SELECT} WHERE e.id = ?", (ep_id,)).fetchone()
-    if row is None:
+    if row is None or not in_scope(row["file_path"], include_tests):
         raise QueryError(
             f"entrypoint not found: {entrypoint_id} (see 'arch-indexer query <repo> entrypoints')"
         )
@@ -387,12 +408,17 @@ def _resolve_root_symbol(
     return _symbol_dict(row) if row is not None else None
 
 
-def _call_adjacency(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+def _call_adjacency(
+    conn: sqlite3.Connection, *, include_tests: bool = False
+) -> dict[str, list[dict[str, Any]]]:
     defined = {row[0] for row in conn.execute("SELECT fqname FROM symbols")}
     adjacency: dict[str, list[dict[str, Any]]] = {}
     for row in conn.execute(_CALL_EDGE_SQL):
         caller = row["caller"]
         if not caller:
+            continue
+        # A call made from a test file is not part of the architecture flow.
+        if not in_scope(row["ref_file"], include_tests):
             continue
         callee = row["callee"]
         adjacency.setdefault(caller, []).append(
@@ -410,9 +436,15 @@ def flow_trace(
     conn: sqlite3.Connection,
     entrypoint_id: str,
     depth: int = DEFAULT_FLOW_DEPTH,
+    *,
+    include_tests: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Breadth-first call trace from an entrypoint, marking known sinks."""
-    entrypoint = _resolve_entrypoint(conn, entrypoint_id)
+    """Breadth-first call trace from an entrypoint, marking known sinks.
+
+    Test files are outside the default scope, so an entrypoint or call edge located in
+    a test file is skipped unless ``include_tests`` is set.
+    """
+    entrypoint = _resolve_entrypoint(conn, entrypoint_id, include_tests=include_tests)
     root = _resolve_root_symbol(conn, entrypoint)
     if root is None:
         raise QueryError(
@@ -420,7 +452,7 @@ def flow_trace(
             "(no indexed symbol defines or encloses that entrypoint)"
         )
 
-    adjacency = _call_adjacency(conn)
+    adjacency = _call_adjacency(conn, include_tests=include_tests)
     steps: list[dict[str, Any]] = [
         {
             "depth": 0,
@@ -523,7 +555,9 @@ def run_query(
             return 0
 
         if action == "refs":
-            references, total = query_refs(conn, symbol or "", limit=limit)
+            references, total = query_refs(
+                conn, symbol or "", limit=limit, include_tests=include_tests
+            )
             truncated = total > len(references)
             if truncated:
                 sys.stderr.write(
@@ -618,7 +652,9 @@ def run_query(
             return 0
 
         if action == "flow-trace":
-            entrypoint, root, steps = flow_trace(conn, entrypoint_id or "", depth=depth)
+            entrypoint, root, steps = flow_trace(
+                conn, entrypoint_id or "", depth=depth, include_tests=include_tests
+            )
             if as_json:
                 _print_json(
                     {

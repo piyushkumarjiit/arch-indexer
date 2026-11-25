@@ -514,7 +514,7 @@ def test_first_run_without_docs_impacts_canonical_sections(tmp_path: Path, capsy
     assert all(entry["reasons"] == ["first_run"] for entry in report["sections"])
 
 
-def test_added_file_in_covered_module_impacts_its_section(tmp_path: Path, capsys):
+def test_added_file_in_sibling_module_does_not_reimpact_citing_section(tmp_path: Path, capsys):
     repo = tmp_path / "pkg_repo"
     package = repo / "src" / "pkg"
     package.mkdir(parents=True)
@@ -543,8 +543,10 @@ def test_added_file_in_covered_module_impacts_its_section(tmp_path: Path, capsys
     entries = {
         (entry["doc"], entry["section_id"]): entry["reasons"] for entry in report["sections"]
     }
-    assert entries[("docs/DESIGN.md", "2-components-modules")] == ["module_added"]
-    assert report["missing_sections"] == []
+    # The new file belongs to module pkg.b, a sibling of the cited pkg.a. Ancestor matching
+    # would have re-impacted this section; only the new module's own missing section is due.
+    assert ("docs/DESIGN.md", "2-components-modules") not in entries
+    assert [entry["module"] for entry in report["missing_sections"]] == ["pkg.b"]
 
 
 def test_deleted_docs_report_missing_sections(tmp_path: Path, capsys):
@@ -975,8 +977,8 @@ def test_parse_doc_sections_ignores_fenced_markers_headings_and_diagrams():
     assert marked_sections[0].heading == "Real Heading"
 
 
-def test_deleted_sole_module_file_uses_stored_module_sections(tmp_path: Path, capsys):
-    """Renaming the sole cited file in a module must still match via stored module_sections."""
+def test_deleted_sole_module_file_uses_previous_module_mapping(tmp_path: Path, capsys):
+    """A deleted cited file still reports its previous module and the new sibling module."""
     repo = tmp_path / "pkg_repo"
     package = repo / "src" / "pkg"
     package.mkdir(parents=True)
@@ -1005,8 +1007,12 @@ def test_deleted_sole_module_file_uses_stored_module_sections(tmp_path: Path, ca
     entries = {
         (entry["doc"], entry["section_id"]): entry["reasons"] for entry in report["sections"]
     }
-    assert entries[("docs/DESIGN.md", "2-components-modules")] == ["deleted_file", "module_added"]
-    assert report["missing_sections"] == []
+    assert entries[("docs/DESIGN.md", "2-components-modules")] == ["deleted_file"]
+    section = next(
+        entry for entry in report["sections"] if entry["section_id"] == "2-components-modules"
+    )
+    assert section["modules"] == ["pkg.a"]
+    assert [entry["module"] for entry in report["missing_sections"]] == ["pkg.b"]
 
 
 def test_span_citations_relocate_across_symbol_body_lines(tmp_path: Path, capsys):
@@ -1614,3 +1620,57 @@ def test_plain_index_and_force_full_do_not_rewrite_auto_diagrams(tmp_path: Path,
     assert _index(repo, cache, "--force-full", "--auto-relocate-citations") == EXIT_DELTA_DETECTED
     capsys.readouterr()
     assert design_path.read_text(encoding="utf-8") == manually_edited
+
+
+def test_added_symbol_impacts_only_citing_module_not_sibling_or_ancestor(tmp_path: Path, capsys):
+    """A change to one child module must not re-impact sections citing a sibling module.
+
+    Both files live under the same ``src/services`` package, so ancestor matching would
+    previously mark every section citing any file under that package as impacted.
+    """
+    repo = tmp_path / "repo"
+    services = repo / "src" / "services"
+    services.mkdir(parents=True)
+    docs = repo / "docs"
+    docs.mkdir()
+    (services / "capacity.py").write_text("def cap():\n    return 1\n", encoding="utf-8")
+    (services / "http.py").write_text("def serve():\n    return 2\n", encoding="utf-8")
+    (docs / "DESIGN.md").write_text(
+        "# Technical Design\n\n"
+        "## 2. Components & Modules\n\n"
+        "Capacity lives in `cap`[^1].\n\n"
+        "## 3. Control & Data Flows\n\n"
+        "HTTP is served by `serve`[^2].\n\n"
+        "## References\n\n"
+        "[^1]: `src/services/capacity.py:1` — `cap`\n"
+        "[^2]: `src/services/http.py:1` — `serve`\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "delta-tests@example.com")
+    _git(repo, "config", "user.name", "Delta Tests")
+    _commit(repo, "initial")
+    cache = tmp_path / "cache"
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    state = _load(cache, "state.json")
+    assert "services.capacity" in state["module_sections"]
+    assert "services" not in state["module_sections"]
+
+    (services / "capacity.py").write_text(
+        "def cap():\n    return 1\n\n\ndef cap_v2():\n    return 3\n", encoding="utf-8"
+    )
+    _commit(repo, "add a capacity symbol")
+
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    report = _impacted(cache)
+    entries = {
+        (entry["doc"], entry["section_id"]): entry["reasons"] for entry in report["sections"]
+    }
+    assert entries[("docs/DESIGN.md", "2-components-modules")] == [
+        "modified_file",
+        "module_added",
+    ]
+    assert ("docs/DESIGN.md", "3-control-data-flows") not in entries
+    assert report["missing_sections"] == []

@@ -168,7 +168,7 @@ Every indexed file row in `index.db` records:
 
 When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
 
-Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. The `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working.
+Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. The `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working. The printed summary reports the same in-scope counts as `master-index.json` (test files, their symbols, references, entrypoints, infra artifacts and unresolved refs excluded unless `--include-tests` was passed) and labels how many test files were excluded, so the CI log cannot disagree with the artifacts.
 Each indexing unit is also recorded in a `units(unit_id PK, language, tier, files_count, fallback_reason, message)` table. `message` holds the captured Tier 1 failure output (for Maven, its `[ERROR]` lines when present), whitespace-collapsed and truncated, so a silent all-Tier-2 fallback can be diagnosed. A unit row's `tier` is `tree-sitter` when every one of its files fell back, and its `fallback_reason` joins several distinct per-file reasons with commas. `index` prints its summary line followed by one tier line per unit and writes a loud warning when 100% of a unit's files fell back; `arch-indexer query <repo> units [--json]` exposes the same rows.
 
 ### 4.4 Memory & Timeout Controls (7 GB Host)
@@ -230,7 +230,7 @@ It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELT
 ### 5.5 File-to-Section Impact Mapping (`impacted-sections.json`)
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
 - It cites any file in `deleted_files`, any file with modified or deleted symbols, or any file in `modified_files` not explained purely by moved symbols.
-- It covers a module that has `added_files` or `added_symbols` (via module-to-section mapping in `state.json`).
+- It cites the module that has `added_files` or `added_symbols`, or a module in that module's own subtree (via the exact module-to-section mapping in `state.json`). Ancestor modules are not matched: an edit to `pkg.services.capacity` must not re-impact a section that only cites `pkg.services.http`, even though both share `pkg.services`.
 - It does not yet exist: a canonical document with no sections contributes its full canonical outline, while on a later run a newly added module with no covering section is listed under `missing_sections` instead of `sections`.
 - Its embedded `AUTO-DIAGRAM` content changed since the last index: a block whose current hash differs from the recorded hash (a worker edit) marks the section impacted, while blocks §5.4 regenerated from the new graph in this run do not, so a pure line shift schedules no avoidable workers.
 - It has no body: a non-exempt section whose content is only headings, comments, fenced code or footnote definitions is impacted with `empty_section` on every run, so it stays impacted until prose is written. A section marked `:exempt` (including the packaged `References` blocks) is never required to have prose.
@@ -300,7 +300,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before the stored index is rebuilt.
 
-**Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints` and `query module-summary` expose the same `--include-tests` opt-in.
+**Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints`, `query module-summary`, `query refs` and `query flow-trace` expose the same `--include-tests` opt-in.
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
@@ -321,7 +321,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 Generated as a **single self-contained HTML file** with inline CSS and vanilla JS/SVG layout (no external CDN, no web server, no network):
 - **Works directly over `file://`**: `arch-indexer` embeds the current `graph.json` payload inside a `<script id="arch-graph-data" type="application/json">` block *and* provides a "Load `graph.json`" file picker (`FileReader`) so users can also open any standalone `graph.json` without hitting browser `file://` CORS blocks.
 - **Capabilities**:
-  - **Hierarchical drill-down**: navigate system -> module -> file group (directory) -> file -> symbol/endpoint via breadcrumbs, with aggregated edges and node counts at each level.
+  - **Hierarchical drill-down**: navigate system -> module -> file group (directory) -> file -> symbol/endpoint via breadcrumbs, with aggregated edges and node counts at each level. Directory groups are scoped per module (`dir:<module-id>:<path>`), so several modules that share a source directory each keep their own files, drill-down children and inspector edges.
   - Pan/zoom interactive directed graph (deterministic layered layout by kind: Frontend -> Entrypoints -> Services/Modules -> Data Stores / External Sinks).
   - **Filter by module** (multi-select sidebar), node kind, and indexing tier (`scip` vs `tree-sitter`), plus a client-side search over labels, symbols, files and IDs.
   - **Trace flow**: select any Entrypoint to highlight and isolate the transitive subgraph from that Entrypoint to all reachable Data Stores and External Sinks, showing the step-by-step call chain with `file:line` and auth guards.
@@ -348,13 +348,15 @@ arch-indexer index <repo> \
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
-arch-indexer query <repo> refs <symbol> [--limit 100] [--json]
+arch-indexer query <repo> refs <symbol> [--limit 100] [--include-tests] [--json]
 arch-indexer query <repo> file-symbols <rel-path> [--json]
 arch-indexer query <repo> units [--json]
 arch-indexer query <repo> entrypoints [--module <mod>] [--include-tests] [--json]
 arch-indexer query <repo> module-summary <mod> [--include-tests] [--json]
-arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
+arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--include-tests] [--json]
 ```
+
+`refs` and `flow-trace` respect the same test scope as `entrypoints`: unless `--include-tests` is passed, a reference or call edge located in a test file is neither returned nor counted, and a test-file entrypoint cannot start a trace.
 
 `entrypoints --module` and `module-summary` accept three spellings of a module: the canonical id `mod:<key>` and the bare key `<key>` that `docs/graph.json` and `master-index.json` emit (`work-plan.json` lists the bare key in `assigned_modules`), and the dotted package namespace (`pkg.mod`) for a specific package slice.
 
@@ -459,7 +461,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
   - `packet_id`
   - `target_doc` (`DESIGN.md` or `USER_GUIDE.md`) and `section_ids`
   - `draft_output_path`: `docs/.drafts/<packet_id>.md` (guaranteed unique per worker)
-  - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context)
+  - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context). On a non-first run `plan` skips an empty-`delta_slice` module slice instead of dispatching a worker for a module that did not change. Structural work is exempt because it is not driven by a source delta: a missing or empty section, and a section whose `AUTO-DIAGRAM` block was edited, still gets its packet (otherwise the zero-source-change `empty_section` path would leave a required section unfillable). First runs still emit every slice, and a fully up-to-date run emits none.
   - `over_budget`, present and `true` only when the packet's module cannot be split further (one flat package, or a fixed depth) and still exceeds a per-worker budget; `plan` also warns on stderr in that case
 
 > [!NOTE] Amendment: Draft File Front-Matter Format

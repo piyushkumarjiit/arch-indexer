@@ -101,6 +101,13 @@ def module_with_parents(module: str) -> set[str]:
     return {".".join(parts[:i]) for i in range(1, len(parts) + 1)}
 
 
+def module_is_within(module: str, root: str) -> bool:
+    """Whether ``module`` is ``root`` itself or a dotted descendant of it."""
+    if not module or not root:
+        return False
+    return module == root or module.startswith(f"{root}.")
+
+
 def build_fqname_prefixes(fqnames: Iterable[str]) -> set[str]:
     """Return every dotted prefix of the given fqnames."""
     prefixes: set[str] = set()
