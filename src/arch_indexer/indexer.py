@@ -187,6 +187,7 @@ def _print_run_summary(delta: Delta, report: Any) -> None:
     if missing:
         print(f"Missing sections: {missing}")
 
+
 def _warn_full_unit_fallback(unit: IndexUnit, reason: str, message: str, files_count: int) -> None:
     """Say loudly that every file of one unit lost its precise index."""
     detail = f": {message}" if message else ""

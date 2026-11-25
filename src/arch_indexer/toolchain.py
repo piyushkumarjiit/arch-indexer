@@ -31,6 +31,12 @@ from arch_indexer.config import (
     get_node_tools_dir,
     get_runtimes_dir,
 )
+from arch_indexer.maven import (
+    MavenRequirement,
+    compare_versions,
+    detect_maven_requirement,
+    parse_maven_version,
+)
 
 DB_MIGRATION_DIR_NAMES = frozenset({"flyway", "liquibase"})
 MIGRATION_DIR_NAMES = frozenset(
@@ -62,12 +68,7 @@ def is_sql_migration_file(rel_path: str) -> bool:
     if ancestors & DB_MIGRATION_DIR_NAMES:
         return True
     return bool(ancestors & MIGRATION_DIR_NAMES and ancestors & DB_CONTEXT_DIR_NAMES)
-from arch_indexer.maven import (
-    MavenRequirement,
-    compare_versions,
-    detect_maven_requirement,
-    parse_maven_version,
-)
+
 
 # Directories excluded from file scanning & language detection
 EXCLUDED_DIR_NAMES = {
