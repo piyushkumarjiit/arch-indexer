@@ -738,7 +738,7 @@ def derive_ref_kind(
     is_import: bool = False,
     line_text: str = "",
     tier2_ref_kind: str | None = None,
-    in_brace_block: bool = False,
+    in_python_brace_block: bool = False,
 ) -> str:
     """Derive reference kind (call/import/type/read/write) from an occurrence."""
     roles = occ.symbol_roles
@@ -775,11 +775,11 @@ def derive_ref_kind(
             or re.search(r"\bnew$", before_text)
         ):
             return "call"
-        # A ": Type" annotation is never taken from inside a brace-delimited body,
-        # where the colon belongs to a dict key / value pair instead.
+        # A ": Type" annotation is never taken from inside a Python dict or set
+        # literal, where the colon belongs to a key / value pair instead.
         annotation_colon = (
             before_text.endswith(":")
-            and not in_brace_block
+            and not in_python_brace_block
             and before_text.count("{") <= before_text.count("}")
         )
         if (
@@ -1520,7 +1520,7 @@ def _parse_scip_payload(
                     is_import=is_import_line,
                     line_text=masked_line,
                     tier2_ref_kind=t2_kind,
-                    in_brace_block=open_braces > 0,
+                    in_python_brace_block=unit.language == "python" and open_braces > 0,
                 )
                 ref_key = (rel_path, start_line, col, ref_fqname, ref_kind)
                 if ref_key not in seen_refs:

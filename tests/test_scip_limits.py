@@ -637,3 +637,27 @@ def test_ref_kind_colon_heuristic_ignores_braces_in_strings(tmp_path: Path):
     ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
     assert (1, "type") in ref_kinds
     assert (1, "read") not in ref_kinds
+
+
+def test_ref_kind_colon_heuristic_keeps_typescript_member_annotation(tmp_path: Path):
+    """A TypeScript member annotation inside a brace body stays a type reference."""
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    src.mkdir(parents=True)
+    app = src / "app.ts"
+    text = "interface Config {\n  handler: Handler;\n}\n"
+    app.write_text(text)
+
+    handler_sym = "scip-typescript npm ts-fixture 1.0.0 src/`app.ts`/Handler#"
+    doc = scip_pb2.Document(
+        relative_path="src/app.ts",
+        language="TypeScript",
+        occurrences=[
+            _occ(handler_sym, 1, 11, 18),
+        ],
+    )
+    res = _ingest(repo, [doc], _unit(repo, [app], "typescript"))
+
+    ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
+    assert (2, "type") in ref_kinds
+    assert (2, "read") not in ref_kinds
