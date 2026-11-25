@@ -11,6 +11,7 @@ import pytest
 
 from arch_indexer.checks.citations import parse_doc_sections, relocate_citations_in_text
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_OK, EXIT_VALIDATION_FAILED, main
+from arch_indexer.mermaid_gen import generate_diagrams, render_auto_diagram_block
 
 APP_SOURCE = """def start():
     return "start"
@@ -1133,3 +1134,121 @@ def test_exempt_and_case_insensitive_section_markers_preserve_overview_and_diagr
     assert reasons[("docs/USER_GUIDE.md", "guide-sec1")] == ["modified_file"]
     assert ("docs/DESIGN.md", "design-references") not in reasons
     assert ("docs/USER_GUIDE.md", "guide-references") not in reasons
+
+
+def test_relocation_rewrites_call_site_citations(tmp_path: Path, capsys):
+    """A citation of a call site (no definition on that line) must shift, not abort.
+
+    ``check-citations`` accepts a footnote whose symbol appears literally on the cited
+    line, so workers legitimately cite call sites. Those lines are not covered by
+    ``moved_symbol_moves``; before the fix one such footnote made the whole relocation
+    fail with exit 3 (VALIDATION_FAILED).
+    """
+    repo = _make_repo(tmp_path)
+    app_path = repo / "src" / "app.py"
+    app_path.write_text(
+        "def start():\n"
+        '    log_event("start")\n'
+        '    return "start"\n'
+        "\n"
+        "\n"
+        "def stop():\n"
+        '    return "stop"\n',
+        encoding="utf-8",
+    )
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        DESIGN_DOC.replace(
+            "The service starts through `start`[^1].",
+            "The service starts through `start`[^1] and logs the call[^3].",
+        ).replace(
+            "[^2]: `src/util.py:1` — `helper`",
+            "[^2]: `src/util.py:1` — `helper`\n[^3]: `src/app.py:2` — `log_event`",
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "add call-site citation")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+    # Shift every symbol (and the call site inside start) down by two lines.
+    app_path.write_text("\n\n" + app_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _commit(repo, "shift lines")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    captured = capsys.readouterr()
+    assert "Relocated citations" in captured.out
+
+    relocated = design_path.read_text(encoding="utf-8")
+    assert "[^1]: `src/app.py:3` — `start`" in relocated
+    assert "[^3]: `src/app.py:4` — `log_event`" in relocated
+    assert "[^2]: `src/util.py:1` — `helper`" in relocated
+    assert main(["check-citations", str(repo), "--cache-dir", str(cache)]) == EXIT_OK
+
+
+def test_relocation_regenerates_drifted_auto_diagram(tmp_path: Path, capsys):
+    """A move-only shift must not exit 0 while check-mermaid would fail on a stale block.
+
+    Diagram node ids embed source line numbers, so shifting an entry point changes every
+    regenerated diagram. The document keeps the block the last index wrote, which is tool
+    output: relocation must regenerate it in place and leave both gates green, rather than
+    reporting "documentation is up to date".
+    """
+    repo = _make_repo(tmp_path)
+    app_path = repo / "src" / "app.py"
+    util_path = repo / "src" / "util.py"
+    app_path.write_text(
+        APP_SOURCE + '\n\nif __name__ == "__main__":\n    start()\n', encoding="utf-8"
+    )
+    util_path.write_text(
+        UTIL_SOURCE + '\n\nif __name__ == "__main__":\n    helper()\n', encoding="utf-8"
+    )
+    _commit(repo, "add entry points")
+    cache = tmp_path / "cache"
+    assert _index(repo, cache) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    def _blocks() -> str:
+        graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+        diagrams = generate_diagrams(graph)
+        return "\n\n".join(
+            render_auto_diagram_block(diagram_id, diagrams[diagram_id])
+            for diagram_id in sorted(diagrams)
+        )
+
+    design_path = repo / "docs" / "DESIGN.md"
+    design_path.write_text(
+        DESIGN_DOC.replace(
+            "The service starts through `start`[^1].",
+            "The service starts through `start`[^1].\n\n" + _blocks(),
+        ),
+        encoding="utf-8",
+    )
+    _commit(repo, "materialise generated diagrams")
+    # The source tree is unchanged, so this run only records the document's diagram
+    # hashes in state.json (exactly what an assemble-then-index pass does).
+    assert _index(repo, cache) == EXIT_OK
+    capsys.readouterr()
+    assert main(["check-mermaid", str(repo), "--docs-dir", "docs"]) == EXIT_OK
+
+    # Shift the entry points: diagram node ids embed file line numbers, so the graph's
+    # diagrams change while the document keeps the blocks the earlier run wrote.
+    before = design_path.read_text(encoding="utf-8")
+    for path in (app_path, util_path):
+        path.write_text("\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    _commit(repo, "shift entry point lines")
+
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    captured = capsys.readouterr()
+    assert "Regenerated AUTO-DIAGRAM blocks" in captured.out
+    assert main(["check-mermaid", str(repo), "--docs-dir", "docs"]) == EXIT_OK
+    after = design_path.read_text(encoding="utf-8")
+    assert after != before
+    assert _blocks() in after
+
+    # A second run is stable: nothing left to relocate or regenerate.
+    assert _index(repo, cache, "--auto-relocate-citations") == EXIT_OK
+    capsys.readouterr()
+    assert main(["check-mermaid", str(repo), "--docs-dir", "docs"]) == EXIT_OK

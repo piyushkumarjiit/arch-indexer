@@ -448,6 +448,39 @@ class ImpactReport:
     diagram_hashes: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     parsed_sections: list[DocSection] = field(default_factory=list)
 
+    def note_diagram_impacts(self, sections: Iterable[DocSection]) -> None:
+        """Record ``diagram_changed`` for sections whose AUTO-DIAGRAM block is stale.
+
+        A block that disagrees with ``docs/graph.json`` and was edited outside this tool is
+        never rewritten, so its section must stay in the impact report rather than letting
+        ``index`` claim the documents are up to date.
+        """
+        existing = {(entry["doc"], entry["section_id"]): entry for entry in self.sections}
+        for section in sections:
+            key = (section.doc, section.section_id)
+            entry = existing.get(key)
+            if entry is None:
+                entry = _impact_entry(section, [IMPACT_DIAGRAM_CHANGED], [])
+                self.sections.append(entry)
+                existing[key] = entry
+            elif IMPACT_DIAGRAM_CHANGED not in entry["reasons"]:
+                entry["reasons"] = sorted({*entry["reasons"], IMPACT_DIAGRAM_CHANGED})
+
+    def drop_repaired_diagram_impacts(self, sections: Iterable[DocSection]) -> None:
+        """Clear ``diagram_changed`` for sections whose diagram this run regenerated."""
+        repaired = {(section.doc, section.section_id) for section in sections}
+        kept: list[dict[str, Any]] = []
+        for entry in self.sections:
+            if (entry["doc"], entry["section_id"]) in repaired and IMPACT_DIAGRAM_CHANGED in entry[
+                "reasons"
+            ]:
+                remaining = [r for r in entry["reasons"] if r != IMPACT_DIAGRAM_CHANGED]
+                if not remaining:
+                    continue
+                entry["reasons"] = remaining
+            kept.append(entry)
+        self.sections = kept
+
     def to_payload(self, delta: Delta, docs_dir: str) -> dict[str, Any]:
         """Serialize as impacted-sections.json."""
         return {

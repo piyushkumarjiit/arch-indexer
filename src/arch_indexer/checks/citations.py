@@ -182,6 +182,51 @@ def _find_literal_drift(
     return None
 
 
+def _nearest_literal_line(
+    lines: list[str],
+    line: int,
+    symbol: str,
+    max_drift: int = DEFAULT_DRIFT_WINDOW,
+) -> int | None:
+    """Nearest line where symbol appears literally, or None when absent/ambiguous/too far.
+
+    Used to relocate citations that point at a call site rather than at a definition:
+    such a footnote still passes ``check-citations`` because the symbol appears literally
+    on the cited line, but ``moved_symbol_moves`` never covers it (spec 5.4). The cited
+    line itself is a candidate, so an unshifted call-site citation resolves to itself and
+    is left untouched. Ties between two equidistant occurrences are treated as ambiguous
+    and skipped rather than guessed.
+    """
+    pattern = rf"(?<![\w]){re.escape(symbol)}(?![\w])"
+    regex = re.compile(pattern)
+    candidates = [idx for idx, text in enumerate(lines, 1) if regex.search(text)]
+    if not candidates:
+        return None
+    closest = min(candidates, key=lambda c: abs(c - line))
+    if abs(closest - line) > max_drift:
+        return None
+    distance = abs(closest - line)
+    if sum(1 for candidate in candidates if abs(candidate - line) == distance) > 1:
+        return None
+    return closest
+
+
+def _relocate_literal_citation(
+    repo_path: Path,
+    file_path: str,
+    line: int,
+    symbol: str,
+    max_drift: int = DEFAULT_DRIFT_WINDOW,
+) -> int | None:
+    """New line of a call-site citation in the current tree, or None when unresolvable."""
+    repo_root = repo_path.resolve()
+    target = (repo_root / file_path).resolve()
+    if not target.is_relative_to(repo_root) or not target.is_file():
+        return None
+    lines = _split_lines(target.read_text(encoding="utf-8", errors="replace"))
+    return _nearest_literal_line(lines, line, symbol, max_drift)
+
+
 def check_document_citations(
     repo_path: Path,
     doc_path: Path,
@@ -869,16 +914,24 @@ def _resolve_move(
 
 
 def relocate_citations_in_text(
-    doc_text: str, moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]]
+    doc_text: str,
+    moves: Mapping[tuple[str, int], Sequence[tuple[int, str, str]]],
+    *,
+    repo_path: Path | str | None = None,
+    max_drift: int = DEFAULT_DRIFT_WINDOW,
 ) -> tuple[str, int]:
     """Rewrite shifted line numbers in footnote definitions of one document.
 
     `moves` maps (file_path, previous_line) to a sequence of (new_line, name, fqname)
     candidates for the symbols whose previous span contained that line. A footnote is
-    rewritten only when it cites a line present in `moves` and its symbol matches one
-    candidate via the same rule the citation checker uses. Returns the updated text and
-    the number of rewritten footnotes. Fenced code blocks and HTML comments are ignored.
+    rewritten when it cites a line present in `moves` and its symbol matches one candidate
+    via the same rule the citation checker uses. When `repo_path` is given, a footnote that
+    no symbol move covers is also relocated against the current file content, so citations
+    of call sites and constants survive a line shift instead of aborting relocation.
+    Returns the updated text and the number of rewritten footnotes. Fenced code blocks and
+    HTML comments are ignored.
     """
+    root = Path(repo_path) if repo_path is not None else None
     lines = _split_lines(doc_text)
     masked_lines = _masked_citation_lines(lines)
     rewritten = 0
@@ -893,6 +946,10 @@ def relocate_citations_in_text(
                 symbol = strict_match.group("symbol").strip()
                 candidates = moves.get((file_path, cited_line), ())
                 new_line = _resolve_move(candidates, symbol)
+                if new_line is None and root is not None:
+                    new_line = _relocate_literal_citation(
+                        root, file_path, cited_line, symbol, max_drift
+                    )
                 if new_line is not None and new_line != cited_line:
                     prefix = line[: def_match.start("body")]
                     line = f"{prefix}`{file_path}:{new_line}` \u2014 `{symbol}`"
@@ -918,7 +975,7 @@ def relocate_citations(
         if not doc_path.is_file():
             continue
         original = doc_path.read_text(encoding="utf-8", errors="replace")
-        updated_text, rewritten = relocate_citations_in_text(original, moves)
+        updated_text, rewritten = relocate_citations_in_text(original, moves, repo_path=repo_path)
         if rewritten:
             doc_path.write_text(updated_text, encoding="utf-8")
             updated.append(f"{docs_dir}/{doc_name}")
