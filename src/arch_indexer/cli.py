@@ -224,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_QUERY_LIMIT,
         help="Maximum references to return",
     )
+    q_refs.add_argument(
+        "--include-tests",
+        action="store_true",
+        default=False,
+        help="Include references located in test files",
+    )
     q_refs.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_refs.add_argument("--cache-dir", default=None, help="Cache directory override")
 
@@ -272,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=DEFAULT_FLOW_DEPTH,
         help="Maximum call depth to follow",
+    )
+    q_trace.add_argument(
+        "--include-tests",
+        action="store_true",
+        default=False,
+        help="Include calls made from test files in the trace",
     )
     q_trace.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_trace.add_argument("--cache-dir", default=None, help="Cache directory override")

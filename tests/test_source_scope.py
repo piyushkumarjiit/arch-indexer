@@ -278,3 +278,133 @@ def test_extract_delta_slice_excludes_deleted_colocated_test_by_default():
         "server/app.test.ts",
         "server/old.ts",
     ]
+
+
+def test_index_stdout_summary_matches_master_index_scope(tmp_path: Path, capsys):
+    """Printed summary counts must equal master-index.json counts (FQD run N2)."""
+    repo = _write_repo(tmp_path / "repo")
+    assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
+    out = capsys.readouterr().out
+    master_index = json.loads(
+        next((tmp_path / "cache" / "repos").glob("*/master-index.json")).read_text(encoding="utf-8")
+    )
+    summary = master_index["summary"]
+
+    assert summary["total_files"] == 1
+    assert summary["excluded_test_files"] == 2
+    assert f"Indexed {summary['total_files']} files" in out
+    assert f"{summary['total_entrypoints']} entrypoints," in out
+    assert (
+        f"{summary['total_unresolved_refs']} unresolved refs "
+        f"({summary['unresolved_external_refs']} external, "
+        f"{summary['unresolved_in_repo_refs']} in-repo)"
+    ) in out
+    assert f"[{summary['excluded_test_files']} test file(s) excluded]" in out
+
+    included_repo = _write_repo(tmp_path / "repo_included")
+    included_cache = tmp_path / "cache_included"
+    assert (
+        main(
+            [
+                "index",
+                "--offline",
+                str(included_repo),
+                "--cache-dir",
+                str(included_cache),
+                "--include-tests",
+            ]
+        )
+        == EXIT_DELTA_DETECTED
+    )
+    included_out = capsys.readouterr().out
+    included_master = json.loads(
+        next((included_cache / "repos").glob("*/master-index.json")).read_text(encoding="utf-8")
+    )
+    included_summary = included_master["summary"]
+    assert included_summary["total_files"] == 3
+    assert included_summary["excluded_test_files"] == 0
+    assert f"Indexed {included_summary['total_files']} files" in included_out
+    assert "test file(s) excluded" not in included_out
+
+
+def _write_reference_fixture(path: Path) -> Path:
+    files = {
+        "server/app.ts": (
+            "export function listOrders(req: any, res: any) {\n"
+            "  res.json([]);\n"
+            "}\n"
+            "\n"
+            "export function handleOrders(req: any, res: any) {\n"
+            "  listOrders(req, res);\n"
+            "  fetch('/orders');\n"
+            "}\n"
+        ),
+        "tests/orders.test.ts": (
+            "import { listOrders } from '../server/app';\n"
+            "\n"
+            "export function runOrdersTest() {\n"
+            "  listOrders({}, {});\n"
+            "  fetch('/test-only');\n"
+            "}\n"
+        ),
+    }
+    for rel_path, content in files.items():
+        target = path / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_refs_and_flow_trace_hide_test_files_unless_included(tmp_path: Path, capsys):
+    """query refs/flow-trace must respect the test scope (FQD run N3)."""
+    repo = _write_reference_fixture(tmp_path / "repo")
+    assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
+    capsys.readouterr()
+
+    assert _query(repo, tmp_path, "refs", "listOrders", "--json", capsys=capsys) == EXIT_OK
+    scoped_refs = json.loads(capsys.readouterr().out)
+    assert scoped_refs["references"]
+    assert all(is_test_path(row["file_path"]) is False for row in scoped_refs["references"])
+    assert any(row["file_path"] == "server/app.ts" for row in scoped_refs["references"])
+
+    assert (
+        _query(
+            repo,
+            tmp_path,
+            "refs",
+            "listOrders",
+            "--include-tests",
+            "--json",
+            capsys=capsys,
+        )
+        == EXIT_OK
+    )
+    all_refs = json.loads(capsys.readouterr().out)
+    assert any(row["file_path"] == "tests/orders.test.ts" for row in all_refs["references"])
+    assert all_refs["count"] > scoped_refs["count"]
+
+    assert (
+        _query(repo, tmp_path, "entrypoints", "--include-tests", "--json", capsys=capsys) == EXIT_OK
+    )
+    entrypoints = json.loads(capsys.readouterr().out)["entrypoints"]
+    test_entrypoint = next(row for row in entrypoints if is_test_path(row["file_path"]))
+
+    code = _query(repo, tmp_path, "flow-trace", str(test_entrypoint["id"]), capsys=capsys)
+    captured = capsys.readouterr()
+    assert code == EXIT_ERROR
+    assert "entrypoint not found" in captured.err
+    assert captured.out == ""
+
+    assert (
+        _query(
+            repo,
+            tmp_path,
+            "flow-trace",
+            str(test_entrypoint["id"]),
+            "--include-tests",
+            capsys=capsys,
+        )
+        == EXIT_OK
+    )
+    included_trace = capsys.readouterr().out
+    assert "tests/orders.test.ts" in included_trace

@@ -27,7 +27,7 @@ from arch_indexer.checks.citations import (
     parse_doc_sections,
     slugify_heading,
 )
-from arch_indexer.plugins.base import module_with_parents
+from arch_indexer.plugins.base import module_is_within
 
 STATE_SCHEMA_VERSION: str = "1.0"
 DELTA_SCHEMA_VERSION: str = "1.0"
@@ -414,7 +414,12 @@ def moved_symbol_moves(
 def build_module_section_map(
     sections: Iterable[DocSection], module_by_file: Mapping[str, str]
 ) -> dict[str, list[str]]:
-    """Invert section citations into a deterministic module -> section keys mapping."""
+    """Invert section citations into a deterministic module -> section keys mapping.
+
+    Only the exact module that owns each cited file is stored. Parent package entries are
+    not added: a section that documents ``pkg.services`` must not be re-impacted by an
+    edit to one unrelated child module such as ``pkg.services.capacity``.
+    """
     mapping: dict[str, set[str]] = {}
     for section in sections:
         section_key = f"{section.doc}#{section.section_id}"
@@ -422,8 +427,7 @@ def build_module_section_map(
             module = module_by_file.get(cited_file)
             if not module:
                 continue
-            for candidate in module_with_parents(module):
-                mapping.setdefault(candidate, set()).add(section_key)
+            mapping.setdefault(module, set()).add(section_key)
     return {module: sorted(keys) for module, keys in sorted(mapping.items())}
 
 
@@ -586,9 +590,7 @@ def compute_impacted_sections(
             if not isinstance(section_keys, Sequence) or isinstance(section_keys, (str, bytes)):
                 continue
             for section_key in section_keys:
-                previous_modules_by_section.setdefault(str(section_key), set()).update(
-                    module_with_parents(str(module))
-                )
+                previous_modules_by_section.setdefault(str(section_key), set()).add(str(module))
 
     previous_module_by_file: dict[str, str] = {}
     raw_previous_files = (previous_state or {}).get("files")
@@ -612,9 +614,14 @@ def compute_impacted_sections(
             | _section_modules(section, previous_module_by_file)
             | previous_modules_by_section.get(section_key, set())
         )
-        # A section covers an added module when it covers that module or any parent of it.
+        # A section covers an added module only when it cites that module or a module in
+        # its own subtree. Ancestor modules are deliberately not matched: an edit to
+        # pkg.services.capacity must not re-impact every section citing some sibling under
+        # pkg.services.
         matched_modules = {
-            module for module in added_modules if module_with_parents(module) & section_modules
+            module
+            for module in added_modules
+            if any(module_is_within(section_module, module) for section_module in section_modules)
         }
         if matched_modules:
             reasons.add(IMPACT_MODULE_ADDED)
@@ -662,5 +669,5 @@ def _section_modules(section: DocSection, module_by_file: Mapping[str, str]) -> 
     for cited_file in section.cited_files:
         module = module_by_file.get(cited_file)
         if module:
-            modules |= module_with_parents(module)
+            modules.add(module)
     return modules

@@ -653,20 +653,16 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
     plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
     packets = {p["packet_id"]: p for p in plan["packets"]}
 
-    # Oversized section sharded using canonical module counts & diagram IDs
+    # Oversized section sharded using canonical module counts & diagram IDs. The orders
+    # slice has no delta on this incremental run, so it must not become a worker packet.
     assert "design-sec2-mod-billing" in packets
-    assert "design-sec2-mod-orders" in packets
+    assert "design-sec2-mod-orders" not in packets
     billing_pkt = packets["design-sec2-mod-billing"]
     assert billing_pkt["assigned_modules"] == ["billing"]
     assert billing_pkt["line_count"] == by_name["billing"]["line_count"]
     assert billing_pkt["symbol_count"] == by_name["billing"]["symbol_count"]
     assert billing_pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
     assert "flow-billing" in billing_pkt["pre_rendered_diagram_ids"]
-
-    orders_pkt = packets["design-sec2-mod-orders"]
-    assert orders_pkt["assigned_modules"] == ["orders"]
-    assert orders_pkt["line_count"] == by_name["orders"]["line_count"]
-    assert "flow-orders" in orders_pkt["pre_rendered_diagram_ids"]
 
     # Missing sections from multiple submodules in payments collapse to one canonical packet
     assert "design-sec2-mod-payments" in packets
@@ -767,7 +763,7 @@ def test_deleted_files_and_symbols_on_sharded_and_boundary_modules(tmp_path: Pat
             },
         ],
         "is_first_run": False,
-        "modified_files": ["src/app/main.py"],
+        "modified_files": ["src/app/main.py", "src/orders/cart.py"],
         "modified_symbols": [],
         "moved_symbols": [],
     }
@@ -953,7 +949,7 @@ def test_deleted_file_exclusive_path_and_root_key_no_misattribution(tmp_path: Pa
             },
         ],
         "is_first_run": False,
-        "modified_files": ["src/app.py"],
+        "modified_files": ["src/app.py", "src/billing/invoices.py"],
         "modified_symbols": [],
         "moved_symbols": [],
     }
@@ -1113,7 +1109,7 @@ def test_infra_deleted_file_not_claimed_by_non_infra_module(tmp_path: Path):
             }
         ],
         "is_first_run": False,
-        "modified_files": ["main.py"],
+        "modified_files": ["main.py", "src/deploy.py"],
         "modified_symbols": [],
         "moved_symbols": [],
     }
@@ -1241,3 +1237,144 @@ def test_master_index_summary_splits_unresolved_refs(tmp_path: Path):
     assert summary["unresolved_external_refs"] == 1
     assert summary["unresolved_in_repo_refs"] == 1
     assert "excluded_test_files" in summary
+
+
+def test_incremental_plan_skips_packets_with_empty_delta_slice(tmp_path: Path):
+    """A one-module edit plans only the slices that carry a real delta (FQD run N1).
+
+    An impacted section is sharded by every module it cites. On a non-first run the
+    untouched slices have an empty delta_slice and must not become worker packets;
+    a first run still emits every slice because its added_files populate each one.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [
+        {
+            "name": "billing",
+            "path": "src/billing",
+            "line_count": 10000,
+            "symbol_count": 50,
+            "files": ["src/billing/invoices.py"],
+        },
+        {
+            "name": "orders",
+            "path": "src/orders",
+            "line_count": 10000,
+            "symbol_count": 50,
+            "files": ["src/orders/cart.py"],
+        },
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["billing", "orders"],
+            "diagram_ids": [],
+            "cited_files": ["src/billing/invoices.py", "src/orders/cart.py"],
+            "reasons": ["module_added"],
+        }
+    ]
+    incremental_delta = {
+        "added_files": [],
+        "added_symbols": [
+            {
+                "file_path": "src/billing/invoices.py",
+                "fqname": "billing.invoices.charge",
+                "kind": "function",
+                "name": "charge",
+                "start_line": 1,
+                "end_line": 2,
+            }
+        ],
+        "deleted_files": [],
+        "deleted_symbols": [],
+        "is_first_run": False,
+        "modified_files": [],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=incremental_delta
+    )
+    assert run_plan(repo, max_lines_per_worker=15000, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert plan["total_packets"] == 1
+    assert [p["packet_id"] for p in plan["packets"]] == ["design-sec2-mod-billing"]
+    for packet in plan["packets"]:
+        assert any(
+            packet["delta_slice"][key]
+            for key in (
+                "added_files",
+                "modified_files",
+                "deleted_files",
+                "added_symbols",
+                "modified_symbols",
+                "moved_symbols",
+                "deleted_symbols",
+            )
+        ), packet
+
+    first_run_delta = {
+        "added_files": ["src/billing/invoices.py", "src/orders/cart.py"],
+        "added_symbols": [],
+        "deleted_files": [],
+        "deleted_symbols": [],
+        "is_first_run": True,
+        "modified_files": [],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+    _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=first_run_delta
+    )
+    assert run_plan(repo, max_lines_per_worker=15000, cache_dir=cache) == EXIT_OK
+    first_plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert first_plan["total_packets"] == 2
+    assert {p["packet_id"] for p in first_plan["packets"]} == {
+        "design-sec2-mod-billing",
+        "design-sec2-mod-orders",
+    }
+
+
+def test_non_first_structural_section_keeps_its_worker_packet(tmp_path: Path):
+    """An empty section still gets a worker when the source tree has no delta (gap B2)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+
+    modules = [{"name": "app", "line_count": 10, "symbol_count": 1, "files": ["src/app.py"]}]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec2",
+            "heading": "2. Components & Modules",
+            "modules": ["app"],
+            "diagram_ids": [],
+            "cited_files": ["src/app.py"],
+            "reasons": ["empty_section"],
+        }
+    ]
+    empty_delta = {
+        "added_files": [],
+        "added_symbols": [],
+        "deleted_files": [],
+        "deleted_symbols": [],
+        "is_first_run": False,
+        "modified_files": [],
+        "modified_symbols": [],
+        "moved_symbols": [],
+    }
+    cache_paths = _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, delta=empty_delta
+    )
+    assert run_plan(repo, cache_dir=cache) == EXIT_OK
+
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    assert plan["total_packets"] == 1
+    packet = plan["packets"][0]
+    assert packet["packet_id"] == "design-sec2"
+    assert packet["section_ids"] == ["design-sec2"]

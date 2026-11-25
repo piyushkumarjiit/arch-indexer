@@ -75,6 +75,13 @@ CANONICAL_SECTION_MAP: dict[str, dict[str, str]] = {
 
 REFERENCES_SECTION_IDS = frozenset({"design-references", "guide-references", "references"})
 
+# Impacts that need a worker even when this run carries no source delta: a missing or
+# empty section and a hand-edited AUTO-DIAGRAM block are documentation work, not source
+# changes. Every other empty-delta packet on a non-first run is an untouched module slice.
+STRUCTURAL_IMPACT_REASONS = frozenset(
+    {"diagram_changed", "empty_section", "first_run", "section_missing"}
+)
+
 
 @dataclass
 class Packet:
@@ -88,6 +95,9 @@ class Packet:
     line_count: int
     symbol_count: int
     over_budget: bool = False
+    # Internal: a structural packet (missing/empty section or edited diagram) keeps its
+    # worker even when this run has no source delta, unlike an untouched module slice.
+    structural: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -118,6 +128,7 @@ class SectionItem:
     lines: int
     symbols: int
     is_missing_section: bool = False
+    reasons: tuple[str, ...] = ()
 
 
 def normalize_section_id(raw_id: str, heading: str, target_doc: str) -> str:
@@ -472,6 +483,29 @@ def extract_delta_slice(
     }
 
 
+def sections_are_structural(sections: Sequence[SectionItem]) -> bool:
+    """Whether any of these sections needs work that is not driven by a source delta."""
+    return any(
+        reason in STRUCTURAL_IMPACT_REASONS for section in sections for reason in section.reasons
+    )
+
+
+def delta_slice_is_empty(delta_slice: Mapping[str, Any]) -> bool:
+    """Whether a packet's delta slice carries no files or symbols to work from."""
+    return not any(
+        delta_slice.get(key)
+        for key in (
+            "added_files",
+            "modified_files",
+            "deleted_files",
+            "added_symbols",
+            "modified_symbols",
+            "moved_symbols",
+            "deleted_symbols",
+        )
+    )
+
+
 def resolve_packet_diagram_ids(
     section_ids: Sequence[str],
     assigned_modules: Sequence[str],
@@ -565,6 +599,7 @@ def _build_packet_for_sections(
         diagram_ids=d_diagrams,
         line_count=total_lines,
         symbol_count=total_symbols,
+        structural=sections_are_structural(sections),
     )
 
 
@@ -733,6 +768,7 @@ def run_plan(
                 lines=sec_lines,
                 symbols=sec_symbols,
                 is_missing_section=False,
+                reasons=tuple(str(reason) for reason in entry.get("reasons", [])),
             )
         )
 
@@ -763,6 +799,7 @@ def run_plan(
                 lines=sec_lines,
                 symbols=sec_symbols,
                 is_missing_section=True,
+                reasons=tuple(str(reason) for reason in entry.get("reasons", [])),
             )
         )
 
@@ -818,6 +855,7 @@ def run_plan(
                         diagram_ids=d_diagrams,
                         line_count=m_lines,
                         symbol_count=m_symbols,
+                        structural=sections_are_structural([sec]),
                     )
                     packets.append(
                         _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
@@ -858,6 +896,7 @@ def run_plan(
                     diagram_ids=d_diagrams,
                     line_count=module_lines.get(mod, 0) if mod else 0,
                     symbol_count=module_symbols.get(mod, 0) if mod else 0,
+                    structural=True,
                 )
                 packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
 
@@ -905,6 +944,17 @@ def run_plan(
                 include_tests=include_tests,
             )
             packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
+
+    # On an incremental run only packets backed by a real delta are dispatched. Sharding an
+    # impacted section by every module it cites otherwise emits one empty packet per module
+    # that did not change, which costs a worker per untouched slice. Structural work
+    # (missing/empty sections, edited diagrams) still needs its worker, so a zero-source-
+    # change run that is blocked on an empty section is not silently reduced to 0 packets.
+    # First runs keep every packet because their added_files populate each slice.
+    if delta.get("is_first_run") is False:
+        packets = [
+            pkt for pkt in packets if pkt.structural or not delta_slice_is_empty(pkt.delta_slice)
+        ]
 
     # A packet over budget means its module cannot be split further (a single flat package
     # or a fixed --module-depth); say so instead of silently exceeding the budget.

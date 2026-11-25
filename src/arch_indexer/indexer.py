@@ -403,8 +403,9 @@ def run_index(
         )
         export_graph_artifacts(target_repo, graph, docs_dir)
 
-        # Print the summary line and per-unit tiers to stdout
-        print(store.format_summary())
+        # Print the summary line and per-unit tiers to stdout. Scope the counts exactly as
+        # master-index.json/graph.json do so the log and the artifacts always agree.
+        print(store.format_summary(include_tests=include_tests))
 
         # Spec 5.1: snapshot the freshly indexed tables and diff them against state.json.
         current = RepoSnapshot.from_store(store, target_repo)

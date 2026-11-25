@@ -63,8 +63,8 @@ function runTests() {
   assert(modOrders.symbolCount >= 4, `mod:orders symbolCount should be >= 4, got ${modOrders.symbolCount}`);
   assert(modOrders.children.length > 0, "mod:orders should have directory children");
 
-  const dirServices = hierarchy.nodeLookup.get("dir:src/orders/services");
-  assert(dirServices, "dir:src/orders/services should exist");
+  const dirServices = hierarchy.nodeLookup.get("dir:mod:orders:src/orders/services");
+  assert(dirServices, "dir:mod:orders:src/orders/services should exist");
   assert.strictEqual(dirServices.kind, "file_group");
   assert(dirServices.children.includes("file:src/orders/services/order_service.py"));
 
@@ -171,20 +171,20 @@ function runTests() {
 
   // An absolute deep link to a directory must rebuild the full ancestor trail
   state.goToBreadcrumb(0);
-  assert(state.drillDown("dir:src/orders/services"));
+  assert(state.drillDown("dir:mod:orders:src/orders/services"));
   assert.deepStrictEqual(
     state.breadcrumbs.map((c) => c.id),
-    ["system", "mod:orders", "dir:src/orders/services"],
+    ["system", "mod:orders", "dir:mod:orders:src/orders/services"],
     "Deep link to a directory must rebuild the ancestor trail from the root"
   );
   state.goToBreadcrumb(0);
   assert(state.drillDown("mod:orders"));
 
-  // Drill down into dir:src/orders/services
-  const drill2 = state.drillDown("dir:src/orders/services");
-  assert(drill2, "drillDown into dir:src/orders/services should succeed");
+  // Drill down into dir:mod:orders:src/orders/services
+  const drill2 = state.drillDown("dir:mod:orders:src/orders/services");
+  assert(drill2, "drillDown into dir:mod:orders:src/orders/services should succeed");
   assert.strictEqual(state.currentLevel, "file_group");
-  assert.strictEqual(state.currentScope, "dir:src/orders/services");
+  assert.strictEqual(state.currentScope, "dir:mod:orders:src/orders/services");
   assert.strictEqual(state.breadcrumbs.length, 3);
 
   // Drill down into file
@@ -197,7 +197,7 @@ function runTests() {
   state.goUp();
   assert.strictEqual(state.currentLevel, "file_group");
   assert.strictEqual(state.breadcrumbs.length, 3);
-  assert.strictEqual(state.currentScope, "dir:src/orders/services");
+  assert.strictEqual(state.currentScope, "dir:mod:orders:src/orders/services");
 
   // Test jump to breadcrumb root
   state.goToBreadcrumb(0);
@@ -493,11 +493,11 @@ function runTests() {
   const noServiceView = state.getCurrentView();
   const noServiceIds = noServiceView.nodes.map((n) => n.id);
   assert(
-    noServiceIds.includes("dir:src/orders"),
+    noServiceIds.includes("dir:mod:orders:src/orders"),
     "A directory with a passing entrypoint leaf must stay visible"
   );
   assert(
-    !noServiceIds.includes("dir:src/orders/services"),
+    !noServiceIds.includes("dir:mod:orders:src/orders/services"),
     "A directory whose only leaves are filtered-out services must be hidden"
   );
   assert(
@@ -666,7 +666,7 @@ function runTests() {
     "tree-sitter",
     "A synthetic-root inspector must derive its tier from descendant leaves"
   );
-  const dirDetails = getNodeDetails(state.hierarchy, "dir:src/orders/services");
+  const dirDetails = getNodeDetails(state.hierarchy, "dir:mod:orders:src/orders/services");
   assert.strictEqual(
     dirDetails.tier,
     "scip",
@@ -1261,8 +1261,82 @@ function testBrowserController(graphJsonText) {
   assert(!orphanView.nodes.some((n) => n.id === "mod:auth"), "Unchecked module must be hidden");
 }
 
+function testSharedDirectoryScoping() {
+  console.log("Checking shared-directory module scoping...");
+  const sharedGraph = {
+    schema_version: "1.0",
+    repo_name: "shared",
+    modules: [
+      { id: "mod:capacity", name: "capacity", language: "typescript", path: "src/services", file_count: 1, tier: "scip" },
+      { id: "mod:stats", name: "stats", language: "typescript", path: "src/services", file_count: 1, tier: "scip" },
+      { id: "mod:http", name: "http", language: "typescript", path: "src/services", file_count: 1, tier: "scip" },
+    ],
+    nodes: [
+      { id: "sym:capacity.plan", kind: "service", label: "plan", module_id: "mod:capacity", file: "src/services/capacity.ts", line: 1, tier: "scip" },
+      { id: "sym:stats.collect", kind: "service", label: "collect", module_id: "mod:stats", file: "src/services/stats.ts", line: 1, tier: "scip" },
+      { id: "sym:http.serve", kind: "service", label: "serve", module_id: "mod:http", file: "src/services/http.ts", line: 1, tier: "scip" },
+    ],
+    edges: [
+      { source: "sym:capacity.plan", target: "sym:stats.collect", kind: "calls", file: "src/services/capacity.ts", line: 2, tier: "scip" },
+      { source: "sym:http.serve", target: "sym:capacity.plan", kind: "calls", file: "src/services/http.ts", line: 2, tier: "scip" },
+    ],
+    data_stores: [],
+    external_sinks: [],
+  };
+  const sharedHierarchy = buildHierarchy(sharedGraph);
+  const capacityModule = sharedHierarchy.nodeLookup.get("mod:capacity");
+  const statsModule = sharedHierarchy.nodeLookup.get("mod:stats");
+  assert(
+    capacityModule.children.includes("dir:mod:capacity:src/services"),
+    "capacity must own its own src/services directory node"
+  );
+  assert(
+    statsModule.children.includes("dir:mod:stats:src/services"),
+    "stats must own its own src/services directory node even though capacity shares the directory"
+  );
+  const capacityDir = sharedHierarchy.nodeLookup.get("dir:mod:capacity:src/services");
+  assert.deepStrictEqual(
+    capacityDir.children,
+    ["file:src/services/capacity.ts"],
+    "A module directory must list only that module's files"
+  );
+
+  const sharedState = new ViewerState(sharedGraph);
+  assert(sharedState.drillDown("mod:capacity"));
+  const moduleIds = sharedState.getCurrentView().nodes.map((n) => n.id);
+  assert(
+    moduleIds.includes("dir:mod:capacity:src/services"),
+    "capacity drill-down must show its directory"
+  );
+  assert(
+    !moduleIds.includes("dir:mod:stats:src/services"),
+    "capacity drill-down must not show a sibling module's directory"
+  );
+  assert(sharedState.drillDown("dir:mod:capacity:src/services"));
+  const fileIds = sharedState.getCurrentView().nodes.map((n) => n.id);
+  assert(
+    fileIds.includes("file:src/services/capacity.ts"),
+    "capacity directory drill-down must show its own file"
+  );
+  assert(
+    !fileIds.includes("file:src/services/stats.ts") && !fileIds.includes("file:src/services/http.ts"),
+    "capacity directory drill-down must not show files owned by other modules"
+  );
+
+  const details = getNodeDetails(sharedHierarchy, "mod:capacity");
+  assert(
+    details.uses.some((entry) => entry.id === "mod:stats"),
+    "capacity inspector must report its outgoing edge to stats"
+  );
+  assert(
+    details.usedBy.some((entry) => entry.id === "mod:http"),
+    "capacity inspector must report its incoming edge from http"
+  );
+}
+
 try {
   runTests();
+  testSharedDirectoryScoping();
 } catch (err) {
   console.error("Test failed:", err);
   process.exit(1);

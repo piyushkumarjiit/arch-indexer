@@ -8,6 +8,7 @@ from typing import Any
 
 from arch_indexer.config import RepoCachePaths
 from arch_indexer.module_identity import REVERSE_DOMAIN_TLDS
+from arch_indexer.source_scope import in_scope
 
 UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
 
@@ -467,54 +468,67 @@ class IndexStore:
                 )
         return purged
 
-    def get_summary(self) -> dict[str, Any]:
-        """Collect index summary metrics."""
+    def get_summary(self, *, include_tests: bool | None = None) -> dict[str, Any]:
+        """Collect index summary metrics.
+
+        ``include_tests=None`` reports the raw index tables. When a boolean is passed, the
+        counts are scoped exactly like ``master-index.json``/``graph.json``: test files
+        (and their symbols, references, entrypoints, infra artifacts and unresolved refs)
+        are excluded unless ``include_tests`` is true. The index command uses that scoped
+        form so its printed summary cannot disagree with the artifacts.
+        """
+        scoped = include_tests is not None
+        include_test_rows = bool(include_tests)
+
+        def keep(path: str) -> bool:
+            return not scoped or in_scope(path, include_test_rows)
+
         cursor = self.conn.cursor()
 
-        # Files breakdown
         cursor.execute(
             """
-            SELECT language, tier, COUNT(*) as count
+            SELECT path, language, tier
             FROM files
-            GROUP BY language, tier
-            ORDER BY language, tier
+            ORDER BY path
             """
         )
+        all_file_rows = cursor.fetchall()
+        file_rows = [row for row in all_file_rows if keep(row["path"])]
+        breakdown_counts: dict[tuple[str, str], int] = {}
+        for row in file_rows:
+            key = (row["language"], row["tier"])
+            breakdown_counts[key] = breakdown_counts.get(key, 0) + 1
         files_breakdown = [
-            (row["language"], row["tier"], row["count"]) for row in cursor.fetchall()
+            (language, tier, count) for (language, tier), count in sorted(breakdown_counts.items())
         ]
+        total_files = len(file_rows)
 
-        cursor.execute("SELECT COUNT(*) FROM files")
-        total_files = cursor.fetchone()[0]
+        def scoped_count(table: str, column: str = "file_path") -> int:
+            cursor.execute(f'SELECT {column}, COUNT(*) FROM "{table}" GROUP BY {column}')
+            return sum(count for path, count in cursor.fetchall() if keep(path))
 
-        cursor.execute("SELECT COUNT(*) FROM symbols")
-        total_symbols = cursor.fetchone()[0]
-
-        cursor.execute('SELECT COUNT(*) FROM "references"')
-        total_references = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM entrypoints")
-        total_entrypoints = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM infra_artifacts")
-        total_infra = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM unresolved_refs")
-        total_unresolved = cursor.fetchone()[0]
+        total_symbols = scoped_count("symbols")
+        total_references = scoped_count("references")
+        total_entrypoints = scoped_count("entrypoints")
+        total_infra = scoped_count("infra_artifacts")
 
         # Split unresolved references into external-library symbols (expected) and
-        # repository-owned symbols (a real index defect). Totals stay unchanged.
+        # repository-owned symbols (a real index defect). Totals stay unchanged. The
+        # namespace sets stay unscoped so the split matches master-index.json.
         cursor.execute("SELECT DISTINCT module FROM files")
         repo_modules = [row[0] for row in cursor.fetchall() if row[0]]
         cursor.execute("SELECT fqname FROM symbols")
         repo_fqnames = [row[0] for row in cursor.fetchall() if row[0]]
-        cursor.execute("SELECT raw_symbol FROM unresolved_refs")
+        cursor.execute("SELECT file_path, raw_symbol FROM unresolved_refs")
+        unresolved_symbols = [raw for path, raw in cursor.fetchall() if keep(path)]
+        total_unresolved = len(unresolved_symbols)
         unresolved_external, unresolved_in_repo = split_unresolved_refs(
-            (row[0] for row in cursor.fetchall()), repo_modules, repo_fqnames
+            iter(unresolved_symbols), repo_modules, repo_fqnames
         )
 
         return {
             "total_files": total_files,
+            "excluded_test_files": (len(all_file_rows) - total_files) if scoped else 0,
             "files_breakdown": files_breakdown,
             "total_symbols": total_symbols,
             "total_references": total_references,
@@ -526,13 +540,15 @@ class IndexStore:
             "units": self.get_unit_records(),
         }
 
-    def format_summary(self) -> str:
+    def format_summary(self, *, include_tests: bool | None = None) -> str:
         """Format the index summary line plus each unit's tier and fallback detail."""
-        summary = self.get_summary()
+        summary = self.get_summary(include_tests=include_tests)
         breakdown_parts = [
             f"{lang}: {count} [{tier}]" for lang, tier, count in summary["files_breakdown"]
         ]
         breakdown_str = f" ({', '.join(breakdown_parts)})" if breakdown_parts else ""
+        excluded = summary["excluded_test_files"]
+        excluded_str = f" [{excluded} test file(s) excluded]" if excluded else ""
         lines = [
             f"Indexed {summary['total_files']} files{breakdown_str}: "
             f"{summary['total_symbols']} symbols, "
@@ -541,7 +557,7 @@ class IndexStore:
             f"{summary['total_infra_artifacts']} infra artifacts, "
             f"{summary['total_unresolved_refs']} unresolved refs "
             f"({summary['unresolved_external_refs']} external, "
-            f"{summary['unresolved_in_repo_refs']} in-repo)"
+            f"{summary['unresolved_in_repo_refs']} in-repo){excluded_str}"
         ]
         if summary["units"]:
             lines.append("Unit tiers:")
