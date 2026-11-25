@@ -217,6 +217,33 @@ public class PriceService {
     assert [e["route_or_trigger"] for e in _by_kind(eps, "grpc")] == ["PriceService/price"]
 
 
+def test_grpc_lifecycle_overrides_are_not_entrypoints(tmp_path: Path):
+    eps = _entrypoints(
+        tmp_path,
+        """
+package demo.rpc;
+
+public class QuoteService extends QuoteGrpc.QuoteImplBase {
+    @Override
+    public void getQuote(Request req, StreamObserver<Reply> out) {}
+
+    @Override
+    public String toString() { return "quote"; }
+
+    @Override
+    public boolean equals(Object other) { return false; }
+
+    @Override
+    public ServerServiceDefinition bindService() { return null; }
+
+    @Override
+    public void onStart() {}
+}
+""",
+    )
+    assert [e["route_or_trigger"] for e in _by_kind(eps, "grpc")] == ["Quote/getQuote"]
+
+
 def test_ordinary_classes_have_no_entrypoints(tmp_path: Path):
     eps = _entrypoints(
         tmp_path,

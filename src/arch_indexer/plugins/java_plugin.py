@@ -195,6 +195,12 @@ def _is_main_method(node: Node, source_bytes: bytes, name: str) -> bool:
     return is_static and "String" in param_text
 
 
+def _is_grpc_rpc_handler(node: Node, source_bytes: bytes) -> bool:
+    """A generated gRPC handler takes a ``StreamObserver`` parameter."""
+    params = node.child_by_field_name("parameters")
+    return params is not None and "StreamObserver" in _get_node_text(params, source_bytes)
+
+
 def _class_entry_context(
     node: Node, source_bytes: bytes, declarations: list[str], class_name: str
 ) -> dict[str, Any]:
@@ -910,7 +916,11 @@ class JavaPlugin(LanguagePlugin):
             route = _join_route(class_ctx.get("jaxrs_path") or "", sub_path)
             add("http", ",".join(sorted(verbs)), route, auth_symbols)
 
-        if class_ctx.get("grpc") and "Override" in by_name:
+        if (
+            class_ctx.get("grpc")
+            and "Override" in by_name
+            and _is_grpc_rpc_handler(node, source_bytes)
+        ):
             add("grpc", None, f"{class_ctx['grpc']}/{m_name}")
 
     def _analyze_file(
