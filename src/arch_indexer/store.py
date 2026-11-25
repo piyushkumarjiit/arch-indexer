@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     language TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS units (
+    unit_id TEXT PRIMARY KEY,
+    language TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    files_count INTEGER NOT NULL,
+    fallback_reason TEXT,
+    message TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_symbols_fqname ON symbols(fqname);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_refs_symbol_fqname ON "references"(symbol_fqname);
@@ -176,6 +185,7 @@ class IndexStore:
             self.conn.execute("DROP TABLE IF EXISTS entrypoints")
             self.conn.execute("DROP TABLE IF EXISTS infra_artifacts")
             self.conn.execute("DROP TABLE IF EXISTS unresolved_refs")
+            self.conn.execute("DROP TABLE IF EXISTS units")
             self.conn.execute("DROP TABLE IF EXISTS files")
         self.init_schema()
 
@@ -374,6 +384,39 @@ class IndexStore:
             if unresolved_refs:
                 self._insert_unresolved_refs(unresolved_refs)
 
+    def insert_unit_record(
+        self,
+        *,
+        unit_id: str,
+        language: str,
+        tier: str,
+        files_count: int,
+        fallback_reason: str | None = None,
+        message: str = "",
+    ) -> None:
+        """Record how one indexing unit resolved (tier, fallback reason, captured message)."""
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO units
+                (unit_id, language, tier, files_count, fallback_reason, message)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (unit_id, language, tier, files_count, fallback_reason, message),
+            )
+
+    def get_unit_records(self) -> list[dict[str, Any]]:
+        """Return every unit's tier and fallback detail in deterministic unit-id order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT unit_id, language, tier, files_count, fallback_reason, message
+            FROM units
+            ORDER BY unit_id
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_file_records(self) -> list[dict[str, Any]]:
         """Return every indexed file record in deterministic path order."""
         cursor = self.conn.cursor()
@@ -480,16 +523,17 @@ class IndexStore:
             "total_unresolved_refs": total_unresolved,
             "unresolved_external_refs": unresolved_external,
             "unresolved_in_repo_refs": unresolved_in_repo,
+            "units": self.get_unit_records(),
         }
 
     def format_summary(self) -> str:
-        """Format one-line index summary matching spec."""
+        """Format the index summary line plus each unit's tier and fallback detail."""
         summary = self.get_summary()
         breakdown_parts = [
             f"{lang}: {count} [{tier}]" for lang, tier, count in summary["files_breakdown"]
         ]
         breakdown_str = f" ({', '.join(breakdown_parts)})" if breakdown_parts else ""
-        return (
+        lines = [
             f"Indexed {summary['total_files']} files{breakdown_str}: "
             f"{summary['total_symbols']} symbols, "
             f"{summary['total_references']} references, "
@@ -498,4 +542,18 @@ class IndexStore:
             f"{summary['total_unresolved_refs']} unresolved refs "
             f"({summary['unresolved_external_refs']} external, "
             f"{summary['unresolved_in_repo_refs']} in-repo)"
-        )
+        ]
+        if summary["units"]:
+            lines.append("Unit tiers:")
+            lines.extend(self._format_unit_row(unit) for unit in summary["units"])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_unit_row(unit: dict[str, Any]) -> str:
+        detail = f"  {unit['unit_id']}: {unit['files_count']} files [{unit['tier']}"
+        if unit["fallback_reason"]:
+            detail += f": {unit['fallback_reason']}"
+        detail += "]"
+        if unit["message"]:
+            detail += f" — {unit['message']}"
+        return detail

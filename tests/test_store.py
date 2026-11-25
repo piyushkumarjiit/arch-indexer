@@ -23,7 +23,20 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "entrypoints",
         "infra_artifacts",
         "unresolved_refs",
+        "units",
     }
+
+    # Verify column names for units (per-unit tier, fallback reason and captured message)
+    c.execute("PRAGMA table_info('units')")
+    cols = [r[1] for r in c.fetchall()]
+    assert cols == [
+        "unit_id",
+        "language",
+        "tier",
+        "files_count",
+        "fallback_reason",
+        "message",
+    ]
 
     # Verify column names for files
     c.execute("PRAGMA table_info('files')")

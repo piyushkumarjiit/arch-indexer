@@ -41,14 +41,16 @@ When network access is available, install required language indexers into the lo
 ```bash
 arch-indexer toolchain ensure --repo <repo>
 ```
-*Note: toolchain installation is the only operation permitted network access; it happens here, and also automatically inside `index` unless `--offline` is passed (step 1b runs `--offline`, so no network access occurs there). Optional status inspection: `arch-indexer toolchain status --repo <repo>`.*
+*Note: toolchain installation is the only operation permitted network access; it happens here, and also automatically inside `index` unless `--offline` is passed (step 1b runs `--offline`, so no network access occurs there). Optional status inspection: `arch-indexer toolchain status --repo <repo>`, which reports the host Maven version against the repository's `RequireMavenVersion` range and the pinned version. When the host is below the repo requirement, `toolchain ensure --fetch-runtime` fetches the pinned portable Maven and indexing uses it.*
+
+*Java/Maven prerequisite: scip-java builds one module directory at a time in Maven offline mode. Prime the local repository once with the repository's own Maven (`mvn -q -DskipTests install`) so sibling-module dependencies resolve; a cold local repository otherwise forces every Java unit to Tier 2.*
 
 #### 1b. Index Repository & Detect Delta (Offline)
 Run offline deterministic indexing with automatic citation line-shift repair:
 ```bash
 arch-indexer index <repo> --offline --auto-relocate-citations
 ```
-*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--docs-dir docs`.*
+*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--docs-dir docs`, `--maven-online` (drop Maven's `-o`), repeatable `--maven-arg=<arg>` (forward extra Maven arguments; use `=` when the value starts with `-`). Check `<cache>/repos/<id>/index.db` unit tiers with `arch-indexer query <repo> units`.*
 
 Evaluate exit code:
 - **`0` (`EXIT_NO_CHANGES`)**: Documentation is up to date, either because the repository is unchanged and every required section has a body, or because the only change was line shifts that `--auto-relocate-citations` repaired with no section left impacted. Stop immediately; report documentation is up to date.
@@ -85,6 +87,7 @@ Instruct every section worker to follow these rules:
    - `arch-indexer query <repo> def <symbol>`
    - `arch-indexer query <repo> refs <symbol> --limit 100`
    - `arch-indexer query <repo> file-symbols <rel-path>`
+   - `arch-indexer query <repo> units`
    - `arch-indexer query <repo> entrypoints --module <mod>`
    - `arch-indexer query <repo> module-summary <mod>`
    - `arch-indexer query <repo> flow-trace <entrypoint-id>`
@@ -119,6 +122,7 @@ Rules:
    - arch-indexer query <repo> def <symbol>
    - arch-indexer query <repo> refs <symbol> --limit 100
    - arch-indexer query <repo> file-symbols <rel-path>
+   - arch-indexer query <repo> units
    - arch-indexer query <repo> entrypoints --module <mod>
    - arch-indexer query <repo> module-summary <mod>
    - arch-indexer query <repo> flow-trace <entrypoint-id>

@@ -31,6 +31,12 @@ from arch_indexer.config import (
     get_node_tools_dir,
     get_runtimes_dir,
 )
+from arch_indexer.maven import (
+    MavenRequirement,
+    compare_versions,
+    detect_maven_requirement,
+    parse_maven_version,
+)
 
 DB_MIGRATION_DIR_NAMES = frozenset({"flyway", "liquibase"})
 MIGRATION_DIR_NAMES = frozenset(
@@ -218,13 +224,63 @@ class RuntimeStatus:
     version: str | None = None
     min_version: str | None = None
     message: str = ""
+    # For mvn: what the repository demands and what this toolchain pins, so a
+    # version mismatch stays visible even when a portable runtime takes over.
+    required: str | None = None
+    pinned_version: str | None = None
 
 
-def check_host_runtimes() -> dict[str, RuntimeStatus]:
-    """Check host runtimes against the pinned minimum versions in toolchain.toml."""
-    runtime_cfg = load_toolchain_manifest()["runtimes"]
+def _maven_status(
+    version_text: str,
+    requirement: MavenRequirement | None,
+    pinned_version: str | None,
+) -> RuntimeStatus:
+    """Validate one host Maven version against the repo requirement and the pin."""
+    version = parse_maven_version(version_text)
+    required = requirement.describe() if requirement is not None else None
+    if version is None:
+        raw = version_text.strip()
+        return RuntimeStatus(
+            name="mvn",
+            available=False,
+            message=(
+                f"Unable to parse Maven version from {raw}"
+                if raw
+                else "Unable to parse Maven version"
+            ),
+            required=required,
+            pinned_version=pinned_version,
+        )
+    if requirement is not None and not requirement.accepts(version):
+        return RuntimeStatus(
+            name="mvn",
+            available=False,
+            version=version,
+            message=f"host Maven {version} does not satisfy repo requirement {required}",
+            required=required,
+            pinned_version=pinned_version,
+        )
+    message = "OK"
+    if pinned_version is not None and compare_versions(version, pinned_version) < 0:
+        message = f"host Maven {version} < pinned {pinned_version}"
+    return RuntimeStatus(
+        name="mvn",
+        available=True,
+        version=version,
+        message=message,
+        required=required,
+        pinned_version=pinned_version,
+    )
+
+
+def check_host_runtimes(repo_path: str | Path | None = None) -> dict[str, RuntimeStatus]:
+    """Check host runtimes against the pinned minimums and the repo's Maven requirement."""
+    manifest = load_toolchain_manifest()
+    runtime_cfg = manifest["runtimes"]
     node_min = runtime_cfg["node_min_version"]
     java_min = runtime_cfg["java_min_version"]
+    maven_pin = runtime_cfg.get("maven", {}).get("version")
+    maven_requirement = detect_maven_requirement(repo_path)
     runtimes: dict[str, RuntimeStatus] = {}
 
     # Python
@@ -328,25 +384,35 @@ def check_host_runtimes() -> dict[str, RuntimeStatus]:
             res = subprocess.run(
                 [mvn_cmd, "--version"], capture_output=True, text=True, check=False
             )
-            raw = res.stdout.strip()
-            first_line = raw.splitlines()[0] if raw else "available"
-            runtimes["mvn"] = RuntimeStatus(
-                name="mvn",
-                available=True,
-                version=first_line,
-                message="OK",
-            )
+            if res.returncode != 0:
+                detail = (res.stderr or res.stdout).strip()
+                first_line = detail.splitlines()[0] if detail else f"exit code {res.returncode}"
+                runtimes["mvn"] = RuntimeStatus(
+                    name="mvn",
+                    available=False,
+                    message=f"mvn --version failed: {first_line}",
+                    required=maven_requirement.describe() if maven_requirement else None,
+                    pinned_version=maven_pin,
+                )
+            else:
+                raw = res.stdout.strip()
+                first_line = raw.splitlines()[0] if raw else ""
+                runtimes["mvn"] = _maven_status(first_line, maven_requirement, maven_pin)
         except (subprocess.SubprocessError, OSError) as e:
             runtimes["mvn"] = RuntimeStatus(
                 name="mvn",
                 available=False,
                 message=f"Failed to execute mvn: {e}",
+                required=maven_requirement.describe() if maven_requirement else None,
+                pinned_version=maven_pin,
             )
     else:
         runtimes["mvn"] = RuntimeStatus(
             name="mvn",
             available=False,
             message="mvn executable not found in PATH",
+            required=maven_requirement.describe() if maven_requirement else None,
+            pinned_version=maven_pin,
         )
 
     return runtimes
@@ -782,15 +848,17 @@ def _ready_portable_runtimes(
 
 def _effective_runtimes(
     cache_dir: str | Path | None = None,
+    repo_path: str | Path | None = None,
 ) -> tuple[dict[str, RuntimeStatus], JavaRuntime, dict[str, RuntimeInstall]]:
     """Resolved runtimes, the subprocess runtime, and the portable installs in use.
 
     Host runtimes win when usable; an extracted, checksum-verified portable
-    runtime fills in for a missing or too-old host runtime.
+    runtime fills in for a missing, too-old, or repo-incompatible host runtime.
     """
     manifest = load_toolchain_manifest()
     java_min = manifest["runtimes"]["java_min_version"]
-    runtimes = dict(check_host_runtimes())
+    maven_requirement = detect_maven_requirement(repo_path)
+    runtimes = dict(check_host_runtimes(repo_path))
     installed = _ready_portable_runtimes(cache_dir)
 
     env: dict[str, str] = {}
@@ -814,15 +882,25 @@ def _effective_runtimes(
         )
 
     maven = installed.get("maven")
-    if maven is not None and not runtimes["mvn"].available:
+    if (
+        maven is not None
+        and not runtimes["mvn"].available
+        and (maven_requirement is None or maven_requirement.accepts(maven.version))
+    ):
         portable["maven"] = maven
         mvn_cmd = str(maven.executable)
         path_entries.append(str(maven.path / "bin"))
+        host_maven = runtimes["mvn"]
+        message = "portable runtime"
+        if host_maven.version:
+            message = f"portable runtime; {host_maven.message}"
         runtimes["mvn"] = RuntimeStatus(
             name="mvn",
             available=True,
             version=maven.version,
-            message="portable runtime",
+            message=message,
+            required=host_maven.required,
+            pinned_version=host_maven.pinned_version,
         )
 
     if path_entries:
@@ -852,31 +930,48 @@ def _prepare_java_runtime(
     fetch_runtime: bool = True,
     *,
     maven_repo: bool,
+    repo_path: str | Path | None = None,
 ) -> tuple[dict[str, RuntimeStatus], JavaRuntime, list[str]]:
     """Resolve java/mvn for scip-java and report the portable runtimes in use.
 
     Pinned runtimes are downloaded only when fetch_runtime is set, and Maven only
     for a repo that contains a pom.xml. An already downloaded, checksum-verified
     runtime is reused without it, and the returned messages say which portable
-    runtime was used and whether it was just fetched.
+    runtime was used and whether it was just fetched. A host Maven that is below
+    the repository's declared requirement counts as unavailable, so the pinned
+    portable Maven is fetched and preferred instead.
     """
-    runtimes, runtime, portable = _effective_runtimes(cache_dir)
+    runtimes, runtime, portable = _effective_runtimes(cache_dir, repo_path=repo_path)
     downloaded: dict[str, RuntimeInstall] = {}
     if fetch_runtime:
         kinds = []
         if not runtimes["java"].available:
             kinds.append("jdk")
         if maven_repo and not runtimes["mvn"].available:
-            kinds.append("maven")
+            maven_requirement = detect_maven_requirement(repo_path)
+            pinned_maven = runtimes["mvn"].pinned_version or load_toolchain_manifest()[
+                "runtimes"
+            ].get("maven", {}).get("version")
+            if (
+                maven_requirement is None
+                or pinned_maven is None
+                or maven_requirement.accepts(pinned_maven)
+            ):
+                kinds.append("maven")
         if kinds:
             downloaded = ensure_portable_runtimes(cache_dir, kinds=tuple(kinds))
-            runtimes, runtime, portable = _effective_runtimes(cache_dir)
+            runtimes, runtime, portable = _effective_runtimes(cache_dir, repo_path=repo_path)
 
-    messages = [
-        _describe_portable_runtime(kind, portable, downloaded)
-        for kind in ("jdk", "maven")
-        if kind in portable
-    ]
+    messages = []
+    for kind in ("jdk", "maven"):
+        if kind not in portable:
+            continue
+        line = _describe_portable_runtime(kind, portable, downloaded)
+        status = runtimes[{"jdk": "java", "maven": "mvn"}[kind]]
+        detail = status.message.removeprefix("portable runtime; ")
+        if status.message.startswith("portable runtime; ") and detail:
+            line = f"{line} ({detail})"
+        messages.append(line)
     return runtimes, runtime, messages
 
 
@@ -1027,7 +1122,7 @@ def get_toolchain_status(
     c_dir = get_cache_dir(cache_dir)
     detected_files = detect_repo_files(repo)
     active_langs = _languages_from_files(detected_files)
-    runtimes, java_runtime, _portable = _effective_runtimes(c_dir)
+    runtimes, java_runtime, _portable = _effective_runtimes(c_dir, repo_path=repo)
     java_env = java_runtime.env or None
 
     tools: dict[str, ToolStatus] = {}
@@ -1067,13 +1162,18 @@ def format_status_report(report: ToolchainStatusReport) -> str:
         if rt:
             ver = rt.version or "not found"
             min_v = f" (min {rt.min_version})" if rt.min_version else ""
+            requirement = ""
+            if rt.required:
+                requirement = f" (repo requires {rt.required})"
+            elif rt.pinned_version and name == "mvn":
+                requirement = f" (pinned {rt.pinned_version})"
             if not rt.available:
                 status_str = f"MISSING / INCOMPATIBLE ({rt.message})"
             elif rt.message and rt.message != "OK":
                 status_str = f"OK ({rt.message})"
             else:
                 status_str = "OK"
-            lines.append(f"  - {name:8}: {ver}{min_v} -> {status_str}")
+            lines.append(f"  - {name:8}: {ver}{min_v}{requirement} -> {status_str}")
 
     lines.append("")
     lines.append("Tier 1 Indexer Tools (External Cache):")
@@ -1180,7 +1280,10 @@ def ensure_toolchain(
     runtime_messages: list[str] = []
     if "java" in active_langs:
         runtimes, java_runtime, runtime_messages = _prepare_java_runtime(
-            c_dir, fetch_runtime=fetch_runtime, maven_repo=maven_repo
+            c_dir,
+            fetch_runtime=fetch_runtime,
+            maven_repo=maven_repo,
+            repo_path=repo,
         )
         # ensure_portable_runtimes records its installs in the lock after we read it;
         # merge those entries so the final save does not drop them.
@@ -1195,8 +1298,8 @@ def ensure_toolchain(
         else:
             if not runtimes["mvn"].available:
                 warnings.append(
-                    "Host mvn is absent; scip-java Maven builds may fall back to Tier 2 "
-                    "tree-sitter."
+                    f"Maven runtime unavailable ({runtimes['mvn'].message}); scip-java Maven "
+                    "builds will fall back to Tier 2 tree-sitter."
                 )
             scip_java_cfg = tools_cfg["scip-java"]
             runtime_env = java_runtime.env or None

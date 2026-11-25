@@ -407,6 +407,326 @@ def test_check_host_runtimes_uses_manifest_minimums():
     assert runtimes["java"].min_version == "99"
 
 
+def _write_enforcer_pom(repo: Path, version_range: str = "[3.9.0,4.0.0)") -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "pom.xml").write_text(
+        "<project><modelVersion>4.0.0</modelVersion>"
+        "<groupId>com.example</groupId><artifactId>demo</artifactId><version>1.0.0</version>"
+        "<build><plugins><plugin><groupId>org.apache.maven.plugins</groupId>"
+        "<artifactId>maven-enforcer-plugin</artifactId><configuration><rules>"
+        f"<requireMavenVersion><version>{version_range}</version></requireMavenVersion>"
+        "</rules></configuration></plugin></plugins></build></project>"
+    )
+
+
+def _maven_version_run(java_line: str, maven_line: str):
+    def run(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, f"{maven_line}\n", "")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", f"{java_line}\n")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    return run
+
+
+def _host_java_and_maven_which(name):
+    return {"java": "/usr/bin/java", "mvn": "/usr/bin/mvn"}.get(name)
+
+
+def test_check_host_runtimes_rejects_host_maven_below_repo_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo)
+    manifest = {
+        "tools": {},
+        "runtimes": {**RUNTIMES, "maven": {"version": "3.9.16"}},
+    }
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch(
+            "arch_indexer.toolchain.subprocess.run",
+            side_effect=_maven_version_run(
+                'openjdk version "21.0.1" 2024-01-01',
+                "Apache Maven 3.8.7 (b89d5959fcde851dcb1c8946a785a163f14e1e1d)",
+            ),
+        ),
+    ):
+        runtimes = check_host_runtimes(repo)
+        text = format_status_report(get_toolchain_status(repo, cache_dir=tmp_path / "cache"))
+
+    status = runtimes["mvn"]
+    assert status.available is False
+    assert status.version == "3.8.7"
+    assert status.required == "[3.9.0,4.0.0)"
+    assert status.pinned_version == "3.9.16"
+    assert "does not satisfy repo requirement [3.9.0,4.0.0)" in status.message
+    assert "repo requires [3.9.0,4.0.0)" in text
+    assert "MISSING / INCOMPATIBLE" in text
+
+
+def test_check_host_runtimes_accepts_host_maven_that_satisfies_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo)
+    manifest = {
+        "tools": {},
+        "runtimes": {**RUNTIMES, "maven": {"version": "3.9.16"}},
+    }
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch(
+            "arch_indexer.toolchain.subprocess.run",
+            side_effect=_maven_version_run(
+                'openjdk version "21.0.1" 2024-01-01',
+                "Apache Maven 3.9.6 (b89d5959fcde851dcb1c8946a785a163f14e1e1d)",
+            ),
+        ),
+    ):
+        runtimes = check_host_runtimes(repo)
+
+    status = runtimes["mvn"]
+    assert status.available is True
+    assert status.version == "3.9.6"
+    assert status.required == "[3.9.0,4.0.0)"
+    assert "host Maven 3.9.6 < pinned 3.9.16" in status.message
+
+
+def test_check_host_runtimes_reports_host_maven_below_pinned_version(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pom.xml").write_text("<project></project>")
+    manifest = {
+        "tools": {},
+        "runtimes": {**RUNTIMES, "maven": {"version": "3.9.16"}},
+    }
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch(
+            "arch_indexer.toolchain.subprocess.run",
+            side_effect=_maven_version_run(
+                'openjdk version "21.0.1" 2024-01-01',
+                "Apache Maven 3.8.7 (b89d5959fcde851dcb1c8946a785a163f14e1e1d)",
+            ),
+        ),
+    ):
+        runtimes = check_host_runtimes(repo)
+
+    status = runtimes["mvn"]
+    assert status.available is True
+    assert status.required is None
+    assert "host Maven 3.8.7 < pinned 3.9.16" in status.message
+
+
+def test_ensure_fetches_portable_maven_when_host_is_below_repo_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo)
+    cache = tmp_path / "cache"
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest = {
+        **_runtime_pin_manifest(jdk_bytes, maven_bytes),
+        "tools": _java_tools(coursier_bytes),
+    }
+    bootstrap_calls = []
+
+    def run(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, "Apache Maven 3.8.7 (b89d5959fcde851dcb1c8946a785a163f14e1e1d)\n", ""
+            )
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        if "bootstrap" in cmd:
+            bootstrap_calls.append((cmd, kwargs))
+            launcher = Path(cmd[cmd.index("-o") + 1])
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+        patch(
+            "arch_indexer.toolchain.urllib.request.urlopen",
+            side_effect=_runtime_downloads(jdk_bytes, maven_bytes, coursier_bytes),
+        ) as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    maven_path = cache / "runtimes" / "apache-maven-test"
+    assert maven_path.is_dir()
+    assert not (cache / "runtimes" / "temurin-jdk-test").exists()
+    assert len(res["runtimes"]) == 1
+    assert res["runtimes"][0].startswith(
+        f"mvn: portable runtime 3.9.16 (downloaded) at {maven_path}"
+    )
+    assert "does not satisfy repo requirement [3.9.0,4.0.0)" in res["runtimes"][0]
+    requested_urls = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert any(url.endswith("maven.tar.gz") for url in requested_urls)
+    assert not any(url.endswith("jdk.tar.gz") for url in requested_urls)
+
+    assert len(bootstrap_calls) == 1
+    bootstrap_cmd, bootstrap_kwargs = bootstrap_calls[0]
+    assert bootstrap_cmd[0] == "/usr/bin/java"
+    assert bootstrap_kwargs["env"]["PATH"].split(os.pathsep)[0] == str(maven_path / "bin")
+    lock = json.loads((cache / "tools" / "manifest.lock.json").read_text())
+    assert lock["runtimes"]["maven"]["version"] == "3.9.16"
+
+
+def test_ensure_keeps_host_maven_that_satisfies_repo_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo, "[3.9.0,4.0.0)")
+    cache = tmp_path / "cache"
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest = {
+        **_runtime_pin_manifest(jdk_bytes, maven_bytes),
+        "tools": _java_tools(coursier_bytes),
+    }
+
+    def run(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, "Apache Maven 3.9.6 (b89d5959fcde851dcb1c8946a785a163f14e1e1d)\n", ""
+            )
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        if "bootstrap" in cmd:
+            launcher = Path(cmd[cmd.index("-o") + 1])
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+        patch(
+            "arch_indexer.toolchain.urllib.request.urlopen",
+            side_effect=_runtime_downloads(jdk_bytes, maven_bytes, coursier_bytes),
+        ) as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    assert res["runtimes"] == []
+    assert not (cache / "runtimes" / "apache-maven-test").exists()
+    assert not any(
+        call.args[0].full_url.endswith("maven.tar.gz") for call in urlopen.call_args_list
+    )
+
+
+def test_check_host_runtimes_marks_failing_or_unparseable_mvn_unavailable(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pom.xml").write_text("<project></project>")
+    manifest = {
+        "tools": {},
+        "runtimes": {**RUNTIMES, "maven": {"version": "3.9.16"}},
+    }
+
+    def run_fail(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "Error: JAVA_HOME is not defined\n")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def run_unparseable(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run_fail),
+    ):
+        failed = check_host_runtimes(repo)["mvn"]
+
+    assert failed.available is False
+    assert failed.version is None
+    assert "JAVA_HOME is not defined" in failed.message
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run_unparseable),
+    ):
+        unparseable = check_host_runtimes(repo)["mvn"]
+
+    assert unparseable.available is False
+    assert unparseable.version is None
+    assert "Unable to parse Maven version" in unparseable.message
+
+
+def test_portable_maven_is_not_adopted_or_fetched_when_it_violates_repo_requirement(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_enforcer_pom(repo, "[4.0.0,)")
+    cache = tmp_path / "cache"
+    jdk_bytes = _jdk_tar_bytes()
+    maven_bytes = _maven_tar_bytes()
+    coursier_bytes = b"coursier-launcher-jar"
+    manifest = {
+        **_runtime_pin_manifest(jdk_bytes, maven_bytes),
+        "tools": _java_tools(coursier_bytes),
+    }
+
+    def run(cmd, *args, **kwargs):
+        name = Path(cmd[0]).name
+        if name == "mvn" and "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "Apache Maven 3.8.7\n", "")
+        if name == "java" and "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.1" 2024-01-01\n')
+        if "bootstrap" in cmd:
+            launcher = Path(cmd[cmd.index("-o") + 1])
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+        patch(
+            "arch_indexer.toolchain.urllib.request.urlopen",
+            side_effect=_runtime_downloads(jdk_bytes, maven_bytes, coursier_bytes),
+        ) as urlopen,
+    ):
+        res = ensure_toolchain(repo, cache_dir=cache, fetch_runtime=True)
+
+    assert not (cache / "runtimes" / "apache-maven-test").exists()
+    assert not any(
+        call.args[0].full_url.endswith("maven.tar.gz") for call in urlopen.call_args_list
+    )
+    assert any("Maven runtime unavailable" in w for w in res["warnings"])
+
+    _seed_portable_runtime(cache, manifest)
+    with (
+        patch("arch_indexer.toolchain.load_toolchain_manifest", return_value=manifest),
+        patch("arch_indexer.toolchain.shutil.which", side_effect=_host_java_and_maven_which),
+        patch("arch_indexer.toolchain.subprocess.run", side_effect=run),
+    ):
+        report = get_toolchain_status(repo, cache_dir=cache)
+
+    assert report.runtimes["mvn"].available is False
+    assert report.runtimes["mvn"].version == "3.8.7"
+
+
 def test_tool_status_missing(tmp_path):
     cache = tmp_path / "cache"
     status = check_tool_status("scip-python", cache_dir=cache)

@@ -59,6 +59,19 @@ class IndexResult:
     infra_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
+DEFAULT_FALLBACK_MESSAGE_CHARS = 800
+
+
+def truncate_fallback_message(
+    message: str | None, limit: int = DEFAULT_FALLBACK_MESSAGE_CHARS
+) -> str:
+    """Collapse a captured Tier 1 failure message into one bounded, printable line."""
+    text = " ".join((message or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def build_name_table(
     symbols: Iterable[dict[str, Any]], files: Iterable[dict[str, Any]]
 ) -> dict[str, str]:

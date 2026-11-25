@@ -1451,6 +1451,203 @@ def test_run_index_records_fallback_reason_in_files_table(tmp_path: Path):
             assert row[2] == "oom_limit"
 
 
+def _run_java_tier1_with_limits(tmp_path: Path, limits: dict):
+    plugin = JavaPlugin()
+    unit = IndexUnit(
+        unit_id="java:root",
+        name="root",
+        language="java",
+        root_dir=FIXTURES_DIR / "java_maven",
+        files=[
+            FIXTURES_DIR / "java_maven" / "src" / "main" / "java" / "com" / "example" / "App.java"
+        ],
+        metadata={"pom": "pom.xml"},
+    )
+    fake_launcher = tmp_path / "fake-scip-java"
+    fake_launcher.touch()
+    mock_rt = {"java": MagicMock(available=True), "mvn": MagicMock(available=True)}
+    env = tmp_path / "env"
+
+    with (
+        patch(
+            "arch_indexer.plugins.java_plugin._effective_runtimes",
+            return_value=(mock_rt, MagicMock(env={}), {}),
+        ),
+        patch("arch_indexer.plugins.java_plugin.check_tool_status") as mock_status,
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_launcher)
+        mock_run.return_value = MagicMock(returncode=1, stderr="build error", stdout="")
+        plugin.index_unit_tier1(
+            unit,
+            {"cache_dir": env, "unit_timeout_sec": 30, **limits},
+        )
+        return mock_run.call_args.args[0]
+
+
+def test_java_tier1_runs_maven_offline_by_default(tmp_path: Path):
+    cmd = _run_java_tier1_with_limits(tmp_path, {})
+
+    maven_argv = cmd[cmd.index("--") + 1 :]
+    assert maven_argv == ["--batch-mode", "clean", "compile", "-DskipTests", "-o"]
+
+
+def test_java_tier1_maven_args_are_repeatable_and_online_drops_offline_flag(tmp_path: Path):
+    cmd = _run_java_tier1_with_limits(
+        tmp_path,
+        {
+            "maven_args": ["-Dmaven.repo.local=/tmp/prime/.m2", "--also-make"],
+            "maven_online": True,
+        },
+    )
+
+    maven_argv = cmd[cmd.index("--") + 1 :]
+    assert maven_argv == [
+        "--batch-mode",
+        "clean",
+        "compile",
+        "-DskipTests",
+        "-Dmaven.repo.local=/tmp/prime/.m2",
+        "--also-make",
+    ]
+    assert "-o" not in maven_argv
+
+
+def test_run_index_records_unit_tier_reason_and_captured_message(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
+    cache_dir = tmp_path / "cache"
+    failure = FallbackSignal(
+        reason="maven_unresolved_artifact",
+        message="[ERROR] Could not find artifact com.example:lib:jar:1.0\n  more detail",
+    )
+
+    with patch.object(PythonPlugin, "index_unit_tier1", return_value=failure):
+        code = run_index(repo, cache_dir=cache_dir)
+    assert code == EXIT_DELTA_DETECTED
+
+    db_path = next((cache_dir / "repos").glob("*/index.db"))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT unit_id, language, tier, files_count, fallback_reason, message "
+            "FROM units ORDER BY unit_id"
+        ).fetchall()
+    assert rows == [
+        (
+            "python:src",
+            "python",
+            "tree-sitter",
+            1,
+            "maven_unresolved_artifact",
+            "[ERROR] Could not find artifact com.example:lib:jar:1.0 more detail",
+        )
+    ]
+    out = capsys.readouterr().out
+    assert "Unit tiers:" in out
+    assert (
+        "python:src: 1 files [tree-sitter: maven_unresolved_artifact] — [ERROR] "
+        "Could not find artifact com.example:lib:jar:1.0 more detail" in out
+    )
+
+
+def test_run_index_warns_loudly_when_every_unit_file_falls_back(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
+    cache_dir = tmp_path / "cache"
+
+    with patch.object(
+        PythonPlugin,
+        "index_unit_tier1",
+        return_value=FallbackSignal(reason="build_failure", message="compiler exploded"),
+    ):
+        run_index(repo, cache_dir=cache_dir)
+
+    err = capsys.readouterr().err
+    assert (
+        "Warning: all 1 python file(s) in unit 'python:src' fell back to Tier 2 "
+        "[build_failure]: compiler exploded" in err
+    )
+
+
+def test_run_index_records_tier2_unit_when_tier1_result_falls_back_every_file(
+    tmp_path: Path, capsys
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+
+    def fake_tier1(self, unit, limits, symbol_context=None, definitions=None):
+        res = self.index_unit_tier2(unit, symbol_context=symbol_context, definitions=definitions)
+        for f in res.files:
+            f["tier"] = IndexingTier.TIER2.value
+            f["fallback_reason"] = "partial_scip_coverage"
+        res.tier = IndexingTier.TIER1
+        return res
+
+    with patch.object(PythonPlugin, "index_unit_tier1", fake_tier1):
+        code = run_index(repo, cache_dir=cache_dir)
+
+    assert code == EXIT_DELTA_DETECTED
+    db_path = next((cache_dir / "repos").glob("*/index.db"))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT unit_id, tier, fallback_reason FROM units ORDER BY unit_id"
+        ).fetchall()
+    assert rows == [("python:src", "tree-sitter", "partial_scip_coverage")]
+    captured = capsys.readouterr()
+    assert "fell back to Tier 2 [partial_scip_coverage]" in captured.err
+    assert "python:src: 1 files [tree-sitter: partial_scip_coverage]" in captured.out
+
+
+def test_java_tier1_preserves_maven_error_lines_past_verbose_info_banner(tmp_path: Path):
+    from arch_indexer.plugins.base import truncate_fallback_message
+
+    plugin = JavaPlugin()
+    unit = IndexUnit(
+        unit_id="java:root",
+        name="root",
+        language="java",
+        root_dir=FIXTURES_DIR / "java_maven",
+        files=[
+            FIXTURES_DIR / "java_maven" / "src" / "main" / "java" / "com" / "example" / "App.java"
+        ],
+        metadata={"pom": "pom.xml"},
+    )
+    fake_launcher = tmp_path / "fake-scip-java"
+    fake_launcher.touch()
+    mock_rt = {"java": MagicMock(available=True), "mvn": MagicMock(available=True)}
+    verbose_info = "\n".join(
+        f"[INFO] Scanning project lifecycle step {i} {'x' * 60}" for i in range(25)
+    )
+    maven_stdout = (
+        f"{verbose_info}\n"
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-enforcer-plugin:enforce\n"
+        "[ERROR] Detected Maven Version: 3.8.7 is not in the allowed range [3.9.0,4.0.0).\n"
+    )
+
+    with (
+        patch(
+            "arch_indexer.plugins.java_plugin._effective_runtimes",
+            return_value=(mock_rt, MagicMock(env={}), {}),
+        ),
+        patch("arch_indexer.plugins.java_plugin.check_tool_status") as mock_status,
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_status.return_value = MagicMock(installed=True, install_path=fake_launcher)
+        mock_run.return_value = MagicMock(returncode=1, stderr="", stdout=maven_stdout)
+        signal = plugin.index_unit_tier1(
+            unit,
+            {"cache_dir": tmp_path / "cache", "unit_timeout_sec": 30},
+        )
+
+    assert isinstance(signal, FallbackSignal)
+    assert signal.reason == "build_failure"
+    truncated = truncate_fallback_message(signal.message)
+    assert "Detected Maven Version: 3.8.7 is not in the allowed range [3.9.0,4.0.0)." in truncated
+    assert "[INFO]" not in truncated
+
+
 # 6. Preserve entrypoints from Tier 2 for Tier 1 units
 def test_entrypoints_preserved_for_tier1_units(tmp_path: Path):
     """Verify Tier 1 returns a real IndexResult with preserved and aligned entrypoints."""
