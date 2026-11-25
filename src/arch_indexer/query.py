@@ -124,8 +124,8 @@ def _module_id_paths(
 
     Module ids are emitted by ``graph.json`` and ``master-index.json``; they are derived
     with the same grouping rules as the graph so this query accepts exactly the ids a
-    worker reads from a work packet. Returns ``None`` when the argument is not a module
-    id, so callers can fall back to the dotted package namespace.
+    worker reads from a work packet. Returns ``None`` when the argument matches no module
+    id, so a bare-name caller can still fall back to the dotted package namespace.
     """
     file_rows = filter_rows(
         [dict(row) for row in conn.execute("SELECT path, language, module, tier FROM files")],

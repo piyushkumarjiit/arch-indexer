@@ -333,9 +333,9 @@ arch-indexer query <repo> module-summary <mod> [--include-tests] [--json]
 arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]
 ```
 
-`entrypoints --module` and `module-summary` accept the canonical module id `mod:<key>`, the bare key `<key>`, and the dotted package namespace (`pkg.mod`). The first two are the ids emitted by `docs/graph.json`, `master-index.json` and `work-plan.json`; the dotted form keeps working for a specific package slice.
+`entrypoints --module` and `module-summary` accept three spellings of a module: the canonical id `mod:<key>` and the bare key `<key>` that `docs/graph.json` and `master-index.json` emit (`work-plan.json` lists the bare key in `assigned_modules`), and the dotted package namespace (`pkg.mod`) for a specific package slice.
 
-`entrypoints` rows expose two line numbers. `line` is the discovery line (the decorator, route registration, CLI block or `__main__` guard), while `symbol_line` is the indexed definition line of `symbol_fqname` (falling back to `line` when no definition is resolvable). Documentation footnotes cite `symbol_line`, because `check-citations` verifies a symbol at its definition or within the span of its body, not on a decorator or trigger line. Text output appends `symbol_line=<n>` when it differs from `line`.
+`entrypoints` rows expose two line numbers. `line` is the discovery line (the decorator, route registration, CLI block or `__main__` guard), while `symbol_line` is the indexed definition line of `symbol_fqname` in the row's own `file_path` (falling back to `line` when the symbol is not defined there); citations use `symbol_line` (§8.2). Text output appends `symbol_line=<n>` when it differs from `line`.
 
 ```bash
 # 4. Bounded worker planning
@@ -367,7 +367,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
 
-`index` stdout always agrees with its exit code. It prints "documentation is up to date" only on the `0` path. When the source tree is unchanged but sections remain impacted (exit `2`), it prints `No source changes: N documentation section(s) still impacted` followed by the impacted-section count, never the up-to-date message.
+`index` stdout always agrees with its exit code. Only the exit-`0` path prints `No changes: documentation is up to date`. When the source tree is unchanged but sections remain impacted (exit `2`), it prints `No source changes: <N> documentation section(s) still impacted`, where `<N>` counts impacted plus missing sections, then `Impacted sections: <n>` and/or `Missing sections: <n>` for the non-zero counts; it never prints the up-to-date message.
 
 ---
 

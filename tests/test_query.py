@@ -466,12 +466,20 @@ def test_entrypoint_symbol_line_falls_back_for_cross_file_handler(tmp_path: Path
 
     draft = repo / "docs" / ".drafts" / "packet.md"
     draft.parent.mkdir(parents=True)
+    citation = f"{entrypoint['file_path']}:{entrypoint['symbol_line']}"
     draft.write_text(
-        f"Items are served[^1].\n\n[^1]: `{entrypoint['file_path']}:{entrypoint['symbol_line']}` \u2014 `getItems`\n",
+        f"Items are served[^1].\n\n[^1]: `{citation}` \u2014 `getItems`\n",
         encoding="utf-8",
     )
     code = main(
-        ["check-citations", str(repo), "--file", "docs/.drafts/packet.md", "--cache-dir", str(cache)]
+        [
+            "check-citations",
+            str(repo),
+            "--file",
+            "docs/.drafts/packet.md",
+            "--cache-dir",
+            str(cache),
+        ]
     )
     assert code == 0
 
