@@ -373,7 +373,8 @@ def check_document_citations(
                 )
             )
 
-    # 5. Check for uncited technical sections in DESIGN.md (spec 8.2 step 1)
+    # 5. Check uncited technical sections (DESIGN.md only) and empty required sections
+    # (both documents) per spec 8.2 step 1.
     is_design = doc_path.name == "DESIGN.md" or doc_rel.endswith("DESIGN.md")
     is_guide = doc_path.name == "USER_GUIDE.md" or doc_rel.endswith("USER_GUIDE.md")
     if is_design or is_guide:

@@ -346,7 +346,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
 
 ---
@@ -456,7 +456,7 @@ The thin skill instructs Firstmate to run the following 4 steps:
         - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots from `docs/graph.json`, with `--diagrams <json>` applied first as an optional fallback (graph output wins; see §7.1).
         - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
         - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
-        - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates.
+        - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates. The citation gate tolerates empty required sections, because a document started from the skeleton is mostly empty; the next `index` run re-impacts them with `empty_section` (§5.5).
         - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
      3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json` and `docs/flow-viewer.html` artifacts written by `arch-indexer index`).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
