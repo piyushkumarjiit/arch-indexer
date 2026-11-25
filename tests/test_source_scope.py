@@ -5,7 +5,7 @@ from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_ERROR, EXIT_OK, main
 from arch_indexer.graph import load_graph
 from arch_indexer.mermaid_gen import diagram_ids
 from arch_indexer.planner import extract_delta_slice
-from arch_indexer.source_scope import filter_paths, is_test_path
+from arch_indexer.source_scope import is_test_path
 
 TEST_REPO_FILES = {
     "server/app.ts": (
@@ -78,12 +78,6 @@ def test_test_path_rules():
     assert not is_test_path("src/contest.py")
     assert not is_test_path("server/app.ts")
     assert not is_test_path("src/testing_support.ts")
-
-
-def test_filter_paths_keeps_tests_when_opted_in():
-    paths = ["src/app.py", "tests/test_app.py"]
-    assert filter_paths(paths, include_tests=False) == ["src/app.py"]
-    assert filter_paths(paths, include_tests=True) == paths
 
 
 def test_tests_are_not_architecture_by_default(tmp_path: Path, capsys):

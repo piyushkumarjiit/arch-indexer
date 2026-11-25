@@ -40,11 +40,6 @@ def in_scope(path: str, include_tests: bool) -> bool:
     return include_tests or not is_test_path(path)
 
 
-def filter_paths(paths: Iterable[str], include_tests: bool) -> list[str]:
-    """Keep only paths that belong in architecture outputs."""
-    return [path for path in paths if in_scope(path, include_tests)]
-
-
 def filter_rows(
     rows: Iterable[dict[str, Any]],
     include_tests: bool,
