@@ -629,9 +629,9 @@ def compute_impacted_sections(
         if stale_ids:
             reasons.add(IMPACT_DIAGRAM_CHANGED)
         elif previous_section_hashes is not None:
-            unrepaired_ids = (
-                set(previous_section_hashes) | set(section.diagram_hashes)
-            ) - set(repaired_ids)
+            unrepaired_ids = (set(previous_section_hashes) | set(section.diagram_hashes)) - set(
+                repaired_ids
+            )
             if any(
                 previous_section_hashes.get(diagram_id) != section.diagram_hashes.get(diagram_id)
                 for diagram_id in unrepaired_ids

@@ -192,7 +192,7 @@ Core tables:
 ### 5.1 Snapshot & Delta Calculation
 On each `arch-indexer index <repo>` run:
 1. Compute current `sha256` for all tracked source/infra files and a `content_sha256` per file that ignores line numbers, blank lines and trailing whitespace. For the tree-sitter-parsed languages, comments are masked out first (and, for Python, module-level docstrings); other files (for example Dockerfiles, shell scripts and CI workflows) keep their comment text. Record each extracted symbol's `body_sha256`, `visibility` and `decorators_json`.
-2. Compare against `<cache>/repos/<id>/state.json`.
+2. Compare against `<cache>/repos/<id>/state.json`. The snapshot also records, per canonical document section, the sha256 of every `AUTO-DIAGRAM` block; §5.4 and §5.5 use those hashes to tell generated output from a worker edit.
 3. Produce `index-delta.json` containing:
    - `is_first_run`: boolean
    - `added_files`, `modified_files`, `deleted_files`
@@ -213,15 +213,21 @@ Unless `index --include-tests` was passed, test files (section 6.1) are excluded
   3. Mapped via the citation index to every doc section that cited the deleted file or its symbols, adding those sections to `impacted-sections.json`.
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
 
-### 5.4 Zero-Token Line-Shift Repair
-If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file contains a moved symbol with its `content_sha256` unchanged), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**. It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example a changed `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
+### 5.4 Zero-Token Line-Shift Repair & Diagram Refresh
+If a run has **only** `moved_symbols` (no added/deleted files, no added/modified/deleted symbols, and every modified file contains a moved symbol with its `content_sha256` unchanged), `arch-indexer index --auto-relocate-citations` deterministically updates shifted line numbers in existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnotes, re-verifies with `check-citations`, and updates `state.json`—consuming **0 LLM tokens**.
+- **Footnotes citing a definition** are rewritten from the moved-symbol records: a footnote is updated when its `file:line` is covered by a move and its symbol matches a candidate at the new line.
+- **Footnotes citing a call site, a constant or a config directive** are not covered by a moved-symbol record, yet they legitimately pass `check-citations` because the symbol appears literally on the cited line (§8.2). In a moved file, such a footnote is re-anchored to the nearest line where the symbol still appears as a literal token within the drift window (`DEFAULT_DRIFT_WINDOW`, 100 lines). An unshifted citation resolves to itself and is left untouched; a symbol with no occurrence in the window, or with two equidistant occurrences (ambiguous), is not guessed at.
+- **`AUTO-DIAGRAM` blocks** embed source line numbers in node ids, so a regenerated `docs/graph.json` can disagree with a document nothing edited. On a non-first run, `index` regenerates in place every block whose current hash still equals the hash `state.json` recorded, plus—when the delta is non-empty—blocks the snapshot has no record of (for example diagrams injected by `assemble` after the last index). Regeneration replaces only the named slot: it never inserts, removes or reorders slots and ignores fenced example markers. A block edited since the last index (its hash no longer matches `state.json`) is left as authored and its section stays impacted (§5.5) for a worker to reconcile.
+- **Rollback**: during a `--auto-relocate-citations` repair, relocated citations and regenerated diagrams are kept only when the following `check-citations` pass succeeds. On failure `index` restores the documents it touched and keeps the previous `state.json`, so the next run still sees the moves.
+
+It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELTA_DETECTED`) when a relocated document still has an impacted section (for example an edited `AUTO-DIAGRAM` block or a canonical document with no sections), and **`3`** (`VALIDATION_FAILED`) when citations still fail.
 
 ### 5.5 File-to-Section Impact Mapping (`impacted-sections.json`)
 `arch-indexer` parses existing `docs/DESIGN.md` and `docs/USER_GUIDE.md` into section trees (`doc`, `section_id`, `heading`, cited `file:line` references). A section is marked impacted if:
 - It cites any file in `deleted_files`, any file with modified or deleted symbols, or any file in `modified_files` not explained purely by moved symbols.
 - It covers a module that has `added_files` or `added_symbols` (via module-to-section mapping in `state.json`).
 - It does not yet exist: a canonical document with no sections contributes its full canonical outline, while on a later run a newly added module with no covering section is listed under `missing_sections` instead of `sections`.
-- Its embedded auto-generated diagram hash differs from the hash recorded in `state.json`.
+- Its embedded `AUTO-DIAGRAM` content changed since the last index: a block whose current hash differs from the recorded hash (a worker edit) marks the section impacted, while blocks §5.4 regenerated from the new graph in this run do not, so a pure line shift schedules no avoidable workers.
 - It has no body: a non-exempt section whose content is only headings, comments, fenced code or footnote definitions is impacted with `empty_section` on every run, so it stays impacted until prose is written. A section marked `:exempt` (including the packaged `References` blocks) is never required to have prose.
 
 ---
@@ -351,7 +357,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | :--- | :--- | :--- |
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
-| `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
+| `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including an `AUTO-DIAGRAM` block edited since the last index while the source tree is unchanged, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
 
