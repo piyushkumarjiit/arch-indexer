@@ -379,10 +379,11 @@ def run_index(
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
             )
+            unit_tier = IndexingTier.TIER2.value if _all_files_fell_back(res) else res.tier.value
             store.insert_unit_record(
                 unit_id=unit.unit_id,
                 language=plugin.name,
-                tier=res.tier.value,
+                tier=unit_tier,
                 files_count=len(res.files),
                 fallback_reason=unit_reason,
                 message=unit_message,

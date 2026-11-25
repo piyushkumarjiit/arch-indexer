@@ -1567,6 +1567,37 @@ def test_run_index_warns_loudly_when_every_unit_file_falls_back(tmp_path: Path, 
     )
 
 
+def test_run_index_records_tier2_unit_when_tier1_result_falls_back_every_file(
+    tmp_path: Path, capsys
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+
+    def fake_tier1(self, unit, limits, symbol_context=None, definitions=None):
+        res = self.index_unit_tier2(unit, symbol_context=symbol_context, definitions=definitions)
+        for f in res.files:
+            f["tier"] = IndexingTier.TIER2.value
+            f["fallback_reason"] = "partial_scip_coverage"
+        res.tier = IndexingTier.TIER1
+        return res
+
+    with patch.object(PythonPlugin, "index_unit_tier1", fake_tier1):
+        code = run_index(repo, cache_dir=cache_dir)
+
+    assert code == EXIT_DELTA_DETECTED
+    db_path = next((cache_dir / "repos").glob("*/index.db"))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT unit_id, tier, fallback_reason FROM units ORDER BY unit_id"
+        ).fetchall()
+    assert rows == [("python:src", "tree-sitter", "partial_scip_coverage")]
+    captured = capsys.readouterr()
+    assert "fell back to Tier 2 [partial_scip_coverage]" in captured.err
+    assert "python:src: 1 files [tree-sitter: partial_scip_coverage]" in captured.out
+
+
 def test_java_tier1_preserves_maven_error_lines_past_verbose_info_banner(tmp_path: Path):
     from arch_indexer.plugins.base import truncate_fallback_message
 
