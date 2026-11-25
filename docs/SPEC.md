@@ -44,6 +44,7 @@ arch-indexer/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
 │   ├── graph_rules.py               # Deterministic data-store/sink classification rules
+│   ├── module_identity.py           # Module naming, budget-driven subpackage split & overrides
 │   ├── mermaid_gen.py               # Deterministic Mermaid diagram generator
 │   ├── viewer/
 │   │   ├── renderer.py              # Single-file static HTML viewer renderer
@@ -280,13 +281,15 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 ```
 `nodes` holds entrypoints, frontend callers and services; modules, data stores and external sinks are separate top-level arrays. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`) plus infra artifacts; the exact symbol patterns live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
 
+**Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before the stored index is rebuilt.
+
 **Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints` and `query module-summary` expose the same `--include-tests` opt-in.
 
 ### 6.2 Deterministic Mermaid Generation
 `arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
 - **Module Dependency Diagram** (`module-overview`): `flowchart LR` of modules, data stores, and external sinks.
 - **Per-Entrypoint / Per-Domain Flow Diagrams** (`flow-<domain>`): one `flowchart TD` per entrypoint domain, tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`. Diagram ids are the exact `AUTO-DIAGRAM:<id>` slot ids (no `diagram:` prefix).
-- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates; if the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal.
+- **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates, except those of the dominant module (the module holding more than half of the visited services), which is kept so a flow never collapses into a single module stub with no edges. If the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget: entrypoints may take at most a third of the node budget, preferring those that call something, and the remaining nodes are filled breadth-first from those entrypoints (boundaries ranked ahead of services) so every kept node stays connected to a kept entrypoint. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal, including how many entrypoints were summarized.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
   <!-- AUTO-DIAGRAM:module-overview:START -->
@@ -322,7 +325,8 @@ arch-indexer index <repo> \
   [--offline] [--fetch-runtime] [--strict-tier1] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] \
-  [--docs-dir docs] [--auto-relocate-citations] [--include-tests] [--cache-dir <dir>]
+  [--docs-dir docs] [--auto-relocate-citations] [--include-tests] \
+  [--module-depth N] [--cache-dir <dir>]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
@@ -427,6 +431,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
   - `target_doc` (`DESIGN.md` or `USER_GUIDE.md`) and `section_ids`
   - `draft_output_path`: `docs/.drafts/<packet_id>.md` (guaranteed unique per worker)
   - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context)
+  - `over_budget`, present and `true` only when the packet's module cannot be split further (one flat package, or a fixed depth) and still exceeds a per-worker budget; `plan` also warns on stderr in that case
 
 > [!NOTE] Amendment: Draft File Front-Matter Format
 > Each worker draft written to `docs/.drafts/<packet_id>.md` must begin with a YAML front-matter header bounded by `---` declaring its target document and assigned section identifiers:
