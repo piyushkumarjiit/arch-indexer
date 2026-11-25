@@ -189,9 +189,9 @@ class _ImportInfo(NamedTuple):
 def _masked_source_lines(file_lines: list[str], language: str) -> list[str]:
     """Blank out comments and string contents while preserving every column.
 
-    Positions in the masked lines keep their original offsets so SCIP ranges and
-    AST/S-expression columns still line up, but prose inside a docstring or a
-    comment can never look like an import statement.
+    Positions in the masked lines keep their original character offsets, so the
+    normalized SCIP ranges and str-index positions still line up, but prose inside
+    a docstring or a comment can never look like an import statement.
     """
     masked: list[str] = []
     quote = ""

@@ -1,4 +1,5 @@
-"""Regression tests for the accepted SCIP Tier 1 / Tier 2 matching limitations.
+"""Regression tests for the SCIP Tier 1 / Tier 2 matching limitations that were
+accepted when the SCIP support PR was closed and are fixed here.
 
 Each test pins one limitation recorded when the SCIP support PR was closed:
 
