@@ -146,17 +146,14 @@ def _module_id_paths(
 def _resolve_module_paths(conn: sqlite3.Connection, module: str, include_tests: bool) -> list[str]:
     """Files for a module id (``mod:<key>`` or ``<key>``) or a dotted package prefix.
 
-    An explicit ``mod:`` id resolves first so the ids from ``graph.json``/``plan`` always
-    work. A bare name keeps the long-standing dotted-package meaning when that namespace
-    matches, and otherwise falls back to a canonical module key.
+    An explicit ``mod:`` id resolves strictly against canonical module ids from
+    ``graph.json``/``plan``. A bare name keeps the long-standing dotted-package meaning
+    when that namespace matches, and otherwise falls back to a canonical module key.
     """
     requested = module.strip()
-    explicit_id = requested.startswith("mod:")
-    if explicit_id:
-        by_id = _module_id_paths(conn, requested, include_tests)
-        if by_id is not None:
-            return by_id
-    clause, params = _prefix_clause("module", requested.removeprefix("mod:"))
+    if requested.startswith("mod:"):
+        return _module_id_paths(conn, requested, include_tests) or []
+    clause, params = _prefix_clause("module", requested)
     by_prefix = [
         row["path"]
         for row in conn.execute(
@@ -166,11 +163,7 @@ def _resolve_module_paths(conn: sqlite3.Connection, module: str, include_tests: 
     ]
     if by_prefix:
         return by_prefix
-    if not explicit_id:
-        by_id = _module_id_paths(conn, requested, include_tests)
-        if by_id is not None:
-            return by_id
-    return []
+    return _module_id_paths(conn, requested, include_tests) or []
 
 
 def _symbol_dict(row: sqlite3.Row) -> dict[str, Any]:

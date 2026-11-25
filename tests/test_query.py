@@ -282,14 +282,20 @@ def test_module_summary_accepts_graph_module_ids_and_bare_keys(tmp_path: Path, c
             file["path"] for file in _json(out)["files"]
         }
 
-    # The dotted package namespace and mod:<dotted> both keep selecting a package slice.
-    for module in ("app.service", "mod:app.service"):
-        code, out, _ = _query(
-            capsys, str(repo), "module-summary", module, "--json", "--cache-dir", str(cache)
-        )
-        assert code == EXIT_OK
-        payload = _json(out)
-        assert [file["path"] for file in payload["files"]] == ["app/service.py"]
+    # The dotted package namespace keeps selecting a package slice.
+    code, out, _ = _query(
+        capsys, str(repo), "module-summary", "app.service", "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK
+    payload = _json(out)
+    assert [file["path"] for file in payload["files"]] == ["app/service.py"]
+
+    # An explicit mod: id does not fall back to dotted package prefixes.
+    code, _, err = _query(
+        capsys, str(repo), "module-summary", "mod:app.service", "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert "module not found: mod:app.service" in err
 
     entry_module = next(module for module in master["modules"] if "app/main.py" in module["files"])
     code, out, _ = _query(

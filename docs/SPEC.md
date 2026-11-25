@@ -407,7 +407,7 @@ Every footnote reference uses a strict machine-parseable format:
    - Verify `1 <= line <= total_lines`.
    - Verify `symbol` matches either (a) a symbol in `index.db` spanning or starting at `line` (or `start_line == line`), or (b) the literal token `symbol` appears on `line` of `file_path` (for infra/config lines).
 
-   **Citation line convention:** cite the symbol's definition line. `query <repo> entrypoints --json` reports it as `symbol_line`; the sibling `line` field is only the discovery line (decorator, route registration, CLI block or `__main__` guard) and is not a valid symbol citation unless it coincides with the definition or falls inside the symbol's span. Data-store and external-sink `evidence` in `graph.json` likewise records use sites, not `import` lines.
+   **Citation line convention:** cite the symbol's definition line. `query <repo> entrypoints --json` reports it as `symbol_line`; the sibling `line` field is only the discovery line (decorator, route registration, CLI block or `__main__` guard) and is not a valid symbol citation unless it coincides with the definition or falls inside the symbol's span.
 3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`, `EMPTY_SECTION`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)

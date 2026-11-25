@@ -298,10 +298,6 @@ def _collect_boundaries(
 
     external_roots = {_external_root(row["raw_symbol"]) for row in unresolved_rows}
     for row in ref_rows:
-        if row["ref_kind"] == "import":
-            # An import only announces a dependency; it is not evidence that a data store
-            # is used at that line. Citation evidence stays on the call/use site.
-            continue
         fqname = row["symbol_fqname"]
         if fqname in symbols_by_fqname:
             continue
