@@ -104,6 +104,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     index_parser.add_argument(
+        "--maven-arg",
+        action="append",
+        dest="maven_args",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Extra argument passed to Maven by scip-java after '--' (repeatable, e.g. "
+            "--maven-arg -Dmaven.repo.local=/path/.m2)"
+        ),
+    )
+    index_parser.add_argument(
+        "--maven-online",
+        action="store_true",
+        default=False,
+        help=(
+            "Do not pass Maven's offline flag (-o), so scip-java can resolve artifacts "
+            "from a remote repository"
+        ),
+    )
+    index_parser.add_argument(
         "--strict-tier1",
         action="store_true",
         default=False,
@@ -214,6 +234,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q_entry.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
     q_entry.add_argument("--cache-dir", default=None, help="Cache directory override")
+
+    # query units
+    q_units = query_sub.add_parser(
+        "units", help="List indexing units with tier, fallback reason and message"
+    )
+    q_units.add_argument("--json", action="store_true", help="Emit JSON instead of text rows")
+    q_units.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # query module-summary
     q_mod = query_sub.add_parser("module-summary", help="Summarize module contents and flows")
@@ -385,6 +412,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_tests=args.include_tests,
                 module_depth=args.module_depth,
                 cache_dir=args.cache_dir,
+                maven_args=args.maven_args,
+                maven_online=args.maven_online,
             )
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error during indexing: {e}\n")

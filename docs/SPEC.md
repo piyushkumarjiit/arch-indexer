@@ -130,7 +130,7 @@ All external tools and parsers are pinned to exact versions:
 | `scip-java` | `0.10.2` (coursier bootstrap of `com.sourcegraph:scip-java_2.13`) | `<cache>/tools/java` | Tier 1 Java/Maven indexer |
 | `coursier` | `2.1.27` (launcher verified by SHA-256) | `<cache>/tools/java` | Bootstraps the `scip-java` launcher |
 | Eclipse Temurin JDK | `17.0.21.1+2` (linux x64 / aarch64, SHA-256 verified) | `<cache>/runtimes` | Portable Java runtime for `--fetch-runtime` when host `java` is missing or older than the minimum |
-| Apache Maven | `3.9.16` (binary tarball, SHA-256 verified) | `<cache>/runtimes` | Portable Maven for `--fetch-runtime` when host `mvn` is missing and the repo contains a `pom.xml` |
+| Apache Maven | `3.9.16` (binary tarball, SHA-256 verified) | `<cache>/runtimes` | Portable Maven for `--fetch-runtime` when host `mvn` is missing or below the repo's declared Maven requirement |
 | `protobuf` | `5.29.3` | `arch-indexer` venv | Parse `index.scip` binary directly (no `scip` CLI needed) |
 | `tree-sitter` | `0.23.2` | `arch-indexer` venv | Tier 2 fallback parser runtime |
 | `tree-sitter-python` | `0.23.6` | `arch-indexer` venv | Tier 2 Python grammar |
@@ -140,7 +140,7 @@ All external tools and parsers are pinned to exact versions:
 ### 3.3 Installation & Network Boundary
 - `arch-indexer toolchain ensure --repo <path>` detects languages in `<path>` and installs only the missing pinned indexers into `<cache>/tools/`.
 - `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed; `index --fetch-runtime` is forwarded to that automatic ensure. With `--offline`, missing tools do not trigger network access: if a required Tier 1 indexer or its runtime is missing, the plugin falls back to Tier 2 by default, or exits with code `4` when `--strict-tier1` is also passed.
-- **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). If host `java`/`mvn` is absent and no pinned portable runtime has been fetched, Java falls back cleanly to Tier 2 tree-sitter (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK into `<cache>/runtimes/` for Java repos where host `java` is missing or too old, and the pinned Apache Maven only when the repo contains a `pom.xml` and host `mvn` is missing; it verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`. The flag governs downloads only: a runtime that was already downloaded and checksum-verified is reused on later `ensure` runs without the flag, and `ensure` prints one line naming each portable runtime it used (`downloaded` or `reused`). A failed runtime download exits non-zero after the independent Node tools have been installed and recorded.
+- **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). Host Maven is also validated against the repository: every `RequireMavenVersion` range in its `pom.xml` files is parsed (properties resolved), and when none exists the `.mvn/wrapper/maven-wrapper.properties` distribution version is treated as the minimum. A host below that requirement counts as unusable, is reported by `toolchain status` (for example `repo requires [3.9.0,4.0.0)`), and is also compared with the pinned Maven version. If host `java`/`mvn` is absent or unusable and no pinned portable runtime has been fetched, Java falls back cleanly to Tier 2 tree-sitter (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK into `<cache>/runtimes/` for Java repos where host `java` is missing or too old, and the pinned Apache Maven when the repo contains a `pom.xml` and host `mvn` is missing or below the repo requirement; it verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`. The flag governs downloads only: a runtime that was already downloaded and checksum-verified is reused on later `ensure` runs without the flag, and `ensure` prints one line naming each portable runtime it used (`downloaded` or `reused`). A failed runtime download exits non-zero after the independent Node tools have been installed and recorded.
 
 ---
 
@@ -157,7 +157,7 @@ Each language implements a uniform interface:
 | :--- | :--- | :--- | :--- |
 | **Python** | One unit per top-level package, never split by file count (`--chunk-files` is still accepted but no longer splits any unit) | `scip-python index` run in isolation; **no `pip install` of target deps**; unresolved third-party imports recorded in `unresolved_refs` | OOM, timeout, non-zero exit, or missing `node` |
 | **TypeScript** | Per `tsconfig.json` workspace/package | `scip-typescript index --no-progress-bar` (uses existing `node_modules` if present, never runs `npm install`) | Missing `node_modules` causing fatal resolution failure, OOM, timeout, or invalid `tsconfig` |
-| **Java / Maven** | Per Maven module (`pom.xml` reactor modules) | `scip-java index --build-tool=maven` run offline first (`-o` / existing `~/.m2`) so private artifacts never stall or break | Missing private Maven artifacts, build failure, missing JDK/Maven, OOM, or timeout |
+| **Java / Maven** | Per Maven module (`pom.xml` reactor modules) | `scip-java index --build-tool=maven` run offline first (`-o` / existing `~/.m2`) so private artifacts never stall or break; `--maven-online` drops `-o` and repeatable `--maven-arg=<arg>` forwards extra Maven arguments | Missing private Maven artifacts (prime the local repository once with the repo's own Maven because sibling modules must already be installed), build failure, missing/too-old JDK or Maven, OOM, or timeout |
 
 ### 4.3 Tier Recording & Unresolved References
 Every indexed file row in `index.db` records:
@@ -167,6 +167,9 @@ Every indexed file row in `index.db` records:
 When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
 
 Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. The one-line `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working.
+Each indexing unit is also recorded in a `units(unit_id PK, language, tier, files_count, fallback_reason, message)` table. `message` holds the captured Tier 1 failure output, whitespace-collapsed and truncated, so a silent all-Tier-2 fallback can be diagnosed. `index` prints every unit's tier and reason after its one-line summary and writes a loud warning when 100% of a unit's files fell back; `arch-indexer query <repo> units [--json]` exposes the same rows.
+
+Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing.
 
 ### 4.4 Memory & Timeout Controls (7 GB Host)
 All external indexer subprocesses receive strict, configurable caps:
@@ -185,6 +188,7 @@ Core tables:
   - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
 - `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` record at each `CREATE TABLE` line, and `migration_descriptor` records for Liquibase-style changelogs).
 - `unresolved_refs(id PK, file_path, line, raw_symbol, language)`
+- `units(unit_id PK, language, tier, files_count, fallback_reason, message)` (per-unit tier and captured fallback message)
 
 ---
 
@@ -339,12 +343,14 @@ arch-indexer index <repo> \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] \
   [--docs-dir docs] [--auto-relocate-citations] [--include-tests] \
-  [--module-depth N] [--cache-dir <dir>]
+  [--module-depth N] [--cache-dir <dir>] \
+  [--maven-arg=<arg>]... [--maven-online]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
 arch-indexer query <repo> def <symbol> [--json]
 arch-indexer query <repo> refs <symbol> [--limit 100] [--json]
 arch-indexer query <repo> file-symbols <rel-path> [--json]
+arch-indexer query <repo> units [--json]
 arch-indexer query <repo> entrypoints [--module <mod>] [--include-tests] [--json]
 arch-indexer query <repo> module-summary <mod> [--include-tests] [--json]
 arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--json]

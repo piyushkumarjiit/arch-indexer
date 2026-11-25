@@ -409,3 +409,39 @@ def test_cli_index_offline_skips_toolchain_ensure(tmp_path):
         assert code == EXIT_DELTA_DETECTED
         mock_ensure.assert_not_called()
         mock_index.assert_called_once()
+
+
+def test_cli_index_forwards_repeatable_maven_args_and_online_flag(tmp_path):
+    repo = FIXTURES_DIR / "java_maven"
+    cache = tmp_path / "cache"
+
+    with (
+        patch("arch_indexer.cli.ensure_toolchain"),
+        patch("arch_indexer.cli.run_index", return_value=EXIT_DELTA_DETECTED) as mock_index,
+    ):
+        code = main(
+            [
+                "index",
+                str(repo),
+                "--cache-dir",
+                str(cache),
+                "--maven-arg=-Dmaven.repo.local=/tmp/prime/.m2",
+                "--maven-arg=--also-make",
+                "--maven-online",
+            ]
+        )
+
+    assert code == EXIT_DELTA_DETECTED
+    kwargs = mock_index.call_args.kwargs
+    assert kwargs["maven_args"] == ["-Dmaven.repo.local=/tmp/prime/.m2", "--also-make"]
+    assert kwargs["maven_online"] is True
+
+
+def test_cli_query_units_parses():
+    parser = build_parser()
+
+    args = parser.parse_args(["query", "/tmp/repo", "units", "--json"])
+
+    assert args.command == "query"
+    assert args.query_action == "units"
+    assert args.json is True

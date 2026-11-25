@@ -998,3 +998,52 @@ def call_user():
     )
     assert code == EXIT_OK
     assert out.startswith("# module app.routes ")
+
+
+def test_units_query_reports_tier_reason_and_message(tmp_path: Path, capsys):
+    from arch_indexer.config import RepoCachePaths
+    from arch_indexer.store import IndexStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+    paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache)
+    paths.ensure_dirs()
+    with IndexStore(paths.index_db) as store:
+        store.insert_unit_record(
+            unit_id="java:module-a",
+            language="java",
+            tier="tree-sitter",
+            files_count=12,
+            fallback_reason="build_failure",
+            message="[ERROR] RequireMavenVersion 3.8.7 not in [3.9.0,4.0.0)",
+        )
+        store.insert_unit_record(
+            unit_id="java:module-b",
+            language="java",
+            tier="scip",
+            files_count=3,
+        )
+
+    code, out, err = _query(capsys, str(repo), "units", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert err == ""
+    assert out.splitlines() == [
+        "java:module-a 12 files [tree-sitter: build_failure] — "
+        "[ERROR] RequireMavenVersion 3.8.7 not in [3.9.0,4.0.0)",
+        "java:module-b 3 files [scip]",
+    ]
+
+    code, out, _ = _query(capsys, str(repo), "units", "--json", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    payload = _json(out)
+    assert payload["count"] == 2
+    assert payload["units"][0] == {
+        "unit_id": "java:module-a",
+        "language": "java",
+        "tier": "tree-sitter",
+        "files_count": 12,
+        "fallback_reason": "build_failure",
+        "message": "[ERROR] RequireMavenVersion 3.8.7 not in [3.9.0,4.0.0)",
+    }
+    assert payload["units"][1]["fallback_reason"] is None

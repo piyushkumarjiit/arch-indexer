@@ -290,6 +290,18 @@ def query_entrypoints(
     return [_entrypoint_dict(row) for row in rows if in_scope(row["file_path"], include_tests)]
 
 
+def query_units(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return every indexing unit's tier, fallback reason and captured message."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "units" not in tables:
+        raise QueryError("index has no per-unit tier data; re-run 'arch-indexer index <repo>'")
+    rows = conn.execute(
+        "SELECT unit_id, language, tier, files_count, fallback_reason, message "
+        "FROM units ORDER BY unit_id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def query_module_summary(
     conn: sqlite3.Connection, module: str, *, include_tests: bool = False
 ) -> dict[str, Any]:
@@ -588,6 +600,21 @@ def run_query(
                     _print_symbol_row(item)
                 for entrypoint in summary["entrypoints"]:
                     _print_entrypoint_row(entrypoint)
+            return 0
+
+        if action == "units":
+            units = query_units(conn)
+            if as_json:
+                _print_json({"count": len(units), "units": units})
+            else:
+                for unit in units:
+                    line = f"{unit['unit_id']} {unit['files_count']} files [{unit['tier']}"
+                    if unit["fallback_reason"]:
+                        line += f": {unit['fallback_reason']}"
+                    line += "]"
+                    if unit["message"]:
+                        line += f" — {unit['message']}"
+                    print(line)
             return 0
 
         if action == "flow-trace":

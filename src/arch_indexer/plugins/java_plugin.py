@@ -227,7 +227,7 @@ class JavaPlugin(LanguagePlugin):
         from arch_indexer.scip import scip_output_path
 
         cache_dir = get_cache_dir(limits.get("cache_dir"))
-        runtimes, java_runtime, _portable = _effective_runtimes(cache_dir)
+        runtimes, java_runtime, _portable = _effective_runtimes(cache_dir, repo_path=unit.root_dir)
         if not runtimes["java"].available:
             return FallbackSignal(
                 reason="tool_unavailable",
@@ -271,8 +271,10 @@ class JavaPlugin(LanguagePlugin):
             "clean",
             "compile",
             "-DskipTests",
-            "-o",
         ]
+        if not limits.get("maven_online", False):
+            cmd.append("-o")
+        cmd.extend(str(arg) for arg in limits.get("maven_args") or ())
 
         try:
             proc = subprocess.run(

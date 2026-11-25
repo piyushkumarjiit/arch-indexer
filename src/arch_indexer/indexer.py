@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,13 @@ from arch_indexer.module_identity import load_module_options
 from arch_indexer.planner import build_master_index
 from arch_indexer.plugins.base import (
     FallbackSignal,
+    IndexingTier,
     IndexResult,
     IndexUnit,
     build_fqname_prefixes,
     build_name_table,
     module_with_parents,
+    truncate_fallback_message,
 )
 from arch_indexer.plugins.infra_scanner import InfraScanner
 from arch_indexer.plugins.java_plugin import JavaPlugin
@@ -184,6 +187,26 @@ def _print_run_summary(delta: Delta, report: Any) -> None:
     if missing:
         print(f"Missing sections: {missing}")
 
+def _warn_full_unit_fallback(unit: IndexUnit, reason: str, message: str, files_count: int) -> None:
+    """Say loudly that every file of one unit lost its precise index."""
+    detail = f": {message}" if message else ""
+    sys.stderr.write(
+        f"Warning: all {files_count} {unit.language} file(s) in unit '{unit.unit_id}' "
+        f"fell back to Tier 2 [{reason}]{detail}\n"
+    )
+
+
+def _unit_fallback_reason(result: IndexResult) -> str | None:
+    """The reason recorded for a unit: its Tier 2 fallback, or partial SCIP coverage."""
+    reasons = sorted({f.get("fallback_reason") for f in result.files if f.get("fallback_reason")})
+    return ",".join(reasons) if reasons else result.fallback_reason
+
+
+def _all_files_fell_back(result: IndexResult) -> bool:
+    if not result.files:
+        return False
+    return all(f.get("tier") == IndexingTier.TIER2.value for f in result.files)
+
 
 def run_index(
     repo_path: str | Path,
@@ -200,6 +223,8 @@ def run_index(
     include_tests: bool = False,
     module_depth: int | None = None,
     cache_dir: str | Path | None = None,
+    maven_args: Sequence[str] | None = None,
+    maven_online: bool = False,
 ) -> int:
     """Index the target repository, diff it against the previous snapshot (spec 4, 5 and 7)."""
     target_repo = Path(repo_path).resolve()
@@ -275,6 +300,8 @@ def run_index(
         "unit_timeout_sec": unit_timeout_sec,
         "cache_dir": cache_dir,
         "scip_tmp_dir": cache_paths.scip_tmp_dir,
+        "maven_args": list(maven_args or ()),
+        "maven_online": maven_online,
     }
 
     # Spec 7.2: exit 4 only for --offline with --strict-tier1, and only when a
@@ -325,11 +352,23 @@ def run_index(
                     symbol_context=symbol_context,
                     definitions=definitions_by_unit[idx],
                 )
+                unit_reason = tier1_res.reason
+                unit_message = truncate_fallback_message(tier1_res.message)
                 if plugin.has_tier1_indexer:
                     for f in res.files:
                         f["fallback_reason"] = tier1_res.reason
+                    if _all_files_fell_back(res):
+                        _warn_full_unit_fallback(
+                            unit, tier1_res.reason, unit_message, len(res.files)
+                        )
             else:
                 res = tier1_res
+                unit_reason = _unit_fallback_reason(res)
+                unit_message = ""
+                if plugin.has_tier1_indexer and _all_files_fell_back(res):
+                    _warn_full_unit_fallback(
+                        unit, unit_reason or "unknown", unit_message, len(res.files)
+                    )
 
             # 3. Stream unit data to SQLite with deterministic row ordering
             store.insert_unit_data(
@@ -339,6 +378,14 @@ def run_index(
                 entrypoints=res.entrypoints,
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
+            )
+            store.insert_unit_record(
+                unit_id=unit.unit_id,
+                language=plugin.name,
+                tier=res.tier.value,
+                files_count=len(res.files),
+                fallback_reason=unit_reason,
+                message=unit_message,
             )
 
         # Spec 6.1/6.3/7.1: deterministic graph.json plus the self-contained viewer.
