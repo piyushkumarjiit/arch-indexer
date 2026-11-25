@@ -14,7 +14,7 @@ A thin Firstmate skill invokes `arch-indexer` and instructs the Firstmate orches
 - **No LLM-authored graphs or diagrams**: graph JSON, Mermaid diagrams, and the interactive viewer are generated strictly by deterministic code.
 - **Network isolation**: only toolchain installation (`arch-indexer toolchain ensure`, including the automatic ensure that `arch-indexer index` runs unless `--offline` is passed) may access the network. Indexing with `--offline`, querying, planning, diagram rendering, assembly, and validation run 100% offline.
 - **No MCP servers**: all agent lookups use the local `arch-indexer query` CLI.
-- **Memory-safe on 7 GB RAM hosts (~5 GB free)**: bounded, configurable Node/JVM heap limits and per-package/chunked indexing.
+- **Memory-safe on 7 GB RAM hosts (~5 GB free)**: bounded, configurable Node/JVM heap limits and per-package indexing units.
 - **No target dependency installation by default**: target projects (including heavy GPU/ML Python repos or private-artifact Maven repos) are never `pip install`ed or forced to fetch private dependencies; unresolved references are recorded rather than failing the run.
 - **No volatile caches in target git repositories**: SQLite indexes, raw `.scip` files, and work caches live outside the target repo in a tool-local cache directory.
 
@@ -93,7 +93,7 @@ Default root: `${XDG_CACHE_HOME:-~/.cache}/arch-indexer` (overridable via `ARCH_
         ├── index-delta.json         # Added/modified/deleted files & symbols
         ├── impacted-sections.json   # Doc sections invalidated by the current delta
         ├── work-plan.json           # Bounded worker packets
-        └── scip-tmp/                # Ephemeral per-chunk .scip files (cleaned after ingest)
+        └── scip-tmp/                # Ephemeral per-unit .scip files (cleaned after ingest)
 ```
 
 ### 2.3 Committed Artifacts in the Target Repository
@@ -153,7 +153,7 @@ Each language implements a uniform interface:
 ### 4.2 Per-Language Two-Tier Behavior
 | Language | Partitioning / Chunking | Tier 1 (`scip`) | Tier 2 (`tree-sitter`) Fallback Trigger |
 | :--- | :--- | :--- | :--- |
-| **Python** | Per package or file chunks (`--chunk-files`, default `250`) | `scip-python index` run in isolation; **no `pip install` of target deps**; unresolved third-party imports recorded in `unresolved_refs` | OOM, timeout, non-zero exit, or missing `node` |
+| **Python** | One unit per top-level package, never split by file count (`--chunk-files` is still accepted but no longer splits any unit) | `scip-python index` run in isolation; **no `pip install` of target deps**; unresolved third-party imports recorded in `unresolved_refs` | OOM, timeout, non-zero exit, or missing `node` |
 | **TypeScript** | Per `tsconfig.json` workspace/package | `scip-typescript index --no-progress-bar` (uses existing `node_modules` if present, never runs `npm install`) | Missing `node_modules` causing fatal resolution failure, OOM, timeout, or invalid `tsconfig` |
 | **Java / Maven** | Per Maven module (`pom.xml` reactor modules) | `scip-java index --build-tool=maven` run offline first (`-o` / existing `~/.m2`) so private artifacts never stall or break | Missing private Maven artifacts, build failure, missing JDK/Maven, OOM, or timeout |
 
@@ -219,6 +219,7 @@ If a run has **only** `moved_symbols` (no added/deleted files, no added/modified
 - It covers a module that has `added_files` or `added_symbols` (via module-to-section mapping in `state.json`).
 - It does not yet exist: a canonical document with no sections contributes its full canonical outline, while on a later run a newly added module with no covering section is listed under `missing_sections` instead of `sections`.
 - Its embedded auto-generated diagram hash differs from the hash recorded in `state.json`.
+- It has no body: a non-exempt section whose content is only headings, comments, fenced code or footnote definitions is impacted with `empty_section` on every run, so it stays impacted until prose is written. A section marked `:exempt` (including the packaged `References` blocks) is never required to have prose.
 
 ---
 
@@ -344,8 +345,8 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | :--- | :--- | :--- |
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path, a drafts directory with no `*.md` drafts and no `--remove-slice`, a `packet_id` declared by more than one draft, or unreadable repository. |
-| `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
+| `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including a changed `AUTO-DIAGRAM` block with an unchanged source tree, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested, and a required Tier 1 indexer or its runtime is not available. |
 
 ---
@@ -380,12 +381,12 @@ Every footnote reference uses a strict machine-parseable format:
 (For non-symbol infra/config lines, the symbol token may be a literal key/directive, e.g., `` `Dockerfile:14` — `EXPOSE 8000` ``.)
 
 **`arch-indexer check-citations` algorithm**:
-1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, and verify no dangling footnote markers (`[^n]` without definition) or uncited technical sections exist. In `docs/DESIGN.md`, a `SECTION` block whose body carries prose but no footnote reference is reported as `UNCITED_SECTION`, unless its start marker carries the `:exempt` flag (marker syntax in §9.2).
+1. Parse every Markdown footnote reference in `docs/DESIGN.md` and `docs/USER_GUIDE.md`, and verify no dangling footnote markers (`[^n]` without definition), uncited technical sections or empty required sections exist. In `docs/DESIGN.md`, a `SECTION` block whose body carries prose but no footnote reference is reported as `UNCITED_SECTION`, unless its start marker carries the `:exempt` flag (marker syntax in §9.2). In both documents, a `SECTION` block without the `:exempt` flag whose content is only headings, comments, fenced code or footnote definitions is reported as `EMPTY_SECTION`.
 2. For each `(file_path, line, symbol)`:
    - Verify `file_path` exists in `<repo>`.
    - Verify `1 <= line <= total_lines`.
    - Verify `symbol` matches either (a) a symbol in `index.db` spanning or starting at `line` (or `start_line == line`), or (b) the literal token `symbol` appears on `line` of `file_path` (for infra/config lines).
-3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`) and exit **`3`** on any failure.
+3. Report structured errors (`MISSING_FILE`, `LINE_OUT_OF_RANGE`, `SYMBOL_MISMATCH`, `SYMBOL_DRIFTED_TO:<new_line>`, `DANGLING_FOOTNOTE`, `DUPLICATE_FOOTNOTE`, `INVALID_FORMAT`, `UNCITED_SECTION`, `EMPTY_SECTION`) and exit **`3`** on any failure.
 
 ### 8.3 Lightweight Mermaid Validation (`check-mermaid`)
 No headless browser or Chromium dependency. `arch-indexer check-mermaid` parses every fenced ```` ```mermaid ```` block using a pure-Python static validator:
@@ -425,7 +426,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 >   - design-sec2
 > ---
 > ```
-> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section check; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the canonical document: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` alone rewrites them from `docs/graph.json` where it exists (§7.1). The packaged skeleton ships a `module-overview` slot and a `flow-main` placeholder slot; when `docs/graph.json` exists, `assemble` replaces them with the graph's deterministic `module-overview` and `flow-<domain>` diagrams (§7.1).
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section and empty-section checks; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers, an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the canonical document: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and `assemble` alone rewrites them from `docs/graph.json` where it exists (§7.1). The packaged skeleton ships a `module-overview` slot and a `flow-main` placeholder slot; when `docs/graph.json` exists, `assemble` replaces them with the graph's deterministic `module-overview` and `flow-<domain>` diagrams (§7.1).
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
 The thin skill instructs Firstmate to run the following 4 steps:
@@ -501,7 +502,7 @@ Execute sequentially against real repositories, gating each stage on passing `ch
 | :--- | :--- | :--- |
 | **Stage 1** | Small public Python repo (~6 files, FastAPI service) | Tier 1 `scip-python` without target venv, FastAPI route & DB sink detection, full first-run docs + viewer, incremental delta & delete test. |
 | **Stage 2** | Small public TypeScript repo (~100 files, Docker) | Tier 1 `scip-typescript` (and forced Tier 2 fallback test), infra/Docker scanning, multi-module graph filtering and entrypoint-to-sink tracing in `flow-viewer.html`. |
-| **Stage 3** | Large Python + TypeScript repo (`CI_Platform`) | Multi-language unified graph (TS callers -> Python APIs), chunked indexing within 7 GB RAM, bounded parallel worker sharding, conflict-free draft assembly, incremental patch of only impacted sections. |
+| **Stage 3** | Large Python + TypeScript repo (`CI_Platform`) | Multi-language unified graph (TS callers -> Python APIs), whole-package indexing within 7 GB RAM, bounded parallel worker sharding, conflict-free draft assembly, incremental patch of only impacted sections. |
 | **Stage 4** | Large Java/Maven multi-module repo (~1,000 Java files + TS frontend, private artifacts) | Per-module Maven indexing, graceful Tier 2 `tree-sitter-java` fallback where private artifacts are unavailable, per-file tier reporting, Mermaid aggregation budgets, and bounded worker sharding across ~1,000+ files. |
 
 ---

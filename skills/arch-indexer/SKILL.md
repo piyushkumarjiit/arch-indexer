@@ -27,7 +27,7 @@ The meaning of each exit code is owned by spec section 7.2. This table records o
 | `0` | `EXIT_OK` / `EXIT_NO_CHANGES` | No documentation work is needed. Terminate workflow immediately; skip LLM worker dispatch. |
 | `1` | `EXIT_ERROR` | Abort workflow and report error to supervisor (invalid flags, unreadable repository, an unusable `--drafts-dir`/`--diagrams` path, or one `packet_id` declared by more than one draft). |
 | `2` | `EXIT_DELTA_DETECTED` | Proceed to planning and worker dispatch. |
-| `3` | `EXIT_VALIDATION_FAILED` | For `check-citations`, `check-mermaid` and `assemble`: citation drift/breakage, missing symbol, uncited technical section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, missing draft section, or any other violation of the draft-file contract in spec §9.2; dispatch a targeted fix worker for the failing section(s). For `index`: the relocation was rolled back and the previous snapshot kept, so abort workflow and report stderr. |
+| `3` | `EXIT_VALIDATION_FAILED` | For `check-citations`, `check-mermaid` and `assemble`: citation drift/breakage, missing symbol, uncited technical section, empty required section, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, missing draft section, or any other violation of the draft-file contract in spec §9.2; dispatch a targeted fix worker for the failing section(s). For `index`: the relocation was rolled back and the previous snapshot kept, so abort workflow and report stderr. |
 | `4` | `EXIT_TOOLCHAIN_MISSING` | Required Tier 1 indexer or its runtime unavailable during a `--strict-tier1 --offline` run. Abort workflow and report missing toolchain. |
 
 ---
@@ -48,10 +48,10 @@ Run offline deterministic indexing with automatic citation line-shift repair:
 ```bash
 arch-indexer index <repo> --offline --auto-relocate-citations
 ```
-*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--chunk-files 250`, `--docs-dir docs`.*
+*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--docs-dir docs`.*
 
 Evaluate exit code:
-- **`0` (`EXIT_NO_CHANGES`)**: Documentation is up to date, either because the repository is unchanged or because the only change was line shifts that `--auto-relocate-citations` repaired with no section left impacted. Stop immediately; report documentation is up to date.
+- **`0` (`EXIT_NO_CHANGES`)**: Documentation is up to date, either because the repository is unchanged and every required section has a body, or because the only change was line shifts that `--auto-relocate-citations` repaired with no section left impacted. Stop immediately; report documentation is up to date.
 - **`2` (`EXIT_DELTA_DETECTED`)**: Delta detected (or initial run), or a relocated document still has an impacted section. Proceed to Step 1c.
 - **`3` (`EXIT_VALIDATION_FAILED`)**: Citations still fail after relocation; the documents were restored. Abort workflow and report stderr.
 - **`1`, `4`**: Fatal error or missing toolchain. Abort workflow and report stderr.

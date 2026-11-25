@@ -137,8 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--chunk-files",
         type=_positive_int,
         default=DEFAULT_CHUNK_FILES,
-        help="Max files per indexing chunk (Python packages are never split: "
-        "chunking would drop cross-chunk call edges)",
+        help="Accepted for compatibility; indexing units are never split by file count "
+        "(chunking would drop cross-chunk call edges)",
     )
     index_parser.add_argument(
         "--docs-dir",
