@@ -360,3 +360,35 @@ def render_auto_diagram_block(diagram_id: str, code: str) -> str:
         "```\n"
         f"<!-- AUTO-DIAGRAM:{diagram_id}:END -->"
     )
+
+
+AUTO_DIAGRAM_BLOCK_RE = re.compile(
+    r"(?P<start><!--\s*AUTO-DIAGRAM:(?P<id>[^:]+):START\s*-->)"
+    r"(?P<body>.*?)"
+    r"(?P<end><!--\s*AUTO-DIAGRAM:(?P=id):END\s*-->)",
+    re.DOTALL,
+)
+
+
+def replace_auto_diagram_block(doc_text: str, diagram_id: str, block: str) -> str:
+    """Replace exactly one AUTO-DIAGRAM slot, leaving every other block untouched.
+
+    Unlike ``assembler.sync_auto_diagrams`` this never inserts, removes or reorders
+    slots, so a zero-token repair of a drifted diagram cannot reshape a document that
+    was authored against a different set of diagrams.
+    """
+    from arch_indexer.checks.citations import mask_fenced_code_blocks
+
+    masked_text = mask_fenced_code_blocks(doc_text)
+    parts: list[str] = []
+    last_end = 0
+    for match in AUTO_DIAGRAM_BLOCK_RE.finditer(masked_text):
+        if match.group("id").strip() != diagram_id:
+            continue
+        parts.append(doc_text[last_end : match.start()])
+        parts.append(block)
+        last_end = match.end()
+    if not parts:
+        return doc_text
+    parts.append(doc_text[last_end:])
+    return "".join(parts)

@@ -149,7 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-relocate-citations",
         action="store_true",
         default=False,
-        help="Automatically repair shifted line citations",
+        help=(
+            "Repair shifted line citations and regenerate the AUTO-DIAGRAM blocks "
+            "that drifted from the freshly exported graph"
+        ),
     )
     index_parser.add_argument(
         "--include-tests",

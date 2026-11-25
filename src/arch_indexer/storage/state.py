@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -511,6 +512,8 @@ def compute_impacted_sections(
     delta: Delta,
     previous_state: Mapping[str, Any] | None,
     module_by_file: Mapping[str, str],
+    repaired_diagrams: Mapping[tuple[str, str], AbstractSet[str]] | None = None,
+    stale_diagrams: Mapping[tuple[str, str], AbstractSet[str]] | None = None,
 ) -> ImpactReport:
     """Map a delta onto documentation sections using the four rules in spec 5.5."""
     parsed: list[DocSection] = []
@@ -616,14 +619,24 @@ def compute_impacted_sections(
         if matched_modules:
             reasons.add(IMPACT_MODULE_ADDED)
             impacted_modules |= matched_modules
+        section_tuple = (section.doc, section.section_id)
+        repaired_ids = (repaired_diagrams or {}).get(section_tuple, ())
+        stale_ids = (stale_diagrams or {}).get(section_tuple, ())
         previous_section_hashes = (previous_hashes.get(section.doc) or {}).get(section.section_id)
         # Only compare against hashes state.json recorded at the previous index run. A
         # section with no recorded hash (e.g. just written by the docs assembler) is not
         # a change, otherwise every injected diagram would trigger a spurious worker run.
-        if previous_section_hashes is not None and previous_section_hashes != dict(
-            section.diagram_hashes
-        ):
+        if stale_ids:
             reasons.add(IMPACT_DIAGRAM_CHANGED)
+        elif previous_section_hashes is not None:
+            unrepaired_ids = (set(previous_section_hashes) | set(section.diagram_hashes)) - set(
+                repaired_ids
+            )
+            if any(
+                previous_section_hashes.get(diagram_id) != section.diagram_hashes.get(diagram_id)
+                for diagram_id in unrepaired_ids
+            ):
+                reasons.add(IMPACT_DIAGRAM_CHANGED)
         # A required section that was never written stays impacted until it has a body.
         if not section.has_body and not section.exempt:
             reasons.add(IMPACT_EMPTY_SECTION)
