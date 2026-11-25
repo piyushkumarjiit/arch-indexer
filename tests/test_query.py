@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_ERROR, EXIT_OK, main
+from arch_indexer.store import IndexStore
 
 FIXTURE_FILES = {
     "app/__init__.py": "",
@@ -197,6 +198,8 @@ def test_entrypoints_filter_and_json(tmp_path: Path, capsys):
     entrypoint = payload["entrypoints"][0]
     assert entrypoint["route_or_trigger"] == "/orders"
     assert entrypoint["symbol_fqname"] == "app.main.handle_order"
+    assert entrypoint["line"] == 9
+    assert entrypoint["symbol_line"] == entrypoint["line"]
     assert entrypoint["module"] == "app.main"
 
     code, out, err = _query(
@@ -234,6 +237,251 @@ def test_module_summary_text_and_json(tmp_path: Path, capsys):
     assert code == EXIT_ERROR
     assert out == ""
     assert "module not found: nope" in err
+
+
+def test_module_summary_accepts_graph_module_ids_and_bare_keys(tmp_path: Path, capsys):
+    """Work packets name modules mod:<key> (graph/master-index); module-summary must accept it."""
+    repo = tmp_path / "repo"
+    _write_fixture(repo)
+    cache = tmp_path / "cache"
+    _index(repo, cache, capsys)
+
+    graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+    master = json.loads(
+        next((cache / "repos").glob("*/master-index.json")).read_text(encoding="utf-8")
+    )
+    master_by_id = {module["id"]: module for module in master["modules"]}
+    assert {module["id"] for module in graph["modules"]} == set(master_by_id)
+
+    for record in graph["modules"]:
+        code, out, _ = _query(
+            capsys,
+            str(repo),
+            "module-summary",
+            record["id"],
+            "--json",
+            "--cache-dir",
+            str(cache),
+        )
+        assert code == EXIT_OK
+        payload = _json(out)
+        assert [file["path"] for file in payload["files"]] == master_by_id[record["id"]]["files"]
+
+        # The bare key is the other spelling a packet or master-index reader may use.
+        code, out, _ = _query(
+            capsys,
+            str(repo),
+            "module-summary",
+            record["name"],
+            "--json",
+            "--cache-dir",
+            str(cache),
+        )
+        assert code == EXIT_OK
+        assert set(master_by_id[record["id"]]["files"]) <= {
+            file["path"] for file in _json(out)["files"]
+        }
+
+    # The dotted package namespace keeps selecting a package slice.
+    code, out, _ = _query(
+        capsys, str(repo), "module-summary", "app.service", "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK
+    payload = _json(out)
+    assert [file["path"] for file in payload["files"]] == ["app/service.py"]
+
+    # An explicit mod: id does not fall back to dotted package prefixes.
+    code, _, err = _query(
+        capsys, str(repo), "module-summary", "mod:app.service", "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_ERROR
+    assert "module not found: mod:app.service" in err
+
+    entry_module = next(module for module in master["modules"] if "app/main.py" in module["files"])
+    code, out, _ = _query(
+        capsys,
+        str(repo),
+        "entrypoints",
+        "--module",
+        entry_module["id"],
+        "--cache-dir",
+        str(cache),
+    )
+    assert code == EXIT_OK
+    assert "app.main.handle_order" in out
+
+
+def test_entrypoint_symbol_line_is_the_citation_definition_line(tmp_path: Path, capsys):
+    """entrypoints exposes the definition line that check-citations accepts."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source_lines = ["x = 1"] * 8 + ["def handler():", "    return 1"]
+    source_path = repo / "src" / "app.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("\n".join(source_lines) + "\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+
+    with IndexStore.from_repo(repo, cache_dir_override=cache) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "src/app.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": len(source_lines),
+                    "module": "src.app",
+                    "tier": "tree-sitter",
+                }
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "src.app.handler",
+                    "name": "handler",
+                    "kind": "function",
+                    "file_path": "src/app.py",
+                    "start_line": 9,
+                    "end_line": 10,
+                    "body_sha256": "b" * 64,
+                }
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "handler",
+                    "method": "GET",
+                    "route_or_trigger": "/items",
+                    "file_path": "src/app.py",
+                    "line": 3,
+                    "symbol_fqname": "src.app.handler",
+                    "auth_symbols_json": "[]",
+                }
+            ]
+        )
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--json", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    entrypoint = _json(out)["entrypoints"][0]
+    assert (entrypoint["line"], entrypoint["symbol_line"]) == (3, 9)
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert out.strip().endswith("symbol_line=9")
+
+    draft = repo / "docs" / ".drafts" / "packet.md"
+    draft.parent.mkdir(parents=True)
+
+    # The registration/annotation line is not a definition: the citation check rejects it.
+    draft.write_text(
+        "Items are served[^1].\n\n[^1]: `src/app.py:3` \u2014 `handler`\n",
+        encoding="utf-8",
+    )
+    code = main(["check-citations", str(repo), "--file", "docs/.drafts/packet.md"])
+    assert code == 3
+
+    # Citing symbol_line follows the one convention check-citations enforces.
+    draft.write_text(
+        "Items are served[^1].\n\n[^1]: `src/app.py:9` \u2014 `handler`\n",
+        encoding="utf-8",
+    )
+    code = main(["check-citations", str(repo), "--file", "docs/.drafts/packet.md"])
+    assert code == 0
+
+
+def test_entrypoint_symbol_line_falls_back_for_cross_file_handler(tmp_path: Path, capsys):
+    """Cross-file handlers keep symbol_line in the entrypoint's file so citations stay valid."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "routes.ts").write_text(
+        'import { getItems } from "./handlers";\napp.get("/items", getItems);\n',
+        encoding="utf-8",
+    )
+    (repo / "src" / "handlers.ts").write_text(
+        "\n" * 19 + "export function getItems() {\n  return [];\n}\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache"
+
+    with IndexStore.from_repo(repo, cache_dir_override=cache) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "src/routes.ts",
+                    "language": "typescript",
+                    "sha256": "a" * 64,
+                    "line_count": 2,
+                    "module": "src.routes",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "src/handlers.ts",
+                    "language": "typescript",
+                    "sha256": "b" * 64,
+                    "line_count": 22,
+                    "module": "src.handlers",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "src.handlers.getItems",
+                    "name": "getItems",
+                    "kind": "function",
+                    "file_path": "src/handlers.ts",
+                    "start_line": 20,
+                    "end_line": 22,
+                    "body_sha256": "c" * 64,
+                }
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "getItems",
+                    "method": "GET",
+                    "route_or_trigger": "/items",
+                    "file_path": "src/routes.ts",
+                    "line": 2,
+                    "symbol_fqname": "src.handlers.getItems",
+                    "auth_symbols_json": "[]",
+                }
+            ]
+        )
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--json", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    entrypoint = _json(out)["entrypoints"][0]
+    assert entrypoint["file_path"] == "src/routes.ts"
+    assert (entrypoint["line"], entrypoint["symbol_line"]) == (2, 2)
+
+    code, out, _ = _query(capsys, str(repo), "entrypoints", "--cache-dir", str(cache))
+    assert code == EXIT_OK
+    assert "symbol_line=" not in out
+
+    draft = repo / "docs" / ".drafts" / "packet.md"
+    draft.parent.mkdir(parents=True)
+    citation = f"{entrypoint['file_path']}:{entrypoint['symbol_line']}"
+    draft.write_text(
+        f"Items are served[^1].\n\n[^1]: `{citation}` \u2014 `getItems`\n",
+        encoding="utf-8",
+    )
+    code = main(
+        [
+            "check-citations",
+            str(repo),
+            "--file",
+            "docs/.drafts/packet.md",
+            "--cache-dir",
+            str(cache),
+        ]
+    )
+    assert code == 0
 
 
 def test_flow_trace_walks_calls_and_marks_sinks(tmp_path: Path, capsys):

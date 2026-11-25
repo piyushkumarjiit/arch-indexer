@@ -1090,6 +1090,85 @@ def test_assemble_accepts_single_section_draft_wrapped_in_its_markers(tmp_path):
     assert "[^1]: `src/app.py:1` — `alpha`" in content
 
 
+def test_assemble_accepts_trailing_references_block(tmp_path):
+    """A draft may close with one ## References block; its footnotes are merged."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "refs.md",
+        "refs",
+        ["design-sec2", "design-sec3"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\nAlpha prose[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "<!-- SECTION:design-sec3:START -->\n"
+        "## 3. Control & Data Flows\n\nBeta prose[^2].\n"
+        "<!-- SECTION:design-sec3:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n"
+        "[^2]: `src/app.py:4` — `beta`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Alpha prose[^1]." in content
+    assert "Beta prose[^2]." in content
+    assert "[^1]: `src/app.py:1` — `alpha`" in content
+    assert "[^2]: `src/app.py:4` — `beta`" in content
+    assert not (drafts / "refs.md").exists()
+
+
+def test_assemble_still_rejects_prose_in_a_trailing_references_block(tmp_path):
+    """Only the heading is allowed after the markers; prose there is still rejected."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "refs-prose.md",
+        "refs-prose",
+        ["design-sec2"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "Section two prose[^1].\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "## References\n\nUnowned prose[^1].\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    err = io.StringIO()
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=err)
+    assert code == 3
+    assert "text outside its SECTION markers" in err.getvalue()
+    assert (drafts / "refs-prose.md").is_file()
+
+
+def test_assemble_accepts_trailing_references_after_earlier_references_heading(tmp_path):
+    """An earlier ## References line inside a section must not block stripping the trailing one."""
+    repo, drafts = _repo_with_app(tmp_path)
+    _write_design_draft(
+        drafts,
+        "refs-nested.md",
+        "refs-nested",
+        ["design-sec2"],
+        "<!-- SECTION:design-sec2:START -->\n"
+        "## 2. Components & Modules\n\n"
+        "Example doc layout[^1]:\n\n"
+        "```markdown\n"
+        "## References\n"
+        "```\n"
+        "<!-- SECTION:design-sec2:END -->\n\n"
+        "## References\n\n"
+        "[^1]: `src/app.py:1` — `alpha`\n",
+    )
+
+    code = assemble(repo=repo, drafts_dir="docs/.drafts", out=io.StringIO(), err=io.StringIO())
+    assert code == 0
+    content = (repo / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    assert "Example doc layout[^1]:" in content
+    assert "```markdown\n## References\n```" in content
+    assert "[^1]: `src/app.py:1` — `alpha`" in content
+    assert not (drafts / "refs-nested.md").exists()
+
+
 @pytest.mark.parametrize(
     "draft_body",
     [

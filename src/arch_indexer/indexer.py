@@ -160,6 +160,31 @@ def _scoped_delta(delta: Delta, include_tests: bool) -> Delta:
     )
 
 
+def _print_run_summary(delta: Delta, report: Any) -> None:
+    """Print a delta/impact summary whose wording agrees with the process exit code.
+
+    An unchanged tree can still leave required sections impacted (for example an empty
+    section or an edited AUTO-DIAGRAM block). Reporting "documentation is up to date"
+    beside an impacted-section count tells a reader to stop work that this same run says
+    is still needed, so the up-to-date message is reserved for a genuinely completed run.
+    """
+    impacted = len(report.sections)
+    missing = len(report.missing_sections)
+    if not delta.is_first_run and delta.is_empty():
+        if impacted or missing:
+            print(
+                f"No source changes: {impacted + missing} documentation section(s) still impacted"
+            )
+        else:
+            print("No changes: documentation is up to date")
+    else:
+        print(delta.format_summary())
+    if impacted:
+        print(f"Impacted sections: {impacted}")
+    if missing:
+        print(f"Missing sections: {missing}")
+
+
 def run_index(
     repo_path: str | Path,
     *,
@@ -362,10 +387,6 @@ def run_index(
     write_json(cache_paths.impacted_sections_json, report.to_payload(delta, docs_dir=docs_dir))
     write_json(cache_paths.master_index_json, master_index)
 
-    print(delta.format_summary())
-    if report.sections:
-        print(f"Impacted sections: {len(report.sections)}")
-
     # Spec 5.4: a move-only delta is repaired with zero tokens when asked to. state.json is
     # only advanced after the relocation passes check-citations, so a failure (exit 3) keeps
     # the previous snapshot and the next run still sees the moves.
@@ -408,6 +429,7 @@ def run_index(
             f"Relocated citations in {len(relocated)} document(s): "
             f"{', '.join(relocated) if relocated else 'none'}"
         )
+        _print_run_summary(delta, repaired)
         write_json(
             cache_paths.impacted_sections_json,
             repaired.to_payload(delta, docs_dir=docs_dir),
@@ -432,6 +454,7 @@ def run_index(
             diagram_hashes=report.diagram_hashes,
         ),
     )
+    _print_run_summary(delta, report)
 
     # Spec 5.2/7.2: first run (or --force-full) and any real delta exit DELTA_DETECTED.
     # Impacted sections alone (e.g. a changed AUTO-DIAGRAM block) also need workers.

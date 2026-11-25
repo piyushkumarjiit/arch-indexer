@@ -80,7 +80,7 @@ Read generated `<cache>/repos/<id>/work-plan.json`:
 #### 2b. Mandatory Worker Rules
 Instruct every section worker to follow these rules:
 1. **Scope boundary**: Read only assigned packet definition, `master-index.json`, `index-delta.json`, and existing section text if updating an existing section.
-2. **Draft file contract**: Begin the draft with YAML front-matter declaring `packet_id`, `target_doc` and `section_ids`, and bound each section of a multi-section draft with `<!-- SECTION:<id>:START -->` / `<!-- SECTION:<id>:END -->` markers. Never author `SLICE` or `AUTO-DIAGRAM` markers. The full contract is spec §9.2.
+2. **Draft file contract**: Begin the draft with YAML front-matter declaring `packet_id`, `target_doc` and `section_ids`, and bound each section of a multi-section draft with `<!-- SECTION:<id>:START -->` / `<!-- SECTION:<id>:END -->` markers. A draft may end with one trailing `## References` heading for its local footnote definitions; any other prose outside the markers is rejected. Never author `SLICE` or `AUTO-DIAGRAM` markers. The full contract is spec §9.2.
 3. **Targeted reads & query CLI**: Never load entire large files into context. Use targeted line-range reads and local index queries:
    - `arch-indexer query <repo> def <symbol>`
    - `arch-indexer query <repo> refs <symbol> --limit 100`
@@ -88,9 +88,11 @@ Instruct every section worker to follow these rules:
    - `arch-indexer query <repo> entrypoints --module <mod>`
    - `arch-indexer query <repo> module-summary <mod>`
    - `arch-indexer query <repo> flow-trace <entrypoint-id>`
+   Module commands accept the packet's `mod:<key>` id, its bare key, or a dotted package slice.
 4. **Never author or edit Mermaid**: Explain code and pre-rendered diagrams. Never create or edit ```` ```mermaid ```` diagram blocks (Mermaid is generated deterministically by the indexer).
 5. **Cite every claim**: Format every citation as a local footnote:
    `[^n]: `file_path:line` — `symbol``
+   Use the definition line reported as `symbol_line` by `entrypoints --json`, not the `line` discovery/annotation line.
 6. **Pre-completion citation check**: Run before finishing:
    ```bash
    arch-indexer check-citations <repo> --file docs/.drafts/<packet_id>.md
@@ -111,7 +113,7 @@ Assigned Modules: {{assigned_modules}}
 Rules:
 1. Work in your own isolated git branch: arch-indexer/draft-{{packet_id}}.
 2. Write ONLY to docs/.drafts/{{packet_id}}.md. Never edit docs/DESIGN.md or docs/USER_GUIDE.md directly.
-3. Begin the draft with YAML front-matter declaring packet_id: {{packet_id}}, target_doc: {{target_doc}}, and section_ids for {{section_ids}}. Bound each section with <!-- SECTION:<id>:START --> / <!-- SECTION:<id>:END --> markers when the draft spans several sections. Never author SLICE or AUTO-DIAGRAM markers (see spec §9.2).
+3. Begin the draft with YAML front-matter declaring packet_id: {{packet_id}}, target_doc: {{target_doc}}, and section_ids for {{section_ids}}. Bound each section with <!-- SECTION:<id>:START --> / <!-- SECTION:<id>:END --> markers when the draft spans several sections. A single trailing `## References` heading may hold the draft's footnote definitions; any other prose outside the markers is rejected. Never author SLICE or AUTO-DIAGRAM markers (see spec §9.2).
 4. Read only your packet definition, master-index.json, index-delta.json, and existing section text (if updating).
 5. Do not load large source files into context. Use targeted line-range reads and query commands:
    - arch-indexer query <repo> def <symbol>
@@ -123,6 +125,7 @@ Rules:
 6. NEVER author or edit Mermaid diagrams. Diagrams are generated deterministically by arch-indexer. Describe architectures and flows in direct explanatory text.
 7. Support every technical assertion with a footnote citation:
    [^n]: `file_path:line` — `symbol`
+   Cite the definition line reported as `symbol_line` by `entrypoints --json`, not the discovery/annotation `line`.
 8. Before completing, verify your draft citations:
    arch-indexer check-citations <repo> --file docs/.drafts/{{packet_id}}.md
    Resolve all citation errors until this command exits 0.
