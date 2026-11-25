@@ -1486,6 +1486,11 @@ def _parse_scip_payload(
                     if file_lines and 1 <= start_line <= len(file_lines)
                     else ""
                 )
+                masked_line = (
+                    masked_lines[start_line - 1]
+                    if masked_lines and 1 <= start_line <= len(masked_lines)
+                    else ""
+                )
                 t2_kind = None
                 ref_fqname = _module_fqname(fqname, last_suffix)
                 if not is_import_line:
@@ -1501,7 +1506,7 @@ def _parse_scip_payload(
                             t2_kind = kind
                             break
                 if 1 <= start_line <= len(brace_depth_at_line):
-                    before_col = line_str[:col]
+                    before_col = masked_line[:col]
                     open_braces = (
                         brace_depth_at_line[start_line - 1]
                         + before_col.count("{")
@@ -1513,7 +1518,7 @@ def _parse_scip_payload(
                     occ,
                     last_suffix,
                     is_import=is_import_line,
-                    line_text=line_str,
+                    line_text=masked_line,
                     tier2_ref_kind=t2_kind,
                     in_brace_block=open_braces > 0,
                 )

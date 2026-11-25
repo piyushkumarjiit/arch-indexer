@@ -614,3 +614,26 @@ def test_ref_kind_colon_heuristic_ignores_multiline_dict_value(tmp_path: Path):
     assert (2, "read") in ref_kinds
     assert (6, "type") in ref_kinds
     assert (2, "type") not in ref_kinds
+
+
+def test_ref_kind_colon_heuristic_ignores_braces_in_strings(tmp_path: Path):
+    """A brace in a string does not make a same-line annotation look like a dict value."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app = repo / "app.py"
+    app.write_text('x = "{"; y: Handler\n')
+
+    handler_sym = "scip-python python pkg 0.1.0 `app`/Handler#"
+    doc = scip_pb2.Document(
+        relative_path="app.py",
+        language="Python",
+        occurrences=[
+            _occ("scip-python python pkg 0.1.0 `app`/__init__:", 0, 0, 0, DEFINITION),
+            _occ(handler_sym, 0, 12, 19),
+        ],
+    )
+    res = _ingest(repo, [doc], _unit(repo, [app]))
+
+    ref_kinds = {(r["line"], r["ref_kind"]) for r in res.references}
+    assert (1, "type") in ref_kinds
+    assert (1, "read") not in ref_kinds
