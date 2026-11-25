@@ -190,7 +190,7 @@ Compile and emit a structured summary report containing:
 - **Repository & Run Metadata**: Target repository path, commit SHA, and timestamp.
 - **Indexing Coverage**: Files and symbols indexed by tier (`Tier 1 scip` vs `Tier 2 tree-sitter`).
 - **Toolchain Diagnostics**: Fallback reasons, missing optional runtimes, and warnings.
-- **Unresolved References**: Total unresolved symbols/imports recorded.
+- **Unresolved References**: Total unresolved symbols/imports recorded, split into external third-party symbols and in-repo symbols (only in-repo ones are an index defect).
 - **Documentation Updates**: List of modified sections in `docs/DESIGN.md` and `docs/USER_GUIDE.md`.
 - **Architectural Gaps**: Any dead modules, unreferenced entrypoints, or circular dependencies detected.
 - **Validation Gates**: Confirmation of exit `0` for `check-citations` and `check-mermaid`.

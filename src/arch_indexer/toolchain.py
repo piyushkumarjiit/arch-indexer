@@ -32,6 +32,38 @@ from arch_indexer.config import (
     get_runtimes_dir,
 )
 
+DB_MIGRATION_DIR_NAMES = frozenset({"flyway", "liquibase"})
+MIGRATION_DIR_NAMES = frozenset(
+    {"migration", "migrations", "flyway", "liquibase", "changelog", "changelogs"}
+)
+DB_CONTEXT_DIR_NAMES = frozenset({"db", "database", "databases", "sql", "schema", "schemas"})
+MIGRATION_DESCRIPTOR_SUFFIXES = (".xml", ".yaml", ".yml", ".json")
+_NON_MIGRATION_MANIFESTS = frozenset({"pom.xml", "package.json", "package-lock.json"})
+
+
+def is_sql_migration_file(rel_path: str) -> bool:
+    """Whether a path is SQL schema evidence: a ``*.sql`` file or a migration descriptor.
+
+    Flyway/Rails-style ``db/migration/*.sql`` trees are the common shape; Liquibase
+    keeps ``*.xml``/``*.yaml`` changelogs in a ``db/changelog`` or ``liquibase``
+    directory, so descriptors under those directories count too. Project manifests
+    and non-DB files in generic ``migration``/``changelog`` directories stay out.
+    """
+    path = PurePosixPath(str(rel_path).replace("\\", "/"))
+    suffix = path.suffix.lower()
+    if suffix == ".sql":
+        return True
+    if suffix not in MIGRATION_DESCRIPTOR_SUFFIXES:
+        return False
+    name_lower = path.name.lower()
+    if name_lower in _NON_MIGRATION_MANIFESTS or fnmatch.fnmatch(name_lower, "tsconfig*.json"):
+        return False
+    ancestors = {part.lower() for part in path.parts[:-1]}
+    if ancestors & DB_MIGRATION_DIR_NAMES:
+        return True
+    return bool(ancestors & MIGRATION_DIR_NAMES and ancestors & DB_CONTEXT_DIR_NAMES)
+
+
 # Directories excluded from file scanning & language detection
 EXCLUDED_DIR_NAMES = {
     "node_modules",
@@ -148,7 +180,8 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
         if rel.endswith(".java") or basename == "pom.xml":
             matched["java"].append(rel)
 
-        # Infra: Dockerfile*, *compose*.y*ml, *.sh, *.tf, *.hcl, .github/workflows/*.y*ml
+        # Infra: Dockerfile*, *compose*.y*ml, *.sh, *.tf, *.hcl, .github/workflows/*.y*ml,
+        # SQL migrations (*.sql and migration-directory descriptors)
         if (
             fnmatch.fnmatch(basename, "Dockerfile*")
             or fnmatch.fnmatch(basename, "*compose*.yml")
@@ -156,6 +189,7 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
             or rel.endswith((".sh", ".tf", ".hcl"))
             or fnmatch.fnmatch(rel, ".github/workflows/*.yml")
             or fnmatch.fnmatch(rel, ".github/workflows/*.yaml")
+            or is_sql_migration_file(rel)
         ):
             matched["infra"].append(rel)
 

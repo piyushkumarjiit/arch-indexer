@@ -266,7 +266,7 @@ def test_cli_assemble_dispatch(tmp_path):
     drafts = repo / "docs" / ".drafts"
     drafts.mkdir(parents=True)
     code = main(["assemble", str(repo), "--drafts-dir", "docs/.drafts"])
-    assert code == 1
+    assert code == 0
 
 
 def test_cli_assemble_remove_slice_dispatch(tmp_path):

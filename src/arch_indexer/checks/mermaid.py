@@ -1215,9 +1215,12 @@ def check_document_mermaid(
 def check_mermaid(
     repo: str | Path,
     docs_dir: str = DEFAULT_DOCS_DIR,
+    report_missing_docs: bool = True,
 ) -> tuple[list[MermaidError], list[str]]:
     """Check all Mermaid diagram blocks across canonical documents in target repository.
 
+    A missing canonical document is skipped by both validation gates; `report_missing_docs`
+    lets a caller that runs both gates report that skip note once instead of twice.
     Returns (errors, notes).
     """
     repo_path = Path(repo).resolve()
@@ -1241,7 +1244,8 @@ def check_mermaid(
         doc_path = target_docs_dir / doc_name
         doc_rel = f"{docs_dir}/{doc_name}"
         if not doc_path.is_file():
-            notes.append(f"Note: {doc_rel} not found, skipping.")
+            if report_missing_docs:
+                notes.append(f"Note: {doc_rel} not found, skipping.")
             continue
 
         doc_errors = check_document_mermaid(
@@ -1276,6 +1280,7 @@ def run_check_mermaid(
     output_format: str = "text",
     out: TextIO | None = None,
     err: TextIO | None = None,
+    report_missing_docs: bool = True,
 ) -> int:
     """CLI execution handler for check-mermaid.
 
@@ -1292,6 +1297,7 @@ def run_check_mermaid(
     errors, notes = check_mermaid(
         repo=repo_path,
         docs_dir=docs_dir,
+        report_missing_docs=report_missing_docs,
     )
 
     if output_format == "json":

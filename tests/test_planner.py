@@ -7,8 +7,9 @@ from pathlib import Path
 
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_ERROR, EXIT_OK, main
 from arch_indexer.config import RepoCachePaths
-from arch_indexer.planner import normalize_section_id, run_plan
+from arch_indexer.planner import build_master_index, normalize_section_id, run_plan
 from arch_indexer.storage.state import write_json
+from arch_indexer.store import IndexStore
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -1185,3 +1186,58 @@ def test_normalize_section_id_narrowed_to_canonical_outline():
     assert normalize_section_id("references", "References", "USER_GUIDE.md") == "guide-references"
     assert normalize_section_id("architecture-overview", "", "DESIGN.md") == "architecture-overview"
     assert normalize_section_id("design-sec4", "", "DESIGN.md") == "design-sec4"
+
+
+def test_master_index_summary_splits_unresolved_refs(tmp_path: Path):
+    """G13: master-index.json adds an external/in-repo split without renaming totals."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with IndexStore(tmp_path / "index.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": "app/core.py",
+                    "language": "python",
+                    "sha256": "a" * 64,
+                    "line_count": 5,
+                    "module": "app.core",
+                    "tier": "scip",
+                }
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "app.core.run",
+                    "name": "run",
+                    "kind": "function",
+                    "file_path": "app/core.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "body_sha256": "b" * 64,
+                }
+            ]
+        )
+        store.insert_unresolved_refs(
+            [
+                {
+                    "file_path": "app/core.py",
+                    "line": 2,
+                    "raw_symbol": "requests",
+                    "language": "python",
+                },
+                {
+                    "file_path": "app/core.py",
+                    "line": 3,
+                    "raw_symbol": "app.core.gone",
+                    "language": "python",
+                },
+            ]
+        )
+        master = build_master_index(store, repo)
+
+    summary = master["summary"]
+    assert summary["total_unresolved_refs"] == 2
+    assert summary["unresolved_external_refs"] == 1
+    assert summary["unresolved_in_repo_refs"] == 1
+    assert "excluded_test_files" in summary

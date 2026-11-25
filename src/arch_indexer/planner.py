@@ -37,7 +37,7 @@ from arch_indexer.plugins.base import module_with_parents
 from arch_indexer.plugins.infra_scanner import is_infra_file
 from arch_indexer.source_scope import filter_rows, in_scope
 from arch_indexer.storage.state import read_json, write_json
-from arch_indexer.store import IndexStore
+from arch_indexer.store import IndexStore, split_unresolved_refs
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
@@ -182,6 +182,9 @@ def build_master_index(
         if in_scope(row[0], include_tests)
     ]
 
+    cursor.execute("SELECT COUNT(*) FROM files")
+    total_files_in_db = cursor.fetchone()[0]
+
     modules: list[dict[str, Any]] = []
     for m in modules_list:
         mod_id = m["id"]
@@ -204,6 +207,7 @@ def build_master_index(
                 "path": m["path"],
                 "symbol_count": symbol_count,
                 "tier": m["tier"],
+                "tier_mix": m["tier_mix"],
             }
         )
     modules.sort(key=lambda item: item["id"])
@@ -212,8 +216,17 @@ def build_master_index(
     scip_files = sum(1 for f in file_rows if f["tier"] == "scip")
     treesitter_files = sum(1 for f in file_rows if f["tier"] == "tree-sitter")
 
+    cursor.execute("SELECT DISTINCT module FROM files")
+    repo_modules = [row[0] for row in cursor.fetchall() if row[0]]
+    cursor.execute("SELECT fqname FROM symbols")
+    repo_fqnames = [row[0] for row in cursor.fetchall() if row[0]]
+    unresolved_external, unresolved_in_repo = split_unresolved_refs(
+        (row["raw_symbol"] for row in unresolved_refs), repo_modules, repo_fqnames
+    )
+
     summary_payload = {
         "scip_files": scip_files,
+        "excluded_test_files": max(total_files_in_db - len(file_rows), 0),
         "total_entrypoints": sum(entrypoints_by_file.values()),
         "total_files": len(file_rows),
         "total_infra_artifacts": sum(infra_by_file.values()),
@@ -222,6 +235,8 @@ def build_master_index(
         "total_symbols": sum(symbols_by_file.values()),
         "total_unresolved_refs": len(unresolved_refs),
         "treesitter_files": treesitter_files,
+        "unresolved_external_refs": unresolved_external,
+        "unresolved_in_repo_refs": unresolved_in_repo,
     }
 
     return {

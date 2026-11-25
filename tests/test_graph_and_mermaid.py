@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 from pathlib import Path
@@ -81,12 +82,25 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
     assert graph["schema_version"] == "1.0"
     assert graph["repo_name"] == "python_routes"
     assert isinstance(graph["generated_at_commit"], (str, type(None)))
-    assert set(graph["tier_summary"]) == {"scip_files", "treesitter_files"}
+    assert set(graph["tier_summary"]) == {
+        "scip_files",
+        "treesitter_files",
+        "total_files",
+        "excluded_test_files",
+    }
     assert isinstance(graph["unresolved_refs_count"], int)
 
     module_ids = set()
     for module in graph["modules"]:
-        assert set(module) == {"id", "name", "language", "path", "file_count", "tier"}
+        assert set(module) == {
+            "id",
+            "name",
+            "language",
+            "path",
+            "file_count",
+            "tier",
+            "tier_mix",
+        }
         assert module["id"].startswith("mod:")
         assert module["tier"] in VALID_TIERS
         assert module["file_count"] >= 1
@@ -498,7 +512,12 @@ def test_build_graph_from_store_has_spec_semantics(tmp_path):
         )
         graph = build_graph(store, repo)
 
-    assert graph["tier_summary"] == {"scip_files": 1, "treesitter_files": 1}
+    assert graph["tier_summary"] == {
+        "scip_files": 1,
+        "treesitter_files": 1,
+        "total_files": 2,
+        "excluded_test_files": 0,
+    }
     assert {module["id"] for module in graph["modules"]} == {"mod:orders", "mod:users"}
 
     nodes = {node["id"]: node for node in graph["nodes"]}
@@ -1099,3 +1118,110 @@ def test_mermaid_ids_sanitize_hyphens_and_pass_validation():
     assert "flow-foo-bar" in diagrams
     for diagram_id, code in diagrams.items():
         assert validate_mermaid_block(code.splitlines(), f"docs/{diagram_id}.md", 1) == []
+
+
+def test_module_tier_uses_majority_and_reports_mix_and_excluded_tests(tmp_path):
+    """G7: a module is labelled by its majority tier and tier_summary accounts for tests."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = tmp_path / "store" / "index.db"
+    with IndexStore(db_path) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "web/src/app.tsx",
+                    "language": "typescript",
+                    "sha256": "a" * 64,
+                    "line_count": 10,
+                    "module": "web.src.app",
+                    "tier": "scip",
+                },
+                {
+                    "path": "web/src/routes.tsx",
+                    "language": "typescript",
+                    "sha256": "b" * 64,
+                    "line_count": 10,
+                    "module": "web.src.routes",
+                    "tier": "scip",
+                },
+                {
+                    "path": "web/src/widget.tsx",
+                    "language": "typescript",
+                    "sha256": "c" * 64,
+                    "line_count": 10,
+                    "module": "web.src.widget",
+                    "tier": "scip",
+                },
+                {
+                    "path": "web/src/legacy.tsx",
+                    "language": "typescript",
+                    "sha256": "d" * 64,
+                    "line_count": 10,
+                    "module": "web.src.legacy",
+                    "tier": "tree-sitter",
+                },
+                {
+                    "path": "web/src/app.test.tsx",
+                    "language": "typescript",
+                    "sha256": "e" * 64,
+                    "line_count": 10,
+                    "module": "web.src.app_test",
+                    "tier": "tree-sitter",
+                },
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    modules = {module["id"]: module for module in graph["modules"]}
+    assert set(modules) == {"mod:web"}
+    module = modules["mod:web"]
+    assert module["file_count"] == 4
+    assert module["tier"] == "scip"
+    assert module["tier_mix"] == {"scip": 3, "tree-sitter": 1}
+    summary = graph["tier_summary"]
+    assert summary["total_files"] == module["file_count"]
+    assert summary["total_files"] == summary["scip_files"] + summary["treesitter_files"]
+    assert summary["excluded_test_files"] == 1
+
+    with IndexStore(db_path) as store:
+        with_tests = build_graph(store, repo, include_tests=True)
+    assert with_tests["tier_summary"]["total_files"] == 5
+    assert with_tests["tier_summary"]["excluded_test_files"] == 0
+    assert {m["id"]: m for m in with_tests["modules"]}["mod:web"]["file_count"] == 5
+    assert with_tests["modules"][0]["tier_mix"] == {"scip": 3, "tree-sitter": 2}
+
+
+def test_sql_migration_infra_artifact_becomes_a_citable_data_store(tmp_path):
+    """G17: CREATE TABLE evidence in a *.sql migration yields a SQL schema data store."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = tmp_path / "store" / "index.db"
+    with IndexStore(db_path) as store:
+        store.insert_files(
+            [
+                {
+                    "path": "db/migration/V1__create_widget.sql",
+                    "language": "infra",
+                    "sha256": "a" * 64,
+                    "line_count": 5,
+                    "module": "infra",
+                    "tier": "tree-sitter",
+                }
+            ]
+        )
+        store.insert_infra_artifacts(
+            [
+                {
+                    "kind": "sql_migration",
+                    "file_path": "db/migration/V1__create_widget.sql",
+                    "line": 3,
+                    "summary_json": json.dumps({"type": "table", "table": "widget"}),
+                }
+            ]
+        )
+        graph = build_graph(store, repo)
+
+    assert [(store["id"], store["kind"], store["label"]) for store in graph["data_stores"]] == [
+        ("ds:sql-schema", "sql", "SQL schema (migrations)")
+    ]
+    assert graph["data_stores"][0]["evidence"] == ["db/migration/V1__create_widget.sql:3"]

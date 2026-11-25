@@ -16,6 +16,7 @@ from arch_indexer.checks.citations import (
     SECTION_START_RE,
     STRICT_CITATION_RE,
     _split_lines,
+    parse_doc_sections,
     run_check_citations,
 )
 from arch_indexer.checks.mermaid import run_check_mermaid
@@ -590,6 +591,75 @@ def remove_slices_from_doc(doc_text: str, packet_ids: Sequence[str]) -> str:
     return doc_text
 
 
+def _missing_canonical_docs(target_docs_dir: Path, docs_dir: str) -> list[str]:
+    """Canonical documents absent from the target docs directory."""
+    return [
+        f"{docs_dir}/{name}" for name in CANONICAL_DOCS if not (target_docs_dir / name).is_file()
+    ]
+
+
+def _report_missing_canonical_docs(stdout: TextIO, target_docs_dir: Path, docs_dir: str) -> None:
+    """Report missing canonical documents once for both validation gates.
+
+    Both gates consistently skip a document that does not exist yet; assemble runs
+    both, so it owns the single note instead of each gate printing its own.
+    """
+    missing = _missing_canonical_docs(target_docs_dir, docs_dir)
+    if missing:
+        stdout.write(
+            f"Note: canonical document(s) not found: {', '.join(missing)}; "
+            "the citation and diagram gates skip missing documents.\n"
+        )
+
+
+def _pending_sections(target_docs_dir: Path, docs_dir: str) -> dict[str, list[str]]:
+    """Sections that still have no body text, from existing docs or packaged skeletons."""
+    pending: dict[str, list[str]] = {}
+    for doc_name in CANONICAL_DOCS:
+        doc_path = target_docs_dir / doc_name
+        try:
+            text = (
+                doc_path.read_text(encoding="utf-8", errors="replace")
+                if doc_path.is_file()
+                else load_skeleton(doc_name)
+            )
+        except (OSError, ValueError):
+            continue
+        rel = f"{docs_dir}/{doc_name}"
+        section_ids = [
+            section.section_id
+            for section in parse_doc_sections(text, rel)
+            if not section.exempt and not section.has_body
+        ]
+        if section_ids:
+            pending[rel] = section_ids
+    return pending
+
+
+def _write_bootstrap_guidance(
+    stdout: TextIO,
+    resolved_drafts_dir: Path,
+    target_docs_dir: Path,
+    docs_dir: str,
+    created: bool,
+) -> None:
+    """Explain a zero-draft bootstrap run and what to draft next."""
+    if created:
+        stdout.write(f"Created drafts directory '{resolved_drafts_dir}'.\n")
+    stdout.write(f"No draft files (*.md) in '{resolved_drafts_dir}' yet; nothing to assemble.\n")
+    stdout.write("Next: write draft packets (*.md) in that directory, each with front matter:\n")
+    stdout.write("  ---\n  packet_id: <unique-id>\n  target_doc: DESIGN.md  # or USER_GUIDE.md\n")
+    stdout.write("  section_ids: [<section-id>]\n  ---\n")
+    pending = _pending_sections(target_docs_dir, docs_dir)
+    if pending:
+        stdout.write("Sections still to draft:\n")
+        for rel, section_ids in pending.items():
+            stdout.write(f"  {rel}: {', '.join(section_ids)}\n")
+    else:
+        stdout.write("All canonical sections already have body text; no drafts are required.\n")
+    stdout.write("Then run: arch-indexer assemble <repo> --drafts-dir <drafts-dir>\n")
+
+
 def assemble(
     repo: str | Path,
     drafts_dir: str | Path,
@@ -614,16 +684,13 @@ def assemble(
         candidate = Path(path)
         return (candidate if candidate.is_absolute() else repo_path / candidate).resolve()
 
+    requested_removals = list(remove_slices or [])
     resolved_drafts_dir = _in_repo(drafts_dir)
     if resolved_drafts_dir != repo_path and repo_path not in resolved_drafts_dir.parents:
         stderr.write(
             f"Error: Drafts directory '{resolved_drafts_dir}' is outside the target "
             f"repository '{repo_path}'\n"
         )
-        return 1
-
-    if not resolved_drafts_dir.is_dir() and not remove_slices:
-        stderr.write(f"Error: Drafts directory '{resolved_drafts_dir}' does not exist\n")
         return 1
 
     target_docs_dir = _in_repo(docs_dir)
@@ -635,6 +702,15 @@ def assemble(
             f"root, equal the docs directory '{target_docs_dir}', or contain it\n"
         )
         return 1
+
+    created_drafts_dir = False
+    if not resolved_drafts_dir.is_dir() and not requested_removals:
+        try:
+            resolved_drafts_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            stderr.write(f"Error: Cannot create drafts directory '{resolved_drafts_dir}': {exc}\n")
+            return 1
+        created_drafts_dir = True
 
     # Load diagrams mapping if provided
     diagrams_map: dict[str, str] | None = None
@@ -670,12 +746,18 @@ def assemble(
             stderr.write(f"Error reading '{graph_path}': {exc}\n")
             return 1
 
-    # Find draft files
-    requested_removals = list(remove_slices or [])
+    # Find draft files; zero drafts is a bootstrap run, not an error.
     draft_files = sorted(resolved_drafts_dir.glob("*.md"))
     if not draft_files and not requested_removals:
-        stderr.write(f"Error: No draft files (*.md) found in '{resolved_drafts_dir}'\n")
-        return 1
+        _report_missing_canonical_docs(stdout, target_docs_dir, docs_dir)
+        _write_bootstrap_guidance(
+            stdout,
+            resolved_drafts_dir,
+            target_docs_dir,
+            docs_dir,
+            created=created_drafts_dir,
+        )
+        return 0
 
     # Parse all drafts and group by target_doc
     drafts_by_doc: dict[str, list[DraftPacket]] = {}
@@ -764,19 +846,22 @@ def assemble(
         (target_docs_dir / doc_name).write_text(doc_text, encoding="utf-8")
         stdout.write(f"Updated {docs_dir}/{doc_name}\n")
 
-    # Run mandatory validation gates
+    # Run mandatory validation gates; assemble reports missing canonical documents once.
+    _report_missing_canonical_docs(stdout, target_docs_dir, docs_dir)
     cite_exit = run_check_citations(
         repo=repo_path,
         docs_dir=docs_dir,
         cache_dir=cache_dir,
         out=stdout,
         err=stderr,
+        report_missing_docs=False,
     )
     mermaid_exit = run_check_mermaid(
         repo=repo_path,
         docs_dir=docs_dir,
         out=stdout,
         err=stderr,
+        report_missing_docs=False,
     )
 
     if cite_exit != 0 or mermaid_exit != 0:
