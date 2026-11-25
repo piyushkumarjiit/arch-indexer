@@ -21,16 +21,21 @@ from arch_indexer.graph_rules import (
     classify_token,
     edge_kind_for_token,
 )
+from arch_indexer.module_identity import (
+    REVERSE_DOMAIN_TLDS,
+    SOURCE_ROOTS,
+    ModuleOptions,
+    assign_module_names,
+    load_module_options,
+)
 from arch_indexer.source_scope import filter_rows
 from arch_indexer.store import IndexStore
 from arch_indexer.viewer import render_viewer
 
 SCHEMA_VERSION = "1.0"
 
-# Source roots that should not become a module name on their own.
-_SOURCE_ROOTS = frozenset({"src", "lib", "app", "apps", "pkg", "packages", "services", "modules"})
-# Reverse-domain prefixes that Java packages share with every other package.
-_REVERSE_DOMAIN_TLDS = frozenset({"com", "org", "net", "io", "dev", "edu", "gov", "co"})
+_SOURCE_ROOTS = SOURCE_ROOTS
+_REVERSE_DOMAIN_TLDS = REVERSE_DOMAIN_TLDS
 
 
 def git_head(repo_path: str | Path) -> str | None:
@@ -59,31 +64,6 @@ def module_key(module: str, language: str) -> str:
     while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
         parts = parts[1:]
     return parts[0] if parts else "root"
-
-
-def _python_module_keys(file_rows: list[dict[str, Any]]) -> dict[str, str]:
-    """Compute Python module keys, stripping a container prefix shared by all Python files."""
-    split_parts: dict[str, list[str]] = {}
-    for row in file_rows:
-        if row["language"] != "python":
-            continue
-        parts = [part for part in row["module"].split(".") if part]
-        while len(parts) > 1 and parts[0] in _SOURCE_ROOTS:
-            parts = parts[1:]
-        split_parts[row["path"]] = parts
-
-    if (
-        len(split_parts) > 1
-        and all(len(parts) > 1 for parts in split_parts.values())
-        and len({parts[0] for parts in split_parts.values()}) == 1
-    ):
-        for path, parts in split_parts.items():
-            trimmed = parts[1:]
-            while len(trimmed) > 1 and trimmed[0] in _SOURCE_ROOTS:
-                trimmed = trimmed[1:]
-            split_parts[path] = trimmed
-
-    return {path: (parts[0] if parts else "root") for path, parts in split_parts.items()}
 
 
 def _common_dir(paths: list[str]) -> str:
@@ -122,18 +102,21 @@ def _row_dicts(store: IndexStore, sql: str) -> list[dict[str, Any]]:
 
 def _build_modules(
     file_rows: list[dict[str, Any]],
+    options: ModuleOptions | None = None,
+    symbols_by_file: dict[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
-    """Group files into modules; return (modules, module_id_by_file, tier_by_file)."""
+    """Group files into modules; return (modules, module_id_by_file, tier_by_file).
+
+    Module identity comes from real structure (see ``module_identity``): the Maven
+    reactor module and package path, split into subpackages when a module would exceed
+    the per-worker line or symbol budget. ``options`` carries the overrides.
+    """
     grouped: dict[str, dict[str, Any]] = {}
     module_by_file: dict[str, str] = {}
     tier_by_file: dict[str, str] = {}
-    py_keys = _python_module_keys(file_rows)
+    names = assign_module_names(file_rows, options, symbols_by_file=symbols_by_file)
     for row in file_rows:
-        key = (
-            py_keys[row["path"]]
-            if row["language"] == "python"
-            else module_key(row["module"], row["language"])
-        )
+        key = names[row["path"]]
         module_id = f"mod:{key}"
         module_by_file[row["path"]] = module_id
         tier_by_file[row["path"]] = row["tier"]
@@ -345,6 +328,7 @@ def build_graph(
     repo_path: str | Path,
     *,
     include_tests: bool = False,
+    module_depth: int | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic SPEC 6.1 graph payload from an open index.
 
@@ -353,11 +337,21 @@ def build_graph(
     """
     repo = Path(repo_path)
     file_rows = filter_rows(
-        _row_dicts(store, "SELECT path, language, module, tier FROM files ORDER BY path"),
+        _row_dicts(
+            store, "SELECT path, language, module, tier, line_count FROM files ORDER BY path"
+        ),
         include_tests,
         key="path",
     )
-    modules, module_by_file, tier_by_file = _build_modules(file_rows)
+    symbol_counts = {
+        row["file_path"]: row["n"]
+        for row in _row_dicts(
+            store, "SELECT file_path, COUNT(*) AS n FROM symbols GROUP BY file_path"
+        )
+    }
+    modules, module_by_file, tier_by_file = _build_modules(
+        file_rows, load_module_options(repo, module_depth), symbol_counts
+    )
 
     symbol_rows = filter_rows(
         _row_dicts(

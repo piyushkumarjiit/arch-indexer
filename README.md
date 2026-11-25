@@ -69,6 +69,18 @@ A required section whose body is still empty is impacted with the `empty_section
 
 Sections are read from existing documents through `<!-- SECTION:<id>:START -->`/`<!-- SECTION:<id>:END -->` markers, or from every `##` heading when a document has no markers; a start marker may carry the `:exempt` flag defined in [section 9.2 of the spec](docs/SPEC.md).
 
+**Module identity.** Modules come from real structure, not one fixed package level: a Maven reactor module plus the package below it, otherwise the package path with source roots and a shared Python container package stripped, and any module larger than the planner's per-worker budget splits recursively into its subpackages. [Section 6.1 of the spec](docs/SPEC.md) owns the derivation. Override it with `arch-indexer index --module-depth N` (fixed depth, no adaptive split) or a `.arch-indexer.toml` at the repository root:
+
+```toml
+[modules]
+depth = 2            # same as --module-depth (the flag wins)
+
+[modules.map]
+"services/billing" = "billing"   # path prefix -> module name (longest prefix wins)
+```
+
+`plan` marks a packet `"over_budget": true` and warns on stderr when a module cannot be split further (see [section 9.2 of the spec](docs/SPEC.md)).
+
 `--docs-dir` selects where the graph artifacts (`docs/graph.json` and `docs/flow-viewer.html`) are written, and where documents are read from and citations relocated. `--offline --strict-tier1` exits `4` only when a required Tier 1 indexer or its runtime is not available; runtime failures such as OOM, timeout, missing `node_modules`, unresolved Maven artifacts or a failed build fall back to Tier 2 with the `fallback_reason` recorded. `--strict-tier1` without `--offline` also falls back to Tier 2.
 
 `ensure` needs host `node`/`npm` for the Python and TypeScript indexers, and host `java` (plus `mvn` for Maven builds) for `scip-java`. A missing runtime with no usable portable alternative is reported as a warning; `index` then either falls back to Tier 2 tree-sitter indexing for that language or, under `--offline --strict-tier1`, exits `4`. For Java repos, pass `--fetch-runtime` to download the pinned Eclipse Temurin JDK 17 into `<cache>/runtimes/` when host `java` is missing or older than the minimum, and Apache Maven 3.9 as well when the repo contains a `pom.xml` and host `mvn` is missing; each archive's SHA-256 is verified before safe extraction. Host runtimes are still preferred when they are usable (see Disagreement 1 in [docs/SPEC.md](docs/SPEC.md)). The flag governs downloads only: a runtime already downloaded and verified is reused by later `ensure` runs without it, and `ensure` prints one line per portable runtime saying whether it was downloaded or reused.
@@ -89,7 +101,7 @@ arch-indexer toolchain ensure --repo /path/to/java/repo --fetch-runtime
 
 `arch-indexer index` exports the deterministic SPEC 6.1 graph to `docs/graph.json` and writes `docs/flow-viewer.html` from the same payload. The graph is built only from `index.db` plus the repository name, git HEAD and the resolved test scope, with sorted modules, nodes, edges, data stores and external sinks, so repeated runs over an unchanged repository produce byte-identical files. The indexer records entrypoint auth guards, indexing tiers, and data-store/external-sink evidence, and counts unresolved references; `graph.json` is the single input for both Mermaid generation and the viewer.
 
-The same payload generates the Mermaid diagrams: `module-overview` (`flowchart LR` of modules, data stores and external sinks) and one `flow-<domain>` diagram per entrypoint domain (`flowchart TD` from entrypoints through services to data stores and sinks). Generation is deterministic and respects the generator's fixed node/edge budgets (35 nodes and 60 edges); when a graph exceeds a budget, service nodes are aggregated to their modules or the diagram is truncated, with a note pointing at `docs/flow-viewer.html`. `check-mermaid` regenerates each `AUTO-DIAGRAM` block from `docs/graph.json` and fails on any manual edit or missing block.
+The same payload generates the Mermaid diagrams: `module-overview` (`flowchart LR` of modules, data stores and external sinks) and one `flow-<domain>` diagram per entrypoint domain (`flowchart TD` from entrypoints through services to data stores and sinks). Generation is deterministic and respects the generator's fixed node/edge budgets (35 nodes and 60 edges); when a graph exceeds a budget, service nodes are aggregated to their modules (keeping the dominant module) and entrypoints are capped so call edges always remain, with a note pointing at `docs/flow-viewer.html`. [Section 6.2 of the spec](docs/SPEC.md) defines the exact collapse and truncation rules. `check-mermaid` regenerates each `AUTO-DIAGRAM` block from `docs/graph.json` and fails on any manual edit or missing block.
 
 The viewer (`arch_indexer.viewer.render_viewer`) is a single-file, fully self-contained offline HTML document with hierarchical drill-down navigation (system -> module -> file group -> file -> symbol/endpoint), layered deterministic layout by kind, guided flow tracing from entrypoints to data stores and external sinks, pan/zoom, and client-side filtering and search. The renderer embeds `graph` into the page and also exposes a "Load `graph.json`" file picker, so the same HTML can open any standalone graph without a web server. See [section 6.3 of the spec](docs/SPEC.md) for the full viewer contract.
 

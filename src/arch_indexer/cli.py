@@ -163,6 +163,15 @@ def build_parser() -> argparse.ArgumentParser:
             "tests are always indexed for query def/refs"
         ),
     )
+    index_parser.add_argument(
+        "--module-depth",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Fix architecture modules to the first N package segments instead of splitting "
+            "adaptively by size (overrides [modules] depth in .arch-indexer.toml)"
+        ),
+    )
     index_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 3. query
@@ -374,6 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 docs_dir=args.docs_dir,
                 auto_relocate_citations=args.auto_relocate_citations,
                 include_tests=args.include_tests,
+                module_depth=args.module_depth,
                 cache_dir=args.cache_dir,
             )
         except (OSError, RuntimeError, ValueError) as e:
