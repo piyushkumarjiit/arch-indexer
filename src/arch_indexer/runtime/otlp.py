@@ -46,9 +46,11 @@ class Span(TypedDict):
     exceptions: list[SpanException]
 
 
-# Strict allow-list of attribute keys retained at load time (spec §3.6 & §4.7).
+# Strict allow-list of attribute keys retained at load time: this frozenset is the
+# single load-time redaction policy, so every key it omits is dropped.
 # Sensitive keys such as db.statement, db.query.text, exception.message,
-# HTTP headers, request/response bodies, and full URLs/queries are dropped.
+# HTTP headers, request/response bodies, and full URLs/queries are never retained
+# (regression test: tests/test_otlp_load.py::test_dropped_attributes_absent_in_json_and_proto).
 ALLOWED_ATTR_KEYS: frozenset[str] = frozenset(
     {
         # Code attributes (stable + deprecated)
