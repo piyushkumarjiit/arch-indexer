@@ -78,6 +78,23 @@ def _maven_argv_no_clean(limits: dict[str, Any]) -> list[str]:
 
 
 _CLEAN_PLUGIN_MARKER = "maven-clean-plugin"
+_CLEAN_PLUGIN_RESOLUTION_MARKERS = (
+    "could not be resolved",
+    "has not been downloaded",
+    "PluginResolutionException",
+)
+
+
+def _clean_plugin_unresolvable(output: str) -> bool:
+    """True only when the clean plugin itself could not be resolved offline.
+
+    Every failing ``clean compile`` run logs the plugin's execution banner
+    (``--- maven-clean-plugin:3.2.0:clean (default-clean) @ broken ---``), so the
+    plugin name alone must not be read as a resolution failure.
+    """
+    return _CLEAN_PLUGIN_MARKER in output and any(
+        marker in output for marker in _CLEAN_PLUGIN_RESOLUTION_MARKERS
+    )
 
 
 def _reactor_note(message: str) -> None:
@@ -536,7 +553,7 @@ class JavaPlugin(LanguagePlugin):
         )
         if failure is None:
             return None
-        if limits.get("maven_online", False) or _CLEAN_PLUGIN_MARKER not in output:
+        if limits.get("maven_online", False) or not _clean_plugin_unresolvable(output):
             return failure
         targets = ["target/classes"]
         if limits.get("include_tests"):

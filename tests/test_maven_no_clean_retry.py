@@ -16,6 +16,19 @@ CLEAN_FAILURE = (
 )
 
 
+# Real Maven output of a failing ``clean compile``: the clean plugin runs and logs its
+# banner before the compiler error, so the plugin name appears in a non-resolution failure.
+CLEAN_BANNER_THEN_COMPILE_ERROR = (
+    "[INFO] --- maven-clean-plugin:3.2.0:clean (default-clean) @ broken ---\n"
+    "[INFO] Deleting /repo/target\n"
+    "[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ broken ---\n"
+    "[INFO] BUILD FAILURE\n"
+    "[ERROR] /repo/src/main/java/demo/Svc.java:[3,5] cannot find symbol\n"
+    "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0"
+    ":compile (default-compile) on project broken: Compilation failure\n"
+)
+
+
 def _scip(unit_file: str) -> bytes:
     doc = scip_pb2.Document(
         relative_path=unit_file,
@@ -116,6 +129,15 @@ def test_failed_retry_records_clean_plugin_fallback_reason(tmp_path: Path) -> No
     assert len(stub.goals) == 2
     assert result.reason == "maven_clean_plugin_offline"
     assert "maven-clean-plugin" in result.message
+
+
+def test_compile_error_after_clean_banner_does_not_retry(tmp_path: Path) -> None:
+    """A failing ``clean compile`` logs the clean plugin banner but is not a plugin failure."""
+    _, stub, result = _run(
+        tmp_path, lambda repo: _Stub(repo, first_failure=CLEAN_BANNER_THEN_COMPILE_ERROR)
+    )
+    assert stub.goals == [["--batch-mode", "clean", "compile", "-DskipTests", "-o"]]
+    assert result.reason == "build_failure"
 
 
 def test_other_failures_and_online_runs_never_retry(tmp_path: Path) -> None:
