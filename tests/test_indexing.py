@@ -1434,7 +1434,8 @@ def test_run_index_records_fallback_reason_in_files_table(tmp_path: Path):
 
     and the exact fallback_reason.
     """
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
     cache_dir = tmp_path / "cache"
 
     # Stub index_unit_tier1 on PythonPlugin to return FallbackSignal with reason "oom_limit"
@@ -2342,7 +2343,8 @@ def test_tier1_without_unit_coverage_indexes_unit_at_tier2(
 def test_strict_tier1_offline_exit_4_when_tier1_fails(tmp_path: Path, capsys):
     """Verify --offline --strict-tier1 exits 4 when Tier 1 tool is unavailable."""
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
 
     code = main(["index", str(repo), "--offline", "--strict-tier1", "--cache-dir", str(cache)])
     assert code == EXIT_TOOLCHAIN_MISSING
@@ -2353,7 +2355,8 @@ def test_strict_tier1_offline_exit_4_when_tier1_fails(tmp_path: Path, capsys):
 def test_strict_tier1_without_offline_falls_back(tmp_path: Path):
     """Verify --strict-tier1 alone (without --offline) falls back to Tier 2 and exits 2."""
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
 
     with patch("arch_indexer.cli.ensure_toolchain"):
         code = main(["index", str(repo), "--strict-tier1", "--cache-dir", str(cache)])
@@ -2618,7 +2621,8 @@ def test_ts_monorepo_node_modules_and_tsconfig_error_classification(tmp_path: Pa
 def test_offline_strict_tier1_falls_back_on_runtime_failure(tmp_path: Path):
     """--offline --strict-tier1 only exits 4 on tool_unavailable, not runtime fallbacks."""
     cache = tmp_path / "cache"
-    repo = FIXTURES_DIR / "python"
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES_DIR / "python", repo)
 
     with patch.object(
         PythonPlugin,
