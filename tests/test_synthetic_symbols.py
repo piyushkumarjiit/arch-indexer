@@ -21,6 +21,19 @@ def _index(repo: Path, cache: Path) -> dict:
     return load_graph(repo / "docs" / "graph.json")
 
 
+def _reindex(repo: Path, cache: Path) -> None:
+    main(["index", str(repo), "--offline", "--cache-dir", str(cache)])
+
+
+def _synthetic_rows(cache: Path) -> list[tuple]:
+    db = next((cache / "repos").glob("*/index.db"))
+    with sqlite3.connect(db) as conn:
+        return conn.execute(
+            "SELECT fqname, kind, file_path FROM synthetic_symbols "
+            "ORDER BY file_path, start_line, fqname"
+        ).fetchall()
+
+
 @pytest.fixture()
 def flow_repo(tmp_path: Path) -> tuple[Path, Path]:
     repo = tmp_path / "flow_python"
@@ -106,6 +119,43 @@ def test_module_symbol_is_not_a_caller_in_files_without_an_entry(tmp_path: Path)
     graph = _index(repo, tmp_path / "cache")
     assert not any(n["kind"] == "module_symbol" for n in graph["nodes"])
     assert not any(e["source"].endswith("<module>") for e in graph["edges"])
+
+
+def test_new_colliding_file_keeps_skipped_unit_fqname_path_qualified(tmp_path: Path) -> None:
+    repo = tmp_path / "colliding"
+    repo.mkdir()
+    (repo / "pkg.py").write_text("def work():\n    return 1\n\n\nwork()\n")
+    cache = tmp_path / "cache"
+    _index(repo, cache)
+
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "__init__.py").write_text("from pkg import work\n\nwork()\n")
+    _reindex(repo, cache)
+    incremental = _synthetic_rows(cache)
+
+    full_cache = tmp_path / "full_cache"
+    _index(repo, full_cache)
+    assert incremental == _synthetic_rows(full_cache)
+    assert ("pkg.<module>@pkg.py", "module", "pkg.py") in incremental
+
+
+def test_editing_one_colliding_file_keeps_both_fqnames_path_qualified(tmp_path: Path) -> None:
+    repo = tmp_path / "colliding"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg.py").write_text("def work():\n    return 1\n\n\nwork()\n")
+    (repo / "pkg" / "__init__.py").write_text("from pkg import work\n\nwork()\n")
+    cache = tmp_path / "cache"
+    _index(repo, cache)
+
+    (repo / "pkg.py").write_text("def work():\n    return 2\n\n\nwork()\n")
+    _reindex(repo, cache)
+    incremental = _synthetic_rows(cache)
+
+    full_cache = tmp_path / "full_cache"
+    _index(repo, full_cache)
+    assert incremental == _synthetic_rows(full_cache)
+    assert ("pkg.<module>@pkg.py", "module", "pkg.py") in incremental
+    assert ("pkg.<module>@pkg/__init__.py", "module", "pkg/__init__.py") in incremental
 
 
 def test_same_module_name_in_two_units_stays_attributed_to_its_file(tmp_path: Path) -> None:

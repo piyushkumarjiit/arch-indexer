@@ -568,6 +568,41 @@ class IndexStore:
         """Insert synthetic ``<module>``/block symbols in deterministic row order."""
         self.upsert_rows("synthetic_symbols", symbols)
 
+    def get_synthetic_symbol_records(self) -> list[dict[str, Any]]:
+        """Return every synthetic symbol row in deterministic order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT fqname, kind, file_path, start_line, start_col, end_line, end_col
+            FROM synthetic_symbols
+            ORDER BY file_path, start_line, start_col, fqname
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def replace_synthetic_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
+        """Replace the whole synthetic table, leaving it untouched when nothing changed."""
+        rows = sorted(
+            (
+                {
+                    "fqname": row["fqname"],
+                    "kind": row["kind"],
+                    "file_path": row["file_path"],
+                    "start_line": row["start_line"],
+                    "start_col": row.get("start_col"),
+                    "end_line": row["end_line"],
+                    "end_col": row.get("end_col"),
+                }
+                for row in symbols
+            ),
+            key=TABLE_REGISTRY["synthetic_symbols"].sort_key,
+        )
+        if rows == self.get_synthetic_symbol_records():
+            return
+        with self.conn:
+            self.conn.execute("DELETE FROM synthetic_symbols")
+            self._upsert_rows("synthetic_symbols", rows)
+
     def insert_unit_data(
         self,
         *,
@@ -663,6 +698,19 @@ class IndexStore:
             cols += ", unit_id"
         cursor = self.conn.cursor()
         cursor.execute(f"SELECT {cols} FROM files ORDER BY path")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_entrypoint_records(self) -> list[dict[str, Any]]:
+        """Return every entrypoint in deterministic file/line order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT kind, name, method, route_or_trigger, file_path, line, symbol_fqname,
+                   auth_symbols_json, col, block_end_line, confidence, rule_id
+            FROM entrypoints
+            ORDER BY file_path, line, kind, name
+            """
+        )
         return [dict(row) for row in cursor.fetchall()]
 
     def get_symbol_records(self) -> list[dict[str, Any]]:
