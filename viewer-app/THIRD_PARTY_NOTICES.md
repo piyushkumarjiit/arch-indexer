@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-The built viewer dist (`src/arch_indexer/viewer/dist/`, produced from this `viewer-app/` source by `make viewer`) includes unmodified third-party packages and adapted open-source code used by the `arch-indexer` v2 viewer.
+The built viewer dist (`src/arch_indexer/viewer/dist/`, produced from this `viewer-app/` source by `make viewer`) includes unmodified third-party packages used by the `arch-indexer` v2 viewer.
 
 The upstream licence texts referenced below are copied by the Vite build into the built `src/arch_indexer/viewer/dist/licenses/` directory, next to the built `app.js`/`app.css` and `vendor/elk-worker.min.js` assets; they are not checked in under `viewer-app/`.
 
@@ -30,9 +30,3 @@ The upstream licence texts referenced below are copied by the Vite build into th
   - License: MIT (`src/arch_indexer/viewer/dist/licenses/zustand-MIT.txt`)
   - Upstream: https://github.com/pmndrs/zustand
   - Used in: `viewer-app/src/state/store.ts`
-
-## Adapted Source Code
-
-- **floorplan** — adapted from `assets/ui/25-recent.js` at commit `94f81b4` in the upstream repository https://github.com/haydenschmitty/floorplan
-  - License: MIT — Copyright (c) 2026 Hayden Smith
-  - Used in: `viewer-app/src/ui/ChangeBadges.tsx`
