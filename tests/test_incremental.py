@@ -1,4 +1,7 @@
-"""Tests for incremental indexing, table-driven purges, read-only safety, and v1 rebuild (spec 4.6)."""
+"""Tests for incremental indexing, table-driven purges, read-only safety, and v1 rebuild.
+
+Covers the incremental and parallel unit indexing contract in spec section 4.6.
+"""
 
 from __future__ import annotations
 
@@ -478,9 +481,7 @@ def test_readonly_query_and_citations_work_when_cache_dir_is_readonly(tmp_path: 
 
     env = {**os.environ}
     src_dir = str(Path(__file__).resolve().parents[1] / "src")
-    env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (src_dir, env.get("PYTHONPATH")) if part
-    )
+    env["PYTHONPATH"] = os.pathsep.join(part for part in (src_dir, env.get("PYTHONPATH")) if part)
 
     def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

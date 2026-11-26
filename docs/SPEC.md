@@ -39,8 +39,9 @@ arch-indexer/
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
 │   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows, SQL migrations
-│   ├── store.py                     # SQLite schema & record persistence
-│   ├── indexer.py                   # Two-tier indexing orchestration & fallback recording
+│   ├── store.py                     # SQLite schema, table registry & incremental record persistence
+│   ├── units_hash.py                # Per-unit manifest/file hashing for incremental planning
+│   ├── indexer.py                   # Two-tier indexing orchestration, incremental plans & fallback recording
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
@@ -174,18 +175,19 @@ Every indexed file row in `index.db` records:
 When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
 
 Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. Tier 1 TypeScript also records an import statement that resolves outside the repository as an unresolved ref at the import line, with the module specifier as `raw_symbol`: scip-typescript emits no occurrence for a package absent from `node_modules`, so the import statement is the only evidence that the code depends on it. An import statement SCIP did resolve, including a bare specifier resolved through `tsconfig` `baseUrl`/`paths` to a repository file, is never recorded as external. The `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working. The printed summary reports the same in-scope counts as `master-index.json` (test files, their symbols, references, entrypoints, infra artifacts and unresolved refs excluded unless `--include-tests` was passed) and labels how many test files were excluded, so the CI log cannot disagree with the artifacts.
-Each indexing unit is also recorded in a `units(unit_id PK, language, tier, files_count, fallback_reason, message)` table. `message` holds the captured Tier 1 failure output (for Maven, its `[ERROR]` lines when present), whitespace-collapsed and truncated, so a silent all-Tier-2 fallback can be diagnosed. A unit row's `tier` is `tree-sitter` when every one of its files fell back, and its `fallback_reason` joins several distinct per-file reasons with commas. `index` prints its summary line followed by one tier line per unit and writes a loud warning when 100% of a unit's files fell back; `arch-indexer query <repo> units [--json]` exposes the same rows.
+Each indexing unit is also recorded in the `units` table (§4.5), whose `message` column holds the captured Tier 1 failure output (for Maven, its `[ERROR]` lines when present), whitespace-collapsed and truncated, so a silent all-Tier-2 fallback can be diagnosed. A unit row's `tier` is `tree-sitter` when every one of its files fell back, and its `fallback_reason` joins several distinct per-file reasons with commas. `index` prints its summary line followed by one tier line per unit and writes a loud warning when 100% of a unit's files fell back; `arch-indexer query <repo> units [--json]` exposes the same rows.
 
 ### 4.4 Memory & Timeout Controls (7 GB Host)
 All external indexer subprocesses receive strict, configurable caps:
 - `--node-max-heap-mb` (env `ARCH_INDEXER_NODE_HEAP_MB`): default **`2048`**, hard-warn if > 60% of host available RAM. Sets `NODE_OPTIONS="--max-old-space-size=<N>"`.
 - `--jvm-max-heap-mb` (env `ARCH_INDEXER_JVM_HEAP_MB`): default **`2048`**. Sets `JAVA_TOOL_OPTIONS="-Xmx<N>m"`.
 - `--unit-timeout-sec`: default **`300`** per index unit.
-- `--max-parallel-units`: default **`1`** (sequential indexer processes to avoid stacking multiple 2 GB heaps on a 7 GB host; SQLite ingestion runs streaming per unit and deletes each temporary `.scip` file immediately after ingest).
+- `--max-parallel-units`: default **`1`** (sequential indexer processes to avoid stacking multiple 2 GB heaps on a 7 GB host). A value above `1` runs up to that many planned Tier 1 units concurrently in threads, so each concurrent unit holds its own Node/JVM heap; raise it only within the host's RAM budget. SQLite writes stay serial in deterministic unit order (§4.6).
 
 ### 4.5 SQLite Schema (`index.db`)
 Core tables:
-- `files(path PK, language, sha256, line_count, module, tier, fallback_reason)`
+- `meta(key PK, value)` (`schema_version`, `arch_indexer_version`, `created_at_commit`)
+- `files(path PK, language, sha256, line_count, module, tier, fallback_reason, unit_id)`
 - `symbols(id PK, fqname, name, kind, file_path, start_line, end_line, body_sha256, visibility, decorators_json)`
   - `visibility` and `decorators_json` are `NULL` when the tier that produced the row does not report them: SCIP carries neither, so a Tier 1 symbol with no matching Tier 2 symbol stores `NULL` rather than a guessed default. A JSON array such as `[]` means the tier recorded that the symbol has no decorators.
 - `references(id PK, symbol_fqname, file_path, line, col, ref_kind)` (`call`, `import`, `type`, `read`, `write`)
@@ -193,7 +195,18 @@ Core tables:
   - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), Java process entrypoints (`main` in a `@SpringBootApplication` class, `CommandLineRunner`/`ApplicationRunner`) and gRPC service implementations (`*Grpc.*ImplBase`/`AsyncService` subclasses or `@GrpcService` classes, where only `@Override` handlers taking a `StreamObserver` count), workers/queues (Celery, BullMQ, Kafka/RabbitMQ listeners), scheduled jobs, and frontend API callers (`fetch`, `axios`).
 - `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` record at each `CREATE TABLE` line, and `migration_descriptor` records for Liquibase-style changelogs).
 - `unresolved_refs(id PK, file_path, line, raw_symbol, language)`
-- `units(unit_id PK, language, tier, files_count, fallback_reason, message)` (per-unit tier and captured fallback message)
+- `units(unit_id PK, language, tier, files_count, fallback_reason, message, manifest_sha256, files_sha256, indexed_at_commit)` (per-unit tier, captured fallback message and incremental state; §4.6)
+
+### 4.6 Incremental & Parallel Unit Indexing
+`index.db` is updated in place instead of rebuilt on every run; only `--force-full` or an incompatible schema major clears it.
+
+- **Per-unit state.** Each `units` row records `manifest_sha256` (toolchain pins, `arch-indexer` version, language and the unit's build manifests: `pom.xml`, `package.json`, `tsconfig*.json` and TypeScript lockfiles, `pyproject.toml`/`setup.cfg`/`requirements*.txt`, or the infra files themselves), `files_sha256` (the unit's sorted `path:sha256` pairs) and `indexed_at_commit`. Every `files` row records its owning `unit_id`.
+- **Skip unchanged units.** When the manifest hash, the files hash and every per-file `sha256` match the stored unit, that unit is not parsed or indexed at all; its file and symbol rows are reused, so an unchanged tree changes no file or symbol row (only the recorded `indexed_at_commit`) and `graph.json` stays identical at the same commit.
+- **Re-index only what changed.** A changed unit gets a full re-index when its build manifest changed (dependency or toolchain changes can alter resolution), when its stored tier is Tier 1 (SCIP coverage is unit-wide), or when `--offline --strict-tier1` must re-check a unit that previously fell back with `tool_unavailable`. Otherwise only the changed files are re-parsed with Tier 2 while unchanged files keep their existing rows. Infra units are per-file, so their manifest hash never forces a whole-unit re-index.
+- **Dependent units.** Re-indexing a unit also re-indexes previously indexed files in other units whose references point at a removed symbol, or whose `unresolved_refs` match a newly added symbol; a changed Python router mount re-indexes the HTTP entrypoints it can affect. This keeps an incremental `graph.json` byte-identical to a `--force-full` run on the same tree.
+- **Deletions and moves.** A removed unit, a removed file and a file that moved to another unit are purged from every registered table before the new rows are inserted (§5.3).
+- **Schema rebuild.** `meta.schema_version` (also mirrored in `PRAGMA user_version`) carries the schema major; a database without `meta` or with a different major is rebuilt from scratch, which re-indexes every unit and drops stale rows. That is not a delta first run: the delta is still computed against `state.json` (§5.2).
+- **Bounded parallelism.** `index --max-parallel-units N` runs up to `N` planned full units concurrently (default `1`; non-positive values are rejected). Each plugin keeps its tree-sitter parser per thread, and SQLite rows are written serially in deterministic unit order after indexing finishes, so parallel and serial runs produce identical rows and `graph.json`.
 
 ---
 
@@ -218,7 +231,7 @@ Unless `index --include-tests` was passed, test files (section 6.1) are excluded
 
 ### 5.3 Deleted-File Handling
 - Any path present in `state.json` but absent on disk is:
-  1. Purged from `index.db` (`files`, `symbols`, `references`, `entrypoints`, `infra_artifacts`, `unresolved_refs`) and omitted from `graph.json`.
+  1. Purged from `index.db` (`files`, `symbols`, `references`, `entrypoints`, `infra_artifacts`, `unresolved_refs`, plus the owning `units` row when the whole unit is gone) and omitted from `graph.json`.
   2. Listed under `deleted_files` (with its previously indexed symbols under `deleted_symbols`) in `index-delta.json`, unless it is a test file and `--include-tests` was not passed (section 6.1).
   3. Mapped via the citation index to every doc section that cited the deleted file or its symbols, adding those sections to `impacted-sections.json`.
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
@@ -346,7 +359,7 @@ arch-indexer toolchain status --repo <path>
 arch-indexer index <repo> \
   [--offline] [--fetch-runtime] [--strict-tier1] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
-  [--unit-timeout-sec 300] [--chunk-files 250] \
+  [--unit-timeout-sec 300] [--chunk-files 250] [--max-parallel-units 1] \
   [--docs-dir docs] [--auto-relocate-citations] [--include-tests] \
   [--module-depth N] [--cache-dir <dir>] \
   [--maven-arg=<arg>]... [--maven-online] [--maven-reactor]
