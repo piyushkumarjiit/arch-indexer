@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { readOptionalOverlays } from "../src/data/chunks";
 import { capNodesForView, MAX_DRAWN_NODES } from "../src/data/layers";
-import type { OverviewData, PartChunk } from "../src/types/bundle";
+import type { ChunkFlow, OverviewData, PartChunk } from "../src/types/bundle";
 import {
   ChangeBadge,
   collectChangeItems,
@@ -20,6 +20,7 @@ import {
   buildFileGraph,
   buildGroupGraph,
   buildOverviewGraph,
+  buildPartGraph,
   buildSymbolGraph,
 } from "../src/views/viewGraphs";
 
@@ -57,6 +58,113 @@ describe("300-node cap, view rules, and optional overlays", () => {
     window.__ARCH_RUNTIME__ = undefined;
     window.__ARCH_DESCRIPTIONS__ = undefined;
     window.__ARCH_DATAFLOW__ = undefined;
+  });
+
+  it("highlights the view entities that contain active flow steps at every level", () => {
+    const { overview, chunks } = loadBundle(FQD_DIR);
+    const flow = chunks["part:server"].flows.find(
+      (f) => f.id === "flow:ep:GET:/api/accounts#1",
+    )!;
+    const flowOpts = {
+      overview,
+      chunks,
+      layers: DEFAULT_LAYERS,
+      exactOnly: false,
+      runtime: null,
+      dataflow: null,
+      activeFlow: flow,
+      flowStepIndex: 0,
+    };
+
+    const overviewNodes = new Map(
+      buildOverviewGraph(flowOpts).nodes.map((n) => [n.id, n]),
+    );
+    expect(overviewNodes.get("part:server")?.highlighted).toBe(true);
+    expect(overviewNodes.get("ds:sqlite")?.highlighted).toBe(true);
+    expect(overviewNodes.get("part:web")?.dimmed).toBe(true);
+
+    const partNodes = new Map(
+      buildPartGraph("part:server", flowOpts).nodes.map((n) => [n.id, n]),
+    );
+    expect(partNodes.get("mod:server")?.isCurrentStep).toBe(true);
+    expect(partNodes.get("ds:sqlite")?.highlighted).toBe(true);
+    expect(partNodes.get("ext:http")?.dimmed).toBe(true);
+
+    const groupNodes = new Map(
+      buildGroupGraph("part:server", "mod:server", null, flowOpts).nodes.map((n) => [n.id, n]),
+    );
+    expect(groupNodes.get("file:server/src/app.ts")?.isCurrentStep).toBe(true);
+    expect(groupNodes.get("file:server/src/store.ts")?.highlighted).toBe(true);
+    expect(groupNodes.get("ds:sqlite")?.highlighted).toBe(true);
+    expect(groupNodes.get("file:server/src/upstream.ts")?.dimmed).toBe(true);
+
+    const fileNodes = new Map(
+      buildFileGraph("part:server", "mod:server", "server/src/app.ts", flowOpts).nodes.map(
+        (n) => [n.id, n],
+      ),
+    );
+    expect(fileNodes.get("ep:GET:/api/accounts")?.isCurrentStep).toBe(true);
+    expect(fileNodes.get("sym:server.Store.listAccounts")?.highlighted).toBe(true);
+    expect(fileNodes.get("sym:server.fetchProviderQuota")?.dimmed).toBe(true);
+
+    const symbolNodes = new Map(
+      buildSymbolGraph("part:server", "ep:GET:/api/accounts", flowOpts).nodes.map((n) => [
+        n.id,
+        n,
+      ]),
+    );
+    expect(symbolNodes.get("ep:GET:/api/accounts")?.isCurrentStep).toBe(true);
+    expect(symbolNodes.get("ds:sqlite")?.highlighted).toBe(true);
+    expect(symbolNodes.get("sym:server.fetchProviderQuota")?.dimmed).toBe(true);
+  });
+
+  it("maps flow steps through their owning module instead of by substring id", () => {
+    const { overview, chunks } = loadBundle(FQD_DIR);
+    const chunk = chunks["part:server"];
+    overview.groups.push({
+      id: "web",
+      name: "web",
+      part_id: "part:server",
+      path: "web",
+      language: "typescript",
+      tier: "scip",
+      counts: { files: 1 },
+    });
+    chunk.nodes.push({
+      id: "ep:web-admin:login",
+      kind: "entrypoint",
+      label: "login",
+      module_id: "mod:server",
+      file: "server/src/app.ts",
+      line: 1,
+      tier: "scip",
+      confidence: "exact",
+      evidence: [{ file: "server/src/app.ts", line: 1, source: "scip" }],
+    });
+    const flow: ChunkFlow = {
+      id: "flow:login",
+      entry_id: "ep:web-admin:login",
+      steps: [
+        { node_id: "ep:web-admin:login", edge_kind: null, file: "server/src/app.ts", line: 1 },
+      ],
+      ends_at: "ep:web-admin:login",
+      end_reason: "no-boundary-detected",
+    };
+
+    const nodes = new Map(
+      buildPartGraph("part:server", {
+        overview,
+        chunks,
+        layers: DEFAULT_LAYERS,
+        exactOnly: false,
+        runtime: null,
+        dataflow: null,
+        activeFlow: flow,
+        flowStepIndex: 0,
+      }).nodes.map((n) => [n.id, n]),
+    );
+    expect(nodes.get("mod:server")?.highlighted).toBe(true);
+    expect(nodes.get("web")?.dimmed).toBe(true);
   });
 
   it("enforces the 300-node hard cap and folds excess nodes into +N", () => {

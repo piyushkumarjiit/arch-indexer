@@ -70,27 +70,32 @@ function mergeEdgeIntoMap(
       : existing.kinds.join(", ");
 }
 
+type FlowStepResolver = (nodeId: string) => string | undefined;
+
 function applyFlowDimming(
   nodes: ViewNodeData[],
   edges: ViewEdgeData[],
   activeFlow: ChunkFlow | null,
   flowStepIndex: number,
+  resolveStepNode: FlowStepResolver,
 ): void {
   if (!activeFlow || activeFlow.steps.length === 0) return;
-  const stepNodeIds = new Set(activeFlow.steps.map((s) => s.node_id));
+  const stepEntityIds = activeFlow.steps.map((step) => resolveStepNode(step.node_id));
+  const stepNodeIds = new Set(stepEntityIds.filter((id): id is string => id !== undefined));
   const currentStepId =
-    activeFlow.steps[Math.max(0, Math.min(activeFlow.steps.length - 1, flowStepIndex))]?.node_id;
+    stepEntityIds[Math.max(0, Math.min(stepEntityIds.length - 1, flowStepIndex))];
 
   const stepEdges = new Set<string>();
-  for (let i = 0; i < activeFlow.steps.length - 1; i++) {
-    stepEdges.add(`${activeFlow.steps[i].node_id}->${activeFlow.steps[i + 1].node_id}`);
+  for (let i = 0; i < stepEntityIds.length - 1; i++) {
+    const source = stepEntityIds[i];
+    const target = stepEntityIds[i + 1];
+    if (source !== undefined && target !== undefined && source !== target) {
+      stepEdges.add(`${source}->${target}`);
+    }
   }
 
   for (const n of nodes) {
-    const inFlow =
-      stepNodeIds.has(n.id) ||
-      (n.partId !== undefined &&
-        activeFlow.steps.some((s) => s.node_id === n.id || s.node_id.includes(n.id)));
+    const inFlow = stepNodeIds.has(n.id);
     n.isCurrentStep = n.id === currentStepId;
     n.highlighted = inFlow;
     n.dimmed = !inFlow;
@@ -219,7 +224,10 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
     }
   }
 
-  applyFlowDimming(nodes, visibleEdges, activeFlow, flowStepIndex);
+  const flowPartId = overview.flow_index.find((flow) => flow.id === activeFlow?.id)?.part_id;
+  applyFlowDimming(nodes, visibleEdges, activeFlow, flowStepIndex, (nodeId) =>
+    nodeIds.has(nodeId) ? nodeId : flowPartId,
+  );
   const capped = capNodesForView(nodes, visibleEdges, "overview");
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -228,7 +236,7 @@ export function buildPartGraph(
   partId: string,
   opts: ViewBuildOptions,
 ): ViewGraphInput {
-  const { overview, layers, exactOnly, runtime, activeFlow, flowStepIndex } = opts;
+  const { overview, chunks, layers, exactOnly, runtime, activeFlow, flowStepIndex } = opts;
   const partGroups = overview.groups.filter((g) => g.part_id === partId);
   const insideGroupIds = new Set(partGroups.map((g) => g.id));
 
@@ -237,6 +245,10 @@ export function buildPartGraph(
   const boundaryMap = new Map(overview.boundaries.map((b) => [b.id, b]));
   const partMap = new Map(overview.parts.map((p) => [p.id, p]));
   const groupMap = new Map(overview.groups.map((g) => [g.id, g]));
+  const stepNodeModules = new Map<string, string>();
+  for (const chunkNode of chunks[partId]?.nodes ?? []) {
+    stepNodeModules.set(chunkNode.id, chunkNode.module_id);
+  }
 
   // Inside band (partition 1)
   for (const grp of partGroups) {
@@ -359,7 +371,11 @@ export function buildPartGraph(
   }
 
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex);
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) => {
+    const moduleId = stepNodeModules.get(nodeId);
+    const entityId = resolveEntity(moduleId ?? nodeId);
+    return entityId !== null && nodeIds.has(entityId) ? entityId : undefined;
+  });
   const capped = capNodesForView(nodes, edges, `part:${partId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -490,7 +506,13 @@ export function buildGroupGraph(
   }
 
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex);
+  applyFlowDimming(
+    nodes,
+    edges,
+    activeFlow,
+    flowStepIndex,
+    (nodeId) => nodeFileLookup.get(nodeId) ?? (nodeIds.has(nodeId) ? nodeId : undefined),
+  );
   const capped = capNodesForView(nodes, edges, `group:${groupId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -657,7 +679,10 @@ export function buildFileGraph(
   }
 
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex);
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) => {
+    if (fileNodeMap.has(nodeId)) return keptIds.has(nodeId) ? nodeId : foldId;
+    return nodeIds.has(nodeId) ? nodeId : undefined;
+  });
   const capped = capNodesForView(nodes, edges, `file:${filePath}`);
   return {
     nodes: capped.nodes,
@@ -778,7 +803,9 @@ export function buildSymbolGraph(
   }
 
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex);
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) =>
+    nodeIds.has(nodeId) ? nodeId : undefined,
+  );
   const capped = capNodesForView(nodes, edges, `symbol:${symbolId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
