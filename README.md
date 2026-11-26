@@ -20,7 +20,7 @@ Querying, graphing, assembly and validation run offline; indexing runs toolchain
 ## Install and usage
 
 ```bash
-pip install -e .   # add "[dev]" to also install pytest and ruff
+pip install -e .   # add "[dev]" to also install pytest, pytest-xdist and ruff
 
 # Toolchain management
 arch-indexer toolchain status --repo /path/to/repo
