@@ -41,7 +41,7 @@ When network access is available, install required language indexers into the lo
 ```bash
 arch-indexer toolchain ensure --repo <repo>
 ```
-*Note: toolchain installation is the only operation permitted network access; it happens here, and also automatically inside `index` unless `--offline` is passed (step 1b runs `--offline`, so no network access occurs there). Optional status inspection: `arch-indexer toolchain status --repo <repo>`, which reports the host Maven version against the repository's `RequireMavenVersion` range and the pinned version. When the host is below the repo requirement, `toolchain ensure --fetch-runtime` fetches the pinned portable Maven and indexing uses it.*
+*Note: network access is limited to toolchain installation/priming and the explicit `--maven-online` flag (spec §1). Ensure runs here and automatically inside `index` unless `--offline` is passed; step 1b runs `--offline`, so no network access occurs there. Optional status inspection: `arch-indexer toolchain status --repo <repo>`, which reports the host Maven version against the repository's `RequireMavenVersion` range and the pinned version. When the host is below the repo requirement, `toolchain ensure --fetch-runtime` fetches the pinned portable Maven and indexing uses it.*
 
 *Java/Maven prerequisite: scip-java builds one module directory at a time in Maven offline mode. Prime the local repository once, online, with `arch-indexer toolchain prime --repo <repo>` (it runs the repository's resolved Maven with `-B -DskipTests clean install`, which also fetches `maven-clean-plugin`) so sibling-module dependencies resolve; a cold local repository otherwise forces every Java unit to Tier 2. `--fetch-runtime`, `--cache-dir` and repeatable `--maven-arg=<arg>` are accepted.*
 
