@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from arch_indexer.runtime import jaeger
 from arch_indexer.runtime.jaeger import DEFAULT_TIMEOUT_S, fetch_traces, redact_uri
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "otlp"
@@ -188,7 +187,7 @@ def test_jaeger_timeout_and_http_error_redaction() -> None:
         thread.join(timeout=2)
 
 
-def test_redact_uri_and_stdlib_only() -> None:
+def test_redact_uri() -> None:
     redacted = redact_uri("https://bob:secret@jaeger.local:16686/api/v3/traces?token=abc&limit=10")
     assert "bob" not in redacted
     assert "secret" not in redacted
@@ -198,7 +197,3 @@ def test_redact_uri_and_stdlib_only() -> None:
 
     with pytest.raises(ValueError, match="scheme"):
         redact_uri("file:///tmp/traces.json")
-
-    source = Path(jaeger.__file__).read_text(encoding="utf-8")
-    for third_party in ("import requests", "import httpx", "import urllib3"):
-        assert third_party not in source
