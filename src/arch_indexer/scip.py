@@ -1521,6 +1521,13 @@ def _parse_scip_payload(
                 tier2_kind = (tier2_meta or {}).get("kind")
                 if kind == "variable" and tier2_kind in ("function", "method"):
                     kind = tier2_kind
+                # Tier 2 span columns only describe this symbol when both agree on the lines.
+                span_start_col: int | None = None
+                span_end_col: int | None = None
+                if tier2_meta and tier2_meta.get("start_line") == start_line:
+                    span_start_col = tier2_meta.get("start_col")
+                    if tier2_meta.get("end_line") == enc_end:
+                        span_end_col = tier2_meta.get("end_col")
 
                 symbols.append(
                     {
@@ -1533,6 +1540,9 @@ def _parse_scip_payload(
                         "body_sha256": body_sha256,
                         "visibility": (tier2_meta or {}).get("visibility"),
                         "decorators_json": (tier2_meta or {}).get("decorators_json"),
+                        "start_col": span_start_col,
+                        "end_col": span_end_col,
+                        "docstring": (tier2_meta or {}).get("docstring"),
                     }
                 )
             else:
@@ -1727,4 +1737,5 @@ def _parse_scip_payload(
         references=references,
         entrypoints=aligned_entrypoints,
         infra_artifacts=[],
+        facts=list(tier2_result.facts) if tier2_result else [],
     )

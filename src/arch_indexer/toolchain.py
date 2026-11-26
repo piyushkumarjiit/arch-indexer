@@ -1335,3 +1335,55 @@ def ensure_toolchain(
         "runtimes": runtime_messages,
         "cache_dir": str(c_dir),
     }
+
+
+def _maven_launcher(
+    repo: Path, cache_dir: Path, fetch_runtime: bool
+) -> tuple[list[str], dict[str, str]]:
+    """The repo's resolved Maven command and subprocess env (host or portable)."""
+    runtimes, runtime, _messages = _prepare_java_runtime(
+        cache_dir, fetch_runtime=fetch_runtime, maven_repo=True, repo_path=repo
+    )
+    if not runtimes["java"].available:
+        raise RuntimeError(f"Java runtime unavailable: {runtimes['java'].message}")
+    if not runtimes["mvn"].available:
+        raise RuntimeError(f"Maven runtime unavailable: {runtimes['mvn'].message}")
+    env = dict(os.environ)
+    env.update(runtime.env)
+    return [runtime.mvn_cmd or "mvn"], env
+
+
+def prime_toolchain(
+    repo_path: str | Path,
+    cache_dir: str | Path | None = None,
+    fetch_runtime: bool = False,
+    maven_args: list[str] | None = None,
+    timeout_sec: int = 3600,
+) -> dict[str, Any]:
+    """Prime the local Maven repository so a later ``index --offline`` can build.
+
+    Runs the repository's resolved Maven (host or portable, as ``toolchain status``
+    picks) online with ``-B -DskipTests clean install``. That downloads
+    ``maven-clean-plugin`` and installs sibling modules, so the offline
+    ``clean compile -o`` run no longer fails on a cold local repository.
+    """
+    repo = Path(repo_path).resolve()
+    if not (repo / "pom.xml").is_file():
+        raise ValueError(f"No pom.xml at the root of {repo}; nothing to prime")
+    c_dir = get_cache_dir(cache_dir)
+    mvn_cmd, env = _maven_launcher(repo, c_dir, fetch_runtime)
+    argv = [*mvn_cmd, "-B", "-DskipTests", "clean", "install", *(maven_args or [])]
+    proc = subprocess.run(
+        argv,
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+        check=False,
+    )
+    return {
+        "argv": argv,
+        "returncode": proc.returncode,
+        "output": (proc.stdout or "") + (proc.stderr or ""),
+    }

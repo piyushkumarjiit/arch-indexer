@@ -222,6 +222,71 @@
     const dirMap = new Map();
     const fileMap = new Map();
 
+    // Create (once) the directory and file containers that hold a file under a module.
+    function ensureFile(modId, filePath) {
+      const modNode = moduleMap.get(modId);
+      modNode.files.add(filePath);
+
+      const dirPath = getDirectory(filePath) || modNode.path || ".";
+      // Scope the directory id by module: several modules can share one directory (for
+      // example every src/services/*.ts file), and a graph-wide `dir:<path>` id would let
+      // the first module claim the directory, leaving the others with no drill-down.
+      const dirId = `dir:${modId}:${dirPath}`;
+      const fileId = `file:${filePath}`;
+
+      // Create Directory (file group) if not exists
+      if (!dirMap.has(dirId)) {
+        const dirLabel = getBasename(dirPath) || dirPath;
+        const created = {
+          id: dirId,
+          level: "file_group",
+          kind: "file_group",
+          label: dirLabel + "/",
+          fullPath: dirPath,
+          moduleId: modId,
+          fileCount: 0,
+          symbolCount: 0,
+          children: [], // will contain file IDs
+          files: new Set(),
+        };
+        dirMap.set(dirId, created);
+        nodeLookup.set(dirId, created);
+        modNode.children.push(dirId);
+        ancestorMap.set(dirId, [
+          { level: "system", id: "system", label: systemNode.label },
+          { level: "module", id: modId, label: modNode.label },
+          { level: "file_group", id: dirId, label: created.label },
+        ]);
+      }
+      const dirNode = dirMap.get(dirId);
+      dirNode.files.add(filePath);
+
+      // Create File node if not exists
+      if (!fileMap.has(fileId)) {
+        const created = {
+          id: fileId,
+          level: "file",
+          kind: "file",
+          label: getBasename(filePath),
+          filePath: filePath,
+          dirId: dirId,
+          moduleId: modId,
+          symbolCount: 0,
+          children: [], // will contain leaf symbol IDs
+        };
+        fileMap.set(fileId, created);
+        nodeLookup.set(fileId, created);
+        dirNode.children.push(fileId);
+        ancestorMap.set(fileId, [
+          { level: "system", id: "system", label: systemNode.label },
+          { level: "module", id: modId, label: modNode.label },
+          { level: "file_group", id: dirId, label: dirNode.label },
+          { level: "file", id: fileId, label: created.label },
+        ]);
+      }
+      return { dirId, fileId, dirNode, fileNodeObj: fileMap.get(fileId) };
+    }
+
     nodes.forEach((node) => {
       // Data stores or external sinks embedded in nodes array
       if (isBoundaryKind(node)) {
@@ -242,67 +307,7 @@
       const modId = resolveModuleId(node);
       const modNode = moduleMap.get(modId);
       const filePath = node.file || `unknown/${node.id}`;
-      modNode.files.add(filePath);
-
-      const dirPath = getDirectory(filePath) || modNode.path || ".";
-      // Scope the directory id by module: several modules can share one directory (for
-      // example every src/services/*.ts file), and a graph-wide `dir:<path>` id would let
-      // the first module claim the directory, leaving the others with no drill-down.
-      const dirId = `dir:${modId}:${dirPath}`;
-      const fileId = `file:${filePath}`;
-
-      // Create Directory (file group) if not exists
-      if (!dirMap.has(dirId)) {
-        const dirLabel = getBasename(dirPath) || dirPath;
-        const dirNode = {
-          id: dirId,
-          level: "file_group",
-          kind: "file_group",
-          label: dirLabel + "/",
-          fullPath: dirPath,
-          moduleId: modId,
-          fileCount: 0,
-          symbolCount: 0,
-          children: [], // will contain file IDs
-          files: new Set(),
-        };
-        dirMap.set(dirId, dirNode);
-        nodeLookup.set(dirId, dirNode);
-        modNode.children.push(dirId);
-        ancestorMap.set(dirId, [
-          { level: "system", id: "system", label: systemNode.label },
-          { level: "module", id: modId, label: modNode.label },
-          { level: "file_group", id: dirId, label: dirNode.label },
-        ]);
-      }
-      const dirNode = dirMap.get(dirId);
-      dirNode.files.add(filePath);
-
-      // Create File node if not exists
-      if (!fileMap.has(fileId)) {
-        const fileLabel = getBasename(filePath);
-        const fileNodeObj = {
-          id: fileId,
-          level: "file",
-          kind: "file",
-          label: fileLabel,
-          filePath: filePath,
-          dirId: dirId,
-          moduleId: modId,
-          symbolCount: 0,
-          children: [], // will contain leaf symbol IDs
-        };
-        fileMap.set(fileId, fileNodeObj);
-        nodeLookup.set(fileId, fileNodeObj);
-        dirNode.children.push(fileId);
-        ancestorMap.set(fileId, [
-          { level: "system", id: "system", label: systemNode.label },
-          { level: "module", id: modId, label: modNode.label },
-          { level: "file_group", id: dirId, label: dirNode.label },
-          { level: "file", id: fileId, label: fileNodeObj.label },
-        ]);
-      }
-      const fileNodeObj = fileMap.get(fileId);
+      const { dirId, fileId, dirNode, fileNodeObj } = ensureFile(modId, filePath);
 
       // 6. Leaf symbol/endpoint node
       const leafNode = {
@@ -326,6 +331,24 @@
       modNode.symbolCount++;
       dirNode.symbolCount++;
       fileNodeObj.symbolCount++;
+    });
+
+    // graph.files lists every in-scope file, so a module made only of type, empty or
+    // infra files still drills down to content (graph.json 1.2).
+    (graph.files || []).forEach((file) => {
+      const fileId = `file:${file.path}`;
+      const existing = fileMap.get(fileId);
+      const fileNodeObj = existing
+        ? existing
+        : ensureFile(
+            resolveModuleId({ module_id: file.module_id, file: file.path }),
+            file.path
+          ).fileNodeObj;
+      fileNodeObj.symbols = file.symbols || [];
+      fileNodeObj.isInfra = Boolean(file.is_infra);
+      fileNodeObj.language = file.language;
+      fileNodeObj.tier = file.tier;
+      fileNodeObj.loc = file.loc;
     });
 
     // Update file counts on modules and directories

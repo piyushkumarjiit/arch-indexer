@@ -19,6 +19,9 @@ from arch_indexer.config import (
     get_cache_dir,
     get_node_heap_mb,
 )
+from arch_indexer.facts import extract_facts
+from arch_indexer.facts.columns import LineColumns
+from arch_indexer.facts.definitions import definition_extras
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
@@ -448,7 +451,12 @@ class TypeScriptPlugin(LanguagePlugin):
             parser = self._get_parser_for_path(rel_path)
             tree = parser.parse(source_bytes)
             self._collect_definitions(
-                tree.root_node, source_bytes, rel_path, module_name, symbol_records
+                tree.root_node,
+                source_bytes,
+                rel_path,
+                module_name,
+                symbol_records,
+                columns=LineColumns(source_bytes),
             )
 
         return file_records, symbol_records
@@ -461,8 +469,15 @@ class TypeScriptPlugin(LanguagePlugin):
         scope: str,
         symbols: list[dict[str, Any]],
         is_exported: bool = False,
+        columns: LineColumns | None = None,
     ) -> None:
         """Iteratively collect classes, interfaces, methods, and functions in TS AST."""
+
+        def extras(node: Node) -> dict[str, Any]:
+            if columns is None:
+                return {}
+            return definition_extras("typescript", node, source_bytes, columns)
+
         stack: list[tuple[Node, str, bool]] = [(node, scope, is_exported)]
         while stack:
             current, scope, is_exported = stack.pop()
@@ -492,6 +507,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                 "body_sha256": body_hash,
                                 "visibility": visibility,
                                 "decorators_json": "[]",
+                                **extras(child),
                             }
                         )
                         if body is not None:
@@ -517,6 +533,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                 "body_sha256": body_hash,
                                 "visibility": "public" if is_exported else "package",
                                 "decorators_json": "[]",
+                                **extras(child),
                             }
                         )
 
@@ -540,6 +557,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                 "body_sha256": body_hash,
                                 "visibility": "public" if is_exported else "package",
                                 "decorators_json": "[]",
+                                **extras(child),
                             }
                         )
 
@@ -564,6 +582,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                 "body_sha256": body_hash,
                                 "visibility": visibility,
                                 "decorators_json": "[]",
+                                **extras(child),
                             }
                         )
 
@@ -598,6 +617,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "body_sha256": body_hash,
                                         "visibility": "public" if is_exported else "package",
                                         "decorators_json": "[]",
+                                        **extras(decl),
                                     }
                                 )
 
@@ -634,6 +654,7 @@ class TypeScriptPlugin(LanguagePlugin):
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
         entrypoints: list[dict[str, Any]] = []
+        facts: list[dict[str, Any]] = []
 
         for full_path in unit.files:
             try:
@@ -663,6 +684,7 @@ class TypeScriptPlugin(LanguagePlugin):
                 references,
                 unresolved_refs,
                 entrypoints,
+                facts,
             )
 
         return IndexResult(
@@ -678,6 +700,7 @@ class TypeScriptPlugin(LanguagePlugin):
             references=references,
             entrypoints=entrypoints,
             infra_artifacts=[],
+            facts=facts,
         )
 
     def _analyze_file(
@@ -693,6 +716,7 @@ class TypeScriptPlugin(LanguagePlugin):
         references: list[dict[str, Any]],
         unresolved_refs: list[dict[str, Any]],
         entrypoints: list[dict[str, Any]],
+        facts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Extract imports, call references, Express entrypoints, and fetch/axios callers."""
         file_imports: dict[str, str] = {}
@@ -951,3 +975,17 @@ class TypeScriptPlugin(LanguagePlugin):
                         )
 
             stack.extend(reversed(node.children))
+
+        if facts is not None:
+            facts.extend(
+                extract_facts(
+                    "typescript",
+                    rel_path,
+                    source_bytes,
+                    root,
+                    module_name,
+                    imports=file_imports,
+                    known_fqnames=known_fqnames,
+                    known_names=known_names,
+                )
+            )

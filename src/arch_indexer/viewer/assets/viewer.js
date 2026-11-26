@@ -480,13 +480,26 @@
     });
   }
 
+  // Edge kinds added in graph.json 1.2 read better with a short reason attached.
+  const EDGE_KIND_LABELS = {
+    registers: "registers (callback passed as argument)",
+    boots: "boots (application start)",
+  };
+
+  function edgeKindLabel(kind) {
+    return EDGE_KIND_LABELS[kind] || kind;
+  }
+
   function showEdgeDetails(edge) {
     const panel = document.getElementById("inspector-panel");
     const content = document.getElementById("inspector-content");
     if (!panel || !content) return;
 
     const underlying = edge.underlying || [];
-    const kinds = (edge.kinds || []).join(", ");
+    const kinds = (edge.kinds || []).map(edgeKindLabel).join(", ");
+    const confidences = Array.from(
+      new Set(underlying.map((u) => u.confidence).filter((confidence) => confidence))
+    ).sort();
     const citations = Array.from(
       new Set(
         underlying
@@ -505,6 +518,14 @@
         <span class="detail-label">Kind</span>
         <span class="detail-value">${escapeHtml(kinds)}</span>
       </div>
+      ${
+        confidences.length > 0
+          ? `<div class="detail-row">
+              <span class="detail-label">Confidence</span>
+              <span class="detail-value">${escapeHtml(confidences.join(", "))}</span>
+            </div>`
+          : ""
+      }
       <div class="detail-row">
         <span class="detail-label">Underlying Edges</span>
         <span class="detail-value">${edge.count || 1}</span>

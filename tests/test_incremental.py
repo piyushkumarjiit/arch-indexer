@@ -284,16 +284,16 @@ def test_deleting_file_and_unit_purges_every_table(tmp_path: Path):
 
 
 def test_table_driven_purge_covers_newly_registered_tables(tmp_path: Path):
-    """Tables added by later slices (facts, synthetic_symbols, etc.) purge via registry."""
+    """Tables added by later slices (a registered extra table) purge via registry."""
     db_path = tmp_path / "registry.db"
     with IndexStore(db_path) as store:
         store.conn.execute(
-            "CREATE TABLE facts (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL, kind TEXT)"
+            "CREATE TABLE edge_notes (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL, kind TEXT)"
         )
         store.conn.execute("CREATE TABLE unit_notes (unit_id TEXT PRIMARY KEY, note TEXT NOT NULL)")
         store.register_table(
             TableSpec(
-                name="facts",
+                name="edge_notes",
                 file_column="file_path",
                 columns=("id", "file_path", "kind"),
                 required_columns=frozenset({"file_path", "kind"}),
@@ -344,7 +344,7 @@ def test_table_driven_purge_covers_newly_registered_tables(tmp_path: Path):
         )
         with store.conn:
             store.conn.executemany(
-                "INSERT INTO facts (file_path, kind) VALUES (?, ?)",
+                "INSERT INTO edge_notes (file_path, kind) VALUES (?, ?)",
                 [("a/one.py", "call"), ("a/two.py", "call"), ("b/one.py", "register")],
             )
             store.conn.executemany(
@@ -354,14 +354,16 @@ def test_table_driven_purge_covers_newly_registered_tables(tmp_path: Path):
 
         store.purge_files(["a/one.py"])
         remaining_facts = [
-            r[0] for r in store.conn.execute("SELECT file_path FROM facts ORDER BY id").fetchall()
+            r[0]
+            for r in store.conn.execute("SELECT file_path FROM edge_notes ORDER BY id").fetchall()
         ]
         assert remaining_facts == ["a/two.py", "b/one.py"]
 
         purged_b = store.purge_unit("python:b")
         assert purged_b == ["b/one.py"]
         remaining_facts = [
-            r[0] for r in store.conn.execute("SELECT file_path FROM facts ORDER BY id").fetchall()
+            r[0]
+            for r in store.conn.execute("SELECT file_path FROM edge_notes ORDER BY id").fetchall()
         ]
         assert remaining_facts == ["a/two.py"]
         remaining_notes = [
