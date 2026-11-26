@@ -139,5 +139,5 @@ In development. The toolchain management slice (`toolchain status`, `toolchain e
 arch-indexer is licensed under the Functional Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2). See [LICENSE](LICENSE).
 
 - **Permitted:** using, copying, modifying, creating derivative works, and redistributing the software for any purpose other than a Competing Use, including internal use, non-commercial education and research, and professional services delivered to a licensee under these terms.
-- **Not permitted:** making the software available to others in a commercial product or service that substitutes for it, substitutes for another product or service the licensor offers using it, or offers substantially similar functionality.
+- **Not permitted:** making the software available to others in a commercial product or service that substitutes for it, substitutes for another product or service the licensor already offers using it, or offers the same or substantially similar functionality.
 - **Future license:** each release converts to the Apache License, Version 2.0 two years after the date the licensor makes that release available. From that date, that release may be used under Apache-2.0.
