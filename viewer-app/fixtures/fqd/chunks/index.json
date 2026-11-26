@@ -1,0 +1,22 @@
+{
+  "part:server": {
+    "file": "server.js",
+    "sha256": "899ff50876b3245cc9f48f3a1aa1008269ace9293c1b6068f70fb9beb42159e4",
+    "bytes": 6475
+  },
+  "part:web": {
+    "file": "web.js",
+    "sha256": "877b5d350fe8221bde9e2bf2858c4c150e2e70beeffc1eb9a14978f0376c6bee",
+    "bytes": 2043
+  },
+  "part:shared": {
+    "file": "shared.js",
+    "sha256": "c69c5ca8cb3fd272e2b790739dcf1662d7ede4ad9acfe54db2a3d6b5bc16119d",
+    "bytes": 577
+  },
+  "part:scripts": {
+    "file": "scripts.js",
+    "sha256": "5dc313cd1da3373b5c375a0cfb65e2e96b834e9a6c1272b8ddb72829fa344451",
+    "bytes": 1210
+  }
+}

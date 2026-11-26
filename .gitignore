@@ -46,6 +46,13 @@ htmlcov/
 # Cache directories
 .cache/
 
+# Viewer app dependencies
+viewer-app/node_modules/
+
+# Keep pre-built viewer v2 assets tracked (< 3 MB)
+!src/arch_indexer/viewer/dist/
+!src/arch_indexer/viewer/dist/**
+
 # Editor & OS files
 .DS_Store
 .idea/
