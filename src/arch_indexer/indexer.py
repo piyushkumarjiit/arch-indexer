@@ -497,6 +497,9 @@ def _promote_impacted_dependents(
     reindexed_paths: set[str] = set()
     python_router_mount_changed = False
 
+    # A file purged from the index (deleted, moved out of its unit, or gone with its unit)
+    # still owns symbols dependents referenced, and a removed Python file may have unmounted
+    # a router, so treat both exactly like a symbol disappearing from a re-indexed file.
     indexed_paths = {f["path"] for plan in plans for f in plan.file_records}
     for rel in sorted(set(prev_files) - indexed_paths):
         removed_fqs.update(s["fqname"] for s in prev_symbols.get(rel, ()))
