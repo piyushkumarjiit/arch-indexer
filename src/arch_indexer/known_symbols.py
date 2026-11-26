@@ -76,6 +76,12 @@ DATA_STORE_CLIENT_SYMBOLS: tuple[str, ...] = (
     "fs.readFileSync",
     "Path.write_text",
     "Path.read_text",
+    # Vector stores
+    "FAISS.load_local",
+    "FAISS.save_local",
+    "FAISS.from_documents",
+    "FAISS.from_texts",
+    "FAISS.similarity_search",
 )
 
 EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
@@ -106,6 +112,22 @@ EXTERNAL_SINK_CLIENT_SYMBOLS: tuple[str, ...] = (
     "HttpClient",
     "OkHttpClient",
     "URL.openConnection",
+    "java.net.http.HttpClient.send",
+    "java.net.http.HttpClient.sendAsync",
+    "RestClient.get",
+    "RestClient.post",
+    "RestClient.put",
+    "RestClient.delete",
+    "RestClient.exchange",
+    "WebClient.get",
+    "WebClient.post",
+    "WebClient.put",
+    "WebClient.delete",
+    # LLM clients
+    "ollama.chat",
+    "ollama.generate",
+    "ChatOllama.invoke",
+    "OllamaEmbeddings.embed_documents",
     # Mail and object stores
     "smtplib.SMTP",
     "sendgrid",

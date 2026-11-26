@@ -639,6 +639,8 @@
         reachableEdges: [],
         paths: [],
         steps: [],
+        endReason: null,
+        endsAt: null,
       };
     }
 
@@ -663,6 +665,7 @@
     const visitedForward = new Set([entrypointId]);
     const parentMap = new Map(); // childId -> { from: parentId, edge }
     const queue = [entrypointId];
+    const depthMap = new Map([[entrypointId, 0]]);
     const reachedSinks = [];
     const reachedSinkIds = new Set();
 
@@ -683,6 +686,7 @@
         if (!visitedForward.has(e.target)) {
           visitedForward.add(e.target);
           parentMap.set(e.target, { from: current, edge: e });
+          depthMap.set(e.target, depthMap.get(current) + 1);
           queue.push(e.target);
         }
       }
@@ -757,7 +761,39 @@
       });
     }
 
-    const primaryPath = paths.length > 0 ? paths[0] : [entrypointId];
+    const MAX_PARTIAL_HOPS = 12;
+    let primaryPath;
+    let endReason;
+    if (paths.length > 0) {
+      primaryPath = paths[0];
+      endReason = "boundary";
+    } else if (visitedForward.size === 1) {
+      primaryPath = [entrypointId];
+      endReason = "no-outgoing-edges";
+    } else {
+      // No boundary reached: show the longest path (deepest BFS node, ties to smaller id).
+      let deepest = entrypointId;
+      depthMap.forEach((depth, id) => {
+        const best = depthMap.get(deepest);
+        if (depth > best || (depth === best && id < deepest)) deepest = id;
+      });
+      primaryPath = [];
+      let curr = deepest;
+      while (curr) {
+        primaryPath.push(curr);
+        if (curr === entrypointId) break;
+        const p = parentMap.get(curr);
+        curr = p ? p.from : null;
+      }
+      primaryPath.reverse();
+      if (depthMap.get(deepest) > MAX_PARTIAL_HOPS) {
+        primaryPath = primaryPath.slice(0, MAX_PARTIAL_HOPS + 1);
+        endReason = "depth-cap";
+      } else {
+        endReason = "no-boundary-detected";
+      }
+    }
+    const endsAt = primaryPath[primaryPath.length - 1];
 
     // 4. Build step walkthrough
     const steps = [];
@@ -799,6 +835,8 @@
       reachableEdges: Array.from(reachableEdgesSet).sort(),
       paths,
       steps,
+      endReason,
+      endsAt,
     };
   }
 

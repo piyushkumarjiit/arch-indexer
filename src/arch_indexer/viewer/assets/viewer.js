@@ -570,6 +570,18 @@
           ? ` Auth: ${currentStep.auth.join(", ")}`
           : "";
       stepText.textContent = `Step ${activeTraceStep + 1} of ${steps.length}: ${currentStep.label} (${currentStep.kind}) ${currentStep.fileLine ? `[${currentStep.fileLine}]` : ""}${authText}`;
+      const reason = state.trace.endReason;
+      if (reason && reason !== "boundary" && activeTraceStep === steps.length - 1) {
+        const endNode = steps.find((step) => step.nodeId === state.trace.endsAt) || currentStep;
+        const endLabel = endNode.label;
+        const suffix =
+          reason === "depth-cap"
+            ? `depth cap reached at ${endLabel}`
+            : reason === "no-outgoing-edges"
+              ? "no outgoing calls"
+              : `no store or service detected after ${endLabel}`;
+        stepText.textContent += ` — ends here: ${suffix}`;
+      }
     }
 
     bar.classList.add("active");

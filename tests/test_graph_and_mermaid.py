@@ -79,7 +79,7 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
     assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
 
     graph = load_graph(repo / "docs" / "graph.json")
-    assert graph["schema_version"] == "1.0"
+    assert graph["schema_version"] == "1.1"
     assert graph["repo_name"] == "python_routes"
     assert isinstance(graph["generated_at_commit"], (str, type(None)))
     assert set(graph["tier_summary"]) == {
