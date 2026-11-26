@@ -337,11 +337,13 @@
     // infra files still drills down to content (graph.json 1.2).
     (graph.files || []).forEach((file) => {
       const fileId = `file:${file.path}`;
-      if (fileMap.has(fileId)) {
-        return;
-      }
-      const modId = resolveModuleId({ module_id: file.module_id, file: file.path });
-      const { fileNodeObj } = ensureFile(modId, file.path);
+      const existing = fileMap.get(fileId);
+      const fileNodeObj = existing
+        ? existing
+        : ensureFile(
+            resolveModuleId({ module_id: file.module_id, file: file.path }),
+            file.path
+          ).fileNodeObj;
       fileNodeObj.symbols = file.symbols || [];
       fileNodeObj.isInfra = Boolean(file.is_infra);
       fileNodeObj.language = file.language;

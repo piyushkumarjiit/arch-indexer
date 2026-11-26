@@ -575,7 +575,11 @@ def _boots_edges(
             matches = [
                 (row, node)
                 for row, node in triggers
-                if (file_info.get(row["file_path"], {}).get("module") or "").startswith(package)
+                if (
+                    (module := file_info.get(row["file_path"], {}).get("module") or "")
+                    == package
+                    or module.startswith(f"{package}.")
+                )
             ]
         for source in sources:
             for _row, node in matches:

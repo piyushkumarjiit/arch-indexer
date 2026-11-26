@@ -162,3 +162,82 @@ def test_variable_receiver_run_and_scan_base_packages_boot_sibling_package(
     graph = load_graph(repo / "docs" / "graph.json")
     boots = [e for e in graph["edges"] if e["kind"] == "boots"]
     assert [e["target"] for e in boots] == ["ep:scheduled:refresh"]
+
+
+REACTOR_APP = """package demo.app;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class ReactorApp {
+    public static void main(String[] args) {
+        SpringApplication.run(ReactorApp.class, args);
+    }
+}
+"""
+
+REACTOR_JOBS = """package demo.app.jobs;
+
+import org.springframework.scheduling.annotation.Scheduled;
+
+public class Jobs {
+    @Scheduled(fixedRate = 1000)
+    public void refreshJob() {}
+}
+"""
+
+REACTOR_APPLE = """package demo.apple;
+
+import org.springframework.scheduling.annotation.Scheduled;
+
+public class Billing {
+    @Scheduled(fixedRate = 2000)
+    public void nightly() {}
+}
+"""
+
+
+def test_maven_reactor_fallback_boots_only_segment_delimited_subpackages(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    for module, rel, text in (
+        ("app", "demo/app/ReactorApp.java", REACTOR_APP),
+        ("billing", "demo/app/jobs/Jobs.java", REACTOR_JOBS),
+        ("billing", "demo/apple/Billing.java", REACTOR_APPLE),
+    ):
+        target = repo / module / "src/main/java" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    for module in ("app", "billing"):
+        (repo / module / "pom.xml").write_text(
+            f"<project><artifactId>{module}</artifactId></project>"
+        )
+    main(
+        [
+            "index",
+            str(repo),
+            "--offline",
+            "--force-full",
+            "--cache-dir",
+            str(tmp_path / "c"),
+        ]
+    )
+    graph = load_graph(repo / "docs" / "graph.json")
+    scheduled = {
+        n.get("symbol") for n in graph["nodes"] if n["metadata"].get("kind") == "scheduled"
+    }
+    assert scheduled == {"refreshJob", "nightly"}
+    main_node = next(
+        n
+        for n in graph["nodes"]
+        if n["metadata"].get("kind") == "process" and n["symbol"] == "main"
+    )
+    by_symbol = {n["id"]: n["symbol"] for n in graph["nodes"]}
+    booted = {
+        by_symbol[e["target"]]
+        for e in graph["edges"]
+        if e["source"] == main_node["id"] and e["kind"] == "boots"
+    }
+    assert booted == {"refreshJob"}

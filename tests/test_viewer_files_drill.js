@@ -29,7 +29,15 @@ function graph() {
     data_stores: [],
     external_sinks: [],
     files: [
-      { path: "src/services/run.ts", module_id: "mod:services", symbols: [], is_infra: false },
+      {
+        path: "src/services/run.ts",
+        module_id: "mod:services",
+        symbols: [{ name: "run", kind: "service", line: 1 }],
+        is_infra: false,
+        language: "typescript",
+        tier: "tree-sitter",
+        loc: 42,
+      },
       { path: "src/models/types.ts", module_id: "mod:models", symbols: [{ name: "T", kind: "interface", line: 1 }], is_infra: false },
       { path: "src/models/index.ts", module_id: "mod:models", symbols: [], is_infra: false },
       { path: "deploy/Dockerfile", module_id: "mod:infra", symbols: [], is_infra: true, language: "infra" },
@@ -74,6 +82,12 @@ function runTests() {
   const serviceFiles = getHierarchyScope(hierarchy, "file_group", serviceDir[0].id).nodes;
   assert.strictEqual(serviceFiles.length, 1);
   assert.strictEqual(serviceFiles[0].symbolCount, 1);
+  // A file that already has service nodes still carries its graph.files metadata.
+  assert.deepStrictEqual(serviceFiles[0].symbols, [{ name: "run", kind: "service", line: 1 }]);
+  assert.strictEqual(serviceFiles[0].language, "typescript");
+  assert.strictEqual(serviceFiles[0].tier, "tree-sitter");
+  assert.strictEqual(serviceFiles[0].loc, 42);
+  assert.strictEqual(serviceFiles[0].isInfra, false);
 
   // Older graphs without files[] still build.
   const legacy = graph();
