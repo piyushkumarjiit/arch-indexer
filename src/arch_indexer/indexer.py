@@ -773,13 +773,13 @@ def run_index(
         for idx, plan in enumerate(unit_plans):
             if plan.action == "skip":
                 continue
+            store.purge_files(plan.changed_rel_paths)
 
             if plan.action == "partial_tier2":
                 prev_u = prev_units[plan.unit.unit_id]
                 unit_reason = prev_u.get("fallback_reason")
                 unit_message = prev_u.get("message") or ""
                 if plan.changed_rel_paths:
-                    store.purge_files(plan.changed_rel_paths)
                     sub_unit = IndexUnit(
                         unit_id=plan.unit.unit_id,
                         name=plan.unit.name,
@@ -843,8 +843,6 @@ def run_index(
                         plan.unit, unit_reason or "unknown", unit_message, len(res.files)
                     )
 
-            if incremental_available and plan.unit.unit_id in prev_units:
-                store.purge_unit(plan.unit.unit_id)
             store.insert_unit_data(
                 unit_id=plan.unit.unit_id,
                 files=res.files,

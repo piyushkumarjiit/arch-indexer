@@ -574,3 +574,52 @@ def test_units_hash_sensitivity(tmp_path: Path):
     (repo / "alpha" / "pom.xml").write_text("<project><artifactId>alpha-v2</artifactId></project>")
     assert manifest_sha256(plugin, alpha) != m1
     assert files_sha256(alpha) == f1
+
+
+def test_file_moving_to_a_new_unit_purges_stale_rows(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "web").mkdir(parents=True)
+    (repo / "app.ts").write_text("export function boot(): void {}\n", encoding="utf-8")
+    (repo / "web" / "index.ts").write_text(
+        "export function render(): string { return 'ok'; }\n", encoding="utf-8"
+    )
+    cache = tmp_path / "cache"
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+    db_path = RepoCachePaths.from_repo(repo, cache_dir_override=cache).index_db
+
+    # A new tsconfig gives web/index.ts its own unit, planned before typescript:root (which
+    # still owns app.ts), so the file changes unit without the old unit disappearing.
+    (repo / "web" / "tsconfig.json").write_text("{}", encoding="utf-8")
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+
+    full_cache = tmp_path / "full_cache"
+    assert (
+        run_index(repo, offline=True, force_full=True, cache_dir=full_cache) == EXIT_DELTA_DETECTED
+    )
+    full_db_path = RepoCachePaths.from_repo(repo, cache_dir_override=full_cache).index_db
+
+    def rows(db: Path, table: str, column: str, value: str) -> list[tuple]:
+        with sqlite3.connect(db) as conn:
+            columns = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")') if r[1] != "id"]
+            selected = ", ".join(f'"{c}"' for c in columns)
+            return conn.execute(
+                f'SELECT {selected} FROM "{table}" WHERE "{column}" = ? ORDER BY rowid',
+                (value,),
+            ).fetchall()
+
+    with sqlite3.connect(db_path) as conn:
+        owner = conn.execute(
+            "SELECT unit_id FROM files WHERE path = ?", ("web/index.ts",)
+        ).fetchone()[0]
+    assert owner == "typescript:web"
+
+    for table, column in (
+        ("files", "path"),
+        ("symbols", "file_path"),
+        ("references", "file_path"),
+        ("entrypoints", "file_path"),
+        ("unresolved_refs", "file_path"),
+    ):
+        assert rows(db_path, table, column, "web/index.ts") == rows(
+            full_db_path, table, column, "web/index.ts"
+        )
