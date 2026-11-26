@@ -1,0 +1,393 @@
+{
+  "schema_version": "2.0",
+  "repo_name": "fqd-sample",
+  "generated_at_commit": "c373aec",
+  "include_tests": false,
+  "tier_summary": {
+    "scip_files": 6,
+    "treesitter_files": 1,
+    "total_files": 7,
+    "excluded_test_files": 2,
+    "tier2_modules": [
+      "mod:scripts"
+    ]
+  },
+  "parts": [
+    {
+      "id": "part:server",
+      "name": "server",
+      "kind": "service",
+      "root": "server",
+      "group_ids": [
+        "mod:server"
+      ],
+      "counts": {
+        "files": 3,
+        "loc": 285,
+        "entrypoints": 3,
+        "symbols": 8
+      },
+      "evidence": [
+        {
+          "file": "server/src/app.ts",
+          "line": 12,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "id": "part:web",
+      "name": "web",
+      "kind": "ui",
+      "root": "web",
+      "group_ids": [
+        "mod:web"
+      ],
+      "counts": {
+        "files": 2,
+        "loc": 118,
+        "entrypoints": 0,
+        "symbols": 3
+      },
+      "evidence": [
+        {
+          "file": "web/src/api.ts",
+          "line": 10,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "id": "part:shared",
+      "name": "shared",
+      "kind": "library",
+      "root": "src/shared",
+      "group_ids": [
+        "mod:shared"
+      ],
+      "counts": {
+        "files": 1,
+        "loc": 42,
+        "entrypoints": 0,
+        "symbols": 1
+      },
+      "evidence": [
+        {
+          "file": "src/shared/types.ts",
+          "line": 5,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "id": "part:scripts",
+      "name": "scripts",
+      "kind": "scripts",
+      "root": "scripts",
+      "group_ids": [
+        "mod:scripts"
+      ],
+      "counts": {
+        "files": 1,
+        "loc": 60,
+        "entrypoints": 1,
+        "symbols": 1
+      },
+      "evidence": [
+        {
+          "file": "scripts/backfill_usage.ts",
+          "line": 12,
+          "source": "tree-sitter"
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "id": "mod:server",
+      "name": "server",
+      "part_id": "part:server",
+      "path": "server/src",
+      "language": "typescript",
+      "tier": "scip",
+      "tier_mix": {
+        "scip": 3
+      },
+      "counts": {
+        "files": 3,
+        "loc": 285,
+        "entrypoints": 3,
+        "symbols": 8
+      }
+    },
+    {
+      "id": "mod:web",
+      "name": "web",
+      "part_id": "part:web",
+      "path": "web/src",
+      "language": "typescript",
+      "tier": "scip",
+      "tier_mix": {
+        "scip": 2
+      },
+      "counts": {
+        "files": 2,
+        "loc": 118,
+        "entrypoints": 0,
+        "symbols": 3
+      }
+    },
+    {
+      "id": "mod:shared",
+      "name": "shared",
+      "part_id": "part:shared",
+      "path": "src/shared",
+      "language": "typescript",
+      "tier": "scip",
+      "tier_mix": {
+        "scip": 1
+      },
+      "counts": {
+        "files": 1,
+        "loc": 42,
+        "entrypoints": 0,
+        "symbols": 1
+      }
+    },
+    {
+      "id": "mod:scripts",
+      "name": "scripts",
+      "part_id": "part:scripts",
+      "path": "scripts",
+      "language": "typescript",
+      "tier": "tree-sitter",
+      "tier_mix": {
+        "tree-sitter": 1
+      },
+      "counts": {
+        "files": 1,
+        "loc": 60,
+        "entrypoints": 1,
+        "symbols": 1
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "ds:sqlite",
+      "boundary": "datastore",
+      "kind": "sql",
+      "label": "SQLite",
+      "rule_id": "builtin:node:sqlite",
+      "confidence": "exact",
+      "evidence": [
+        {
+          "file": "server/src/store.ts",
+          "line": 1,
+          "source": "scip",
+          "rule_id": "builtin:node:sqlite"
+        }
+      ]
+    },
+    {
+      "id": "ext:http",
+      "boundary": "sink",
+      "kind": "http_api",
+      "label": "HTTP API",
+      "rule_id": "builtin:http.client",
+      "confidence": "exact",
+      "evidence": [
+        {
+          "file": "server/src/upstream.ts",
+          "line": 24,
+          "source": "scip",
+          "rule_id": "builtin:http.client"
+        }
+      ]
+    },
+    {
+      "id": "res:path:usage_db",
+      "boundary": "resource",
+      "kind": "path",
+      "label": "usage.db",
+      "rule_id": "builtin:resource-path",
+      "confidence": "exact",
+      "evidence": [
+        {
+          "file": "server/src/store.ts",
+          "line": 70,
+          "source": "rule"
+        },
+        {
+          "file": "scripts/backfill_usage.ts",
+          "line": 25,
+          "source": "tree-sitter"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "part:web",
+      "target": "part:server",
+      "kinds": {
+        "http_request": 2
+      },
+      "evidence_sample": [
+        {
+          "file": "web/src/api.ts",
+          "line": 12,
+          "source": "rule"
+        }
+      ]
+    },
+    {
+      "source": "part:web",
+      "target": "part:shared",
+      "kinds": {
+        "calls": 1
+      },
+      "evidence_sample": [
+        {
+          "file": "web/src/components/UsagePanel.tsx",
+          "line": 4,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "source": "part:server",
+      "target": "part:shared",
+      "kinds": {
+        "calls": 1
+      },
+      "evidence_sample": [
+        {
+          "file": "server/src/app.ts",
+          "line": 5,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "source": "part:server",
+      "target": "ds:sqlite",
+      "kinds": {
+        "reads": 2
+      },
+      "evidence_sample": [
+        {
+          "file": "server/src/store.ts",
+          "line": 22,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "source": "part:server",
+      "target": "ext:http",
+      "kinds": {
+        "http_request": 1
+      },
+      "evidence_sample": [
+        {
+          "file": "server/src/upstream.ts",
+          "line": 24,
+          "source": "scip"
+        }
+      ]
+    },
+    {
+      "source": "part:server",
+      "target": "res:path:usage_db",
+      "kinds": {
+        "writes": 1
+      },
+      "evidence_sample": [
+        {
+          "file": "server/src/store.ts",
+          "line": 70,
+          "source": "rule"
+        }
+      ]
+    },
+    {
+      "source": "part:scripts",
+      "target": "res:path:usage_db",
+      "kinds": {
+        "reads": 1
+      },
+      "evidence_sample": [
+        {
+          "file": "scripts/backfill_usage.ts",
+          "line": 25,
+          "source": "tree-sitter"
+        }
+      ]
+    }
+  ],
+  "flow_index": [
+    {
+      "id": "flow:ep:GET:/api/accounts#1",
+      "entry_id": "ep:GET:/api/accounts",
+      "part_id": "part:server",
+      "step_count": 3,
+      "ends_at": "ds:sqlite",
+      "end_reason": "boundary"
+    },
+    {
+      "id": "flow:ep:GET:/api/alerts#1",
+      "entry_id": "ep:GET:/api/alerts",
+      "part_id": "part:server",
+      "step_count": 3,
+      "ends_at": "ds:sqlite",
+      "end_reason": "boundary"
+    },
+    {
+      "id": "flow:ep:POST:/api/ping#1",
+      "entry_id": "ep:POST:/api/ping",
+      "part_id": "part:server",
+      "step_count": 2,
+      "ends_at": "sym:server.normalizeQuota",
+      "end_reason": "no-boundary-detected"
+    },
+    {
+      "id": "flow:ep:cli:backfill_usage#1",
+      "entry_id": "ep:cli:backfill_usage",
+      "part_id": "part:scripts",
+      "step_count": 2,
+      "ends_at": "res:path:usage_db",
+      "end_reason": "resource"
+    }
+  ],
+  "delta": {
+    "changed_files": [
+      "server/src/app.ts"
+    ],
+    "new_files": [
+      "web/src/components/UsagePanel.tsx"
+    ]
+  },
+  "chunks": {
+    "part:server": {
+      "file": "server.js",
+      "sha256": "899ff50876b3245cc9f48f3a1aa1008269ace9293c1b6068f70fb9beb42159e4",
+      "bytes": 6475
+    },
+    "part:web": {
+      "file": "web.js",
+      "sha256": "877b5d350fe8221bde9e2bf2858c4c150e2e70beeffc1eb9a14978f0376c6bee",
+      "bytes": 2043
+    },
+    "part:shared": {
+      "file": "shared.js",
+      "sha256": "c69c5ca8cb3fd272e2b790739dcf1662d7ede4ad9acfe54db2a3d6b5bc16119d",
+      "bytes": 577
+    },
+    "part:scripts": {
+      "file": "scripts.js",
+      "sha256": "5dc313cd1da3373b5c375a0cfb65e2e96b834e9a6c1272b8ddb72829fa344451",
+      "bytes": 1210
+    }
+  }
+}
