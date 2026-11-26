@@ -42,7 +42,7 @@ from arch_indexer.storage.state import (
     write_json,
 )
 from arch_indexer.store import IndexStore
-from arch_indexer.synthetic import build_synthetic_symbols
+from arch_indexer.synthetic import build_synthetic_symbols, shared_module_names
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
@@ -279,6 +279,9 @@ def run_index(
         symbols_by_language.setdefault(plugin.name, []).extend(sym_recs)
         files_by_language.setdefault(plugin.name, []).extend(file_recs)
 
+    shared_modules = shared_module_names(
+        [f for records in files_by_language.values() for f in records]
+    )
     names_by_language = {
         language: build_name_table(
             symbols_by_language.get(language, []), files_by_language.get(language, [])
@@ -404,7 +407,9 @@ def run_index(
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
                 facts=res.facts,
-                synthetic_symbols=build_synthetic_symbols(res.files, res.entrypoints),
+                synthetic_symbols=build_synthetic_symbols(
+                    res.files, res.entrypoints, shared_modules=shared_modules
+                ),
             )
             unit_tier = IndexingTier.TIER2.value if _all_files_fell_back(res) else res.tier.value
             store.insert_unit_record(

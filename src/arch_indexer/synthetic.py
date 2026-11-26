@@ -9,11 +9,18 @@ Only ``graph.py`` loads them.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from typing import Any
 
 # Languages with executable top-level code; Java has none, so it gets no <module> symbol.
 MODULE_SYMBOL_LANGUAGES = frozenset({"python", "typescript"})
 MODULE_SUFFIX = "<module>"
+
+
+def shared_module_names(files: Iterable[dict[str, Any]]) -> frozenset[str]:
+    """Module names used by more than one file across the whole index."""
+    counts = Counter(f["module"] for f in files if f.get("language") in MODULE_SYMBOL_LANGUAGES)
+    return frozenset(module for module, count in counts.items() if count > 1)
 
 
 def module_symbol_fqname(module: str, path: str, *, shared: bool = False) -> str:
@@ -23,7 +30,10 @@ def module_symbol_fqname(module: str, path: str, *, shared: bool = False) -> str
 
 
 def build_synthetic_symbols(
-    files: list[dict[str, Any]], entrypoints: list[dict[str, Any]]
+    files: list[dict[str, Any]],
+    entrypoints: list[dict[str, Any]],
+    *,
+    shared_modules: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """One ``module`` symbol per file plus a ``block`` symbol per guarded entry block.
 
@@ -31,13 +41,16 @@ def build_synthetic_symbols(
     entry resolves to it; an entry without one gets ``<module symbol>#L<line>``.
     """
     eligible = [f for f in files if f.get("language") in MODULE_SYMBOL_LANGUAGES]
-    module_counts = Counter(f["module"] for f in eligible)
+    if shared_modules is None:
+        shared_modules = shared_module_names(eligible)
     module_fq_by_path: dict[str, str] = {}
+    shared_paths: set[str] = set()
     symbols: list[dict[str, Any]] = []
     for record in sorted(eligible, key=lambda f: f["path"]):
-        fqname = module_symbol_fqname(
-            record["module"], record["path"], shared=module_counts[record["module"]] > 1
-        )
+        shared = record["module"] in shared_modules
+        if shared:
+            shared_paths.add(record["path"])
+        fqname = module_symbol_fqname(record["module"], record["path"], shared=shared)
         module_fq_by_path[record["path"]] = fqname
         symbols.append(
             {
@@ -58,11 +71,19 @@ def build_synthetic_symbols(
         path = entry["file_path"]
         if not end_line or path not in module_fq_by_path:
             continue
-        fqname = entry.get("symbol_fqname") or f"{module_fq_by_path[path]}#L{entry['line']}"
+        fqname = entry.get("symbol_fqname")
+        if fqname and path in shared_paths:
+            fqname = f"{fqname}@{path}"
+        elif not fqname:
+            fqname = f"{module_fq_by_path[path]}#L{entry['line']}"
         if (path, fqname) in seen:
             continue
         seen.add((path, fqname))
-        name = fqname.rsplit(".", 1)[-1] if "#L" not in fqname else f"block@L{entry['line']}"
+        name = (
+            fqname.rsplit("@", 1)[0].rsplit(".", 1)[-1]
+            if "#L" not in fqname
+            else f"block@L{entry['line']}"
+        )
         symbols.append(
             {
                 "fqname": fqname,
