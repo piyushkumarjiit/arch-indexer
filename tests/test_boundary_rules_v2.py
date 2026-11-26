@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from arch_indexer import scip_pb2
+from arch_indexer.graph import build_graph
 from arch_indexer.graph_rules import classify_token, classify_token_rule, edge_kind_for_token
+from arch_indexer.plugins.base import IndexUnit
+from arch_indexer.scip import ingest_scip
+from arch_indexer.store import IndexStore
 
 GITHUB = ("sink", "http_api", "github", "GitHub API")
 
@@ -79,3 +86,106 @@ def test_edge_kinds() -> None:
 
 def test_typescript_lib_global_fetch_is_http_sink() -> None:
     assert classify_token("lib.lib.dom.d.ts.fetch") == ("sink", "http_api", "http", "HTTP API")
+
+
+def test_tier1_typescript_package_imports_are_data_store_evidence(tmp_path: Path) -> None:
+    """A package import SCIP omits as an occurrence still names the real store.
+
+    scip-typescript emits no occurrence for a package import that does not resolve
+    into ``node_modules``; the import statement is the contract that the file
+    depends on ``better-sqlite3`` and ``node:sqlite``.
+    """
+    repo = tmp_path / "repo"
+    (repo / "web" / "api").mkdir(parents=True)
+    db = repo / "web" / "api" / "db.ts"
+    db.write_text(
+        'import Database from "better-sqlite3";\n'
+        "\n"
+        'const db = new Database("fqd.db");\n'
+        "\n"
+        "export function listRows(): unknown[] {\n"
+        '  return db.prepare("select 1").all();\n'
+        "}\n"
+    )
+    db2 = repo / "web" / "api" / "db2.ts"
+    db2.write_text(
+        'import { DatabaseSync } from "node:sqlite";\n'
+        "\n"
+        'const native = new DatabaseSync("fqd-native.db");\n'
+        "\n"
+        "export function listNative(): unknown[] {\n"
+        '  return native.prepare("select 1").all();\n'
+        "}\n"
+    )
+
+    db_module = "scip-typescript npm fqd-like 0.1.0 web/api/`db.ts`/"
+    db2_module = "scip-typescript npm fqd-like 0.1.0 web/api/`db2.ts`/"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="web/api/db.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=db_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=f"{db_module}listRows().",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 16, 24],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="web/api/db2.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=db2_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=f"{db2_module}listNative().",
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[4, 16, 26],
+                    ),
+                ],
+            ),
+        ]
+    )
+    scip_path = tmp_path / "typescript_sqlite.scip"
+    scip_path.write_bytes(scip_index.SerializeToString())
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=repo,
+        files=[db, db2],
+    )
+
+    result = ingest_scip(scip_path, unit)
+
+    assert {
+        (ref["file_path"], ref["line"], ref["raw_symbol"])
+        for ref in result.unresolved_refs
+    } == {
+        ("web/api/db.ts", 1, "better-sqlite3"),
+        ("web/api/db2.ts", 1, "node:sqlite"),
+    }
+
+    with IndexStore(tmp_path / "index.db") as store:
+        store.insert_unit_data(
+            files=result.files,
+            symbols=result.symbols,
+            references=result.references,
+            unresolved_refs=result.unresolved_refs,
+        )
+        graph = build_graph(store, repo)
+
+    assert [
+        (data_store["id"], data_store["kind"], data_store["evidence"])
+        for data_store in graph["data_stores"]
+    ] == [("ds:sqlite", "sql", ["web/api/db.ts:1", "web/api/db2.ts:1"])]

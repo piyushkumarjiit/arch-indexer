@@ -497,6 +497,38 @@ def _attribute_chain(file_lines: list[str], occ: Occurrence) -> str:
     return match.group(0) if match else ""
 
 
+_TS_IMPORT_SPECIFIER = re.compile(
+    r"""(?:\bfrom\s*|^\s*import\s*|\brequire\s*\(\s*)["']([^"'\n]+)["']"""
+)
+
+
+def _typescript_external_imports(
+    file_lines: list[str], spans: list[tuple[int, int, int, int]]
+) -> list[tuple[int, str]]:
+    """Module specifiers of TypeScript import statements that resolve outside the repo.
+
+    scip-typescript emits no occurrence for an unresolved package import when the
+    package is absent from ``node_modules``, so the import statement itself is the
+    only evidence that the code depends on that package.
+    """
+    imports: list[tuple[int, str]] = []
+    for start_line, start_col, end_line, end_col in spans:
+        parts: list[str] = []
+        for line_no in range(start_line, end_line + 1):
+            line = _source_line(file_lines, line_no)
+            col_start = start_col if line_no == start_line else 0
+            col_end = end_col if line_no == end_line else len(line)
+            parts.append(line[col_start:col_end])
+        match = _TS_IMPORT_SPECIFIER.search("\n".join(parts))
+        if match is None:
+            continue
+        module = match.group(1)
+        if module.startswith((".", "/", "\\")):
+            continue
+        imports.append((start_line, module))
+    return imports
+
+
 def _import_statement_text(
     file_lines: list[str], info: _ImportInfo, statement: _STATEMENT_KEY
 ) -> str:
@@ -1555,6 +1587,22 @@ def _parse_scip_payload(
                                 "language": unit.language,
                             }
                         )
+
+        if unit.language == "typescript":
+            for import_line, module_specifier in _typescript_external_imports(
+                file_lines, import_info.spans
+            ):
+                unresolved_key = (rel_path, import_line, module_specifier)
+                if unresolved_key not in seen_unresolved:
+                    seen_unresolved.add(unresolved_key)
+                    unresolved_refs.append(
+                        {
+                            "file_path": rel_path,
+                            "line": import_line,
+                            "raw_symbol": module_specifier,
+                            "language": unit.language,
+                        }
+                    )
 
     if unit.files and not files and tier2_result is None:
         raise ValueError(f"SCIP index yielded no matching documents for unit {unit.unit_id}")
