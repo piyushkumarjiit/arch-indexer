@@ -1,4 +1,4 @@
-"""Tests for incremental indexing, table-driven purges, WAL safety, and v1 rebuild (spec 4.6)."""
+"""Tests for incremental indexing, table-driven purges, read-only safety, and v1 rebuild (spec 4.6)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +17,6 @@ from arch_indexer.indexer import run_index
 from arch_indexer.plugins.base import IndexUnit
 from arch_indexer.plugins.java_plugin import JavaPlugin
 from arch_indexer.plugins.python_plugin import PythonPlugin
-from arch_indexer.query import query_units
 from arch_indexer.store import IndexStore, TableSpec
 from arch_indexer.units_hash import files_sha256, manifest_sha256
 
@@ -462,31 +462,46 @@ def test_v1_database_without_meta_is_rebuilt_in_full(tmp_path: Path):
         assert all(m and f for _, m, f in unit_hashes)
 
 
-def test_wal_checkpoint_allows_readonly_query_in_readonly_dir(tmp_path: Path):
+def test_readonly_query_and_citations_work_when_cache_dir_is_readonly(tmp_path: Path):
     repo = _make_three_unit_repo(tmp_path)
     cache = tmp_path / "cache"
     assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+    (repo / "docs" / "DESIGN.md").write_text(
+        "# Design\n\nHandles greeting [^1].\n\n## References\n\n"
+        "[^1]: `pkg_a/alpha.py:1` \u2014 `greet`\n",
+        encoding="utf-8",
+    )
 
     paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache)
-    with sqlite3.connect(paths.index_db) as conn:
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        assert mode.lower() == "wal"
+    assert not paths.index_db.with_name(paths.index_db.name + "-wal").exists()
+    assert not paths.index_db.with_name(paths.index_db.name + "-shm").exists()
 
-    # Make the cache subdirectory read-only and verify ?mode=ro still reads units cleanly
+    env = {**os.environ}
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (src_dir, env.get("PYTHONPATH")) if part
+    )
+
+    def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "arch_indexer.cli", *args],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
     os.chmod(paths.repo_cache_dir, 0o555)
     try:
-        uri = f"{paths.index_db.resolve().as_uri()}?mode=ro"
-        ro_conn = sqlite3.connect(uri, uri=True)
-        ro_conn.row_factory = sqlite3.Row
-        try:
-            units = query_units(ro_conn)
-            assert {u["unit_id"] for u in units} == {
-                "python:pkg_a",
-                "python:pkg_b",
-                "typescript:root",
-            }
-        finally:
-            ro_conn.close()
+        query = run_cli("query", str(repo), "units", "--cache-dir", str(cache))
+        assert query.returncode == 0, query.stderr
+        assert {line.split(" ", 1)[0] for line in query.stdout.splitlines() if line} == {
+            "python:pkg_a",
+            "python:pkg_b",
+            "typescript:root",
+        }
+
+        citations = run_cli("check-citations", str(repo), "--cache-dir", str(cache))
+        assert citations.returncode == 0, citations.stdout + citations.stderr
     finally:
         os.chmod(paths.repo_cache_dir, 0o755)
 

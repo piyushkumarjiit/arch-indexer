@@ -308,8 +308,6 @@ class IndexStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
         self._closed = False
         self._extra_tables: dict[str, TableSpec] = {}
         self.needs_full_rebuild = False
@@ -391,16 +389,10 @@ class IndexStore:
         self.init_schema()
 
     def close(self) -> None:
-        """Checkpoint WAL and close database connection."""
+        """Close database connection."""
         if self._closed:
             return
         self._closed = True
-        try:
-            if self.conn.in_transaction:
-                self.conn.rollback()
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.DatabaseError:
-            pass
         self.conn.close()
 
     def __enter__(self) -> IndexStore:
