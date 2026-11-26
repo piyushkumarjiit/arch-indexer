@@ -1,6 +1,6 @@
 /*
  * Portions adapted from floorplan (https://github.com/haydenschmitty/floorplan)
- * commit 94f81b4, skills/floorplan/assets/ui/25-recent.js:1-90. Copyright (c) 2026 Hayden Smith. MIT License.
+ * commit 94f81b4, assets/ui/25-recent.js. Copyright (c) 2026 Hayden Smith. MIT License.
  * See THIRD_PARTY_NOTICES.md.
  */
 
