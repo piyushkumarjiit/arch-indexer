@@ -531,6 +531,74 @@ def test_cross_unit_symbol_removal_updates_dependent_unit(tmp_path: Path):
     assert inc_graph == (repo / "docs" / "graph.json").read_bytes()
 
 
+def test_deleting_definition_file_invalidates_unchanged_dependents(tmp_path: Path):
+    repo = _make_three_unit_repo(tmp_path)
+    (repo / "pkg_b" / "caller.py").write_text(
+        "from pkg_a.alpha import greet\n\ndef call_it() -> str:\n    return greet('x')\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache"
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+
+    # Deleting the defining file leaves pkg_b untouched on disk, but its resolve must change
+    (repo / "pkg_a" / "alpha.py").unlink()
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+
+    db_path = RepoCachePaths.from_repo(repo, cache_dir_override=cache).index_db
+    with sqlite3.connect(db_path) as conn:
+        stale = conn.execute(
+            'SELECT COUNT(*) FROM "references" WHERE file_path = ? AND symbol_fqname = ?',
+            ("pkg_b/caller.py", "pkg_a.alpha.greet"),
+        ).fetchone()[0]
+        unresolved = conn.execute(
+            "SELECT COUNT(*) FROM unresolved_refs WHERE file_path = ? AND raw_symbol = ?",
+            ("pkg_b/caller.py", "pkg_a.alpha.greet"),
+        ).fetchone()[0]
+    assert stale == 0
+    assert unresolved == 1
+
+    inc_graph = (repo / "docs" / "graph.json").read_bytes()
+    full_cache = tmp_path / "full_cache"
+    assert (
+        run_index(repo, offline=True, force_full=True, cache_dir=full_cache) == EXIT_DELTA_DETECTED
+    )
+    assert inc_graph == (repo / "docs" / "graph.json").read_bytes()
+
+
+def test_deleting_router_mount_file_updates_untouched_route_unit(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "api" / "routes").mkdir(parents=True)
+    (repo / "api" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "api" / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from api.routes import users\n\n"
+        "app = FastAPI()\n"
+        "app.include_router(users, prefix='/v1')\n",
+        encoding="utf-8",
+    )
+    (repo / "api" / "routes" / "__init__.py").write_text(
+        "from fastapi import APIRouter\n\nusers = APIRouter()\n",
+        encoding="utf-8",
+    )
+    (repo / "api" / "routes" / "views.py").write_text(
+        "from . import users\n\n\n@users.get('/users')\ndef list_users():\n    return []\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache"
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+
+    # Mount file removed: the untouched router file's effective route must lose the prefix
+    (repo / "api" / "app.py").unlink()
+    assert run_index(repo, offline=True, cache_dir=cache) == EXIT_DELTA_DETECTED
+
+    inc_graph = (repo / "docs" / "graph.json").read_bytes()
+    full_cache = tmp_path / "full_cache"
+    assert (
+        run_index(repo, offline=True, force_full=True, cache_dir=full_cache) == EXIT_DELTA_DETECTED
+    )
+    assert inc_graph == (repo / "docs" / "graph.json").read_bytes()
+
+
 def test_strict_tier1_resolves_only_planned_units(tmp_path: Path):
     repo = _make_maven_repo(tmp_path)
     cache = tmp_path / "cache"

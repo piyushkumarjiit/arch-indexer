@@ -488,6 +488,7 @@ def _promote_impacted_dependents(
     db_path: Path,
     plans: list[_UnitPlan],
     prev_units: dict[str, dict[str, Any]],
+    prev_files: dict[str, dict[str, Any]],
     prev_symbols: dict[str, list[dict[str, Any]]],
 ) -> None:
     """Promote unchanged units/files that reference removed or newly added symbols."""
@@ -495,6 +496,12 @@ def _promote_impacted_dependents(
     added_fqs: set[str] = set()
     reindexed_paths: set[str] = set()
     python_router_mount_changed = False
+
+    indexed_paths = {f["path"] for plan in plans for f in plan.file_records}
+    for rel in sorted(set(prev_files) - indexed_paths):
+        removed_fqs.update(s["fqname"] for s in prev_symbols.get(rel, ()))
+        if prev_files[rel].get("language") == "python":
+            python_router_mount_changed = True
 
     for plan in plans:
         if plan.action == "skip":
@@ -675,7 +682,9 @@ def run_index(
         prev_symbols=prev_symbols,
     )
     if incremental_available:
-        _promote_impacted_dependents(cache_paths.index_db, unit_plans, prev_units, prev_symbols)
+        _promote_impacted_dependents(
+            cache_paths.index_db, unit_plans, prev_units, prev_files, prev_symbols
+        )
 
     repo_files: set[str] = set()
     fqnames_by_language: dict[str, set[str]] = {}
