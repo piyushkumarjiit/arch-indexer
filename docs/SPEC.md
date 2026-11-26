@@ -50,11 +50,12 @@ arch-indexer/
 │   ├── mermaid_gen.py               # Deterministic Mermaid diagram generator
 │   ├── viewer/
 │   │   ├── renderer.py              # Single-file static HTML viewer renderer
-│   │   └── assets/                  # Offline HTML/CSS/JS viewer assets (package data)
-│   │       ├── template.html
-│   │       ├── viewer.css
-│   │       ├── viewer.js
-│   │       └── viewer_logic.js
+│   │   ├── assets/                  # Offline HTML/CSS/JS viewer assets (package data)
+│   │   │   ├── template.html
+│   │   │   ├── viewer.css
+│   │   │   ├── viewer.js
+│   │   │   └── viewer_logic.js
+│   │   └── dist/                    # Pre-built v2 viewer app assets (checked in, rebuilt by `make viewer`)
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
 │   ├── source_scope.py              # Test-vs-product path classification for architecture outputs
@@ -73,6 +74,10 @@ arch-indexer/
 ├── skills/
 │   └── arch-indexer/
 │       └── SKILL.md                 # Thin Firstmate orchestrator skill (copied/installed into Firstmate)
+├── viewer-app/                      # v2 viewer frontend (Vite + React) that builds src/arch_indexer/viewer/dist/ via `make viewer`
+│   ├── fixtures/                    # Committed graph fixtures and their generator
+│   ├── src/                         # App shell: drill-down views, ELKjs layout worker, state store, UI panels
+│   └── test/                        # Vitest component tests (run only by `make viewer`)
 └── tests/
     ├── fixtures/                    # Minimal Python, TS, Java/Maven, Infra fixture repos
     ├── test_indexing.py
@@ -521,8 +526,8 @@ The thin skill instructs Firstmate to run the following 4 steps:
 
 ## 10. Testing & Progressive Validation Plan
 
-### 10.1 Unit & Component Tests (`pytest` in `arch-indexer`)
-Built against small, committed fixture repositories under `tests/fixtures/` (running fully offline in CI):
+### 10.1 Unit & Component Tests (`pytest` in `arch-indexer`, `vitest` in `viewer-app`)
+Built against small, committed fixture repositories under `tests/fixtures/` (Python) and `viewer-app/fixtures/` (viewer app), running fully offline:
 - **`test_indexing.py`**:
   - Python fixture: Tier 1 `scip-python` indexing without installing external packages; verifies unresolved external imports are recorded without error.
   - TypeScript fixture: Tier 1 `scip-typescript` indexing and Tier 2 `tree-sitter` fallback when `tsconfig`/deps fail.
@@ -547,6 +552,8 @@ Built against small, committed fixture repositories under `tests/fixtures/` (run
   - Large synthetic index splits into multiple bounded packets under line/symbol budgets with disjoint draft paths.
 - **`test_assembler.py`**:
   - `assemble` merges drafts, patches only impacted sections, globally renumbers footnotes, injects diagrams, deletes drafts, and enforces validation gates.
+- **`viewer-app/test/`** (Vitest, `jsdom`):
+  - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). Run with `make viewer` (`npm ci && npm run build && npm test`); `make check` and CI are Python-only, so these tests and the `tsc --noEmit` type-check the build runs do not run on a Python-only checkout.
 
 ### 10.2 Progressive End-to-End Validation Plan
 Execute sequentially against real repositories, gating each stage on passing `check-citations`, `check-mermaid`, RAM ceiling (< 4.5 GB peak RSS), and visual inspection of `docs/DESIGN.md`, `docs/USER_GUIDE.md`, and `docs/flow-viewer.html`:

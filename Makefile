@@ -1,4 +1,4 @@
-.PHONY: check lint format test
+.PHONY: check lint format test viewer
 
 check:
 	ruff check .
@@ -13,3 +13,6 @@ format:
 
 test:
 	pytest -q
+
+viewer:
+	cd viewer-app && npm ci && npm run build && npm test
