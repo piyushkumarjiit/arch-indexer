@@ -133,3 +133,11 @@ For multi-worker automated execution, see the Firstmate skill definition at [`sk
 ## Status
 
 In development. The toolchain management slice (`toolchain status`, `toolchain ensure`), the validation gates slice (`check-citations`, `check-mermaid`, including AUTO-DIAGRAM verification against `graph.json`), two-tier indexing (`index`: Tier 1 SCIP with Tier 2 `tree-sitter` fallback), the delta engine (`state.json`, `index-delta.json`, `impacted-sections.json`, `--force-full`, `--auto-relocate-citations`), bounded worker planning (`plan`, `work-plan.json`), the assembly slice (`assemble`), deterministic graph export and Mermaid generation, the offline architecture flow-viewer renderer (`arch_indexer.viewer.render_viewer`, `docs/flow-viewer.html`), the read-only index queries (`query`) and the runtime trace loaders (`arch_indexer.runtime`: OTLP JSON/protobuf span files and a read-only Jaeger `/api/v3/traces` client, both with load-time attribute redaction) are implemented. The working specification is committed at [docs/SPEC.md](docs/SPEC.md); the commands and generated artifacts it specifies beyond these slices are not implemented yet.
+
+## License
+
+arch-indexer is licensed under the Functional Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2). See [LICENSE](LICENSE).
+
+- **Permitted:** using, copying, modifying, creating derivative works, and redistributing the software for any purpose other than a Competing Use, including internal use, non-commercial education and research, and professional services delivered to a licensee under these terms.
+- **Not permitted:** making the software available to others in a commercial product or service that substitutes for it, substitutes for another product or service the licensor offers using it, or offers substantially similar functionality.
+- **Future license:** each release converts to the Apache License, Version 2.0 two years after the date the licensor makes that release available. From that date, that release may be used under Apache-2.0.
