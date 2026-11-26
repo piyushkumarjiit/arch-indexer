@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -90,13 +91,37 @@ def test_cli_max_parallel_units_flag():
     assert main(["index", "some/repo", "--max-parallel-units", "0"]) == EXIT_ERROR
 
 
-def test_parallel_units_faster_and_deterministic_vs_serial(tmp_path: Path):
+class _ConcurrencyProbe:
+    """Record how many Tier 1 unit runs are in flight at once (spec 4.6 bound)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.peak = 0
+        self._active = 0
+
+    def __enter__(self) -> None:
+        with self._lock:
+            self._active += 1
+            self.peak = max(self.peak, self._active)
+
+    def __exit__(self, *exc_info: object) -> None:
+        with self._lock:
+            self._active -= 1
+
+    def reset(self) -> None:
+        with self._lock:
+            self._active = 0
+            self.peak = 0
+
+
+def test_parallel_units_bounded_concurrent_and_deterministic_vs_serial(tmp_path: Path):
     repo = _make_three_maven_repo(tmp_path)
     launcher = tmp_path / "scip-java"
     launcher.touch()
     mock_rt = {"java": MagicMock(available=True), "mvn": MagicMock(available=True)}
     sleep_per_unit = 0.25
     real_run = subprocess.run
+    probe = _ConcurrencyProbe()
 
     def stub_run(cmd, cwd=None, **kwargs):
         if cmd[0] != str(launcher):
@@ -104,17 +129,19 @@ def test_parallel_units_faster_and_deterministic_vs_serial(tmp_path: Path):
         cwd_path = Path(cwd)
         # Sleep slightly different amounts per unit so completion order != all_units order
         delays = {
-            "alpha": sleep_per_unit * 1.3,
+            "alpha": sleep_per_unit * 1.6,
             "beta": sleep_per_unit,
             "gamma": sleep_per_unit * 0.8,
         }
-        time.sleep(delays.get(cwd_path.name, sleep_per_unit))
+        with probe:
+            time.sleep(delays.get(cwd_path.name, sleep_per_unit))
         out = Path(cmd[cmd.index("--output") + 1])
         out.write_bytes(_scip_payload(cwd_path.name))
         return MagicMock(returncode=0, stderr="", stdout="")
 
     serial_cache = tmp_path / "serial_cache"
     parallel_cache = tmp_path / "parallel_cache"
+    bounded_cache = tmp_path / "bounded_cache"
 
     with (
         patch(
@@ -126,15 +153,14 @@ def test_parallel_units_faster_and_deterministic_vs_serial(tmp_path: Path):
     ):
         status.return_value = MagicMock(installed=True, install_path=launcher)
 
-        t0 = time.monotonic()
         assert (
             run_index(repo, offline=True, max_parallel_units=1, cache_dir=serial_cache)
             == EXIT_DELTA_DETECTED
         )
-        serial_elapsed = time.monotonic() - t0
+        assert probe.peak == 1
         serial_graph = (repo / "docs" / "graph.json").read_bytes()
 
-        t1 = time.monotonic()
+        probe.reset()
         assert (
             main(
                 [
@@ -149,10 +175,27 @@ def test_parallel_units_faster_and_deterministic_vs_serial(tmp_path: Path):
             )
             == EXIT_DELTA_DETECTED
         )
-        parallel_elapsed = time.monotonic() - t1
+        assert probe.peak == 3
         parallel_graph = (repo / "docs" / "graph.json").read_bytes()
 
-    assert parallel_elapsed < serial_elapsed * 0.75
+        # The bound is per configured worker count, not "all units": 3 units, 2 workers.
+        probe.reset()
+        assert (
+            main(
+                [
+                    "index",
+                    str(repo),
+                    "--offline",
+                    "--max-parallel-units",
+                    "2",
+                    "--cache-dir",
+                    str(bounded_cache),
+                ]
+            )
+            == EXIT_DELTA_DETECTED
+        )
+        assert probe.peak == 2
+
     assert parallel_graph == serial_graph
 
     serial_db = RepoCachePaths.from_repo(repo, cache_dir_override=serial_cache).index_db
