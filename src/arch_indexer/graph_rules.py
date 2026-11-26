@@ -1,6 +1,7 @@
 """Deterministic symbol and infrastructure rules for graph boundary detection.
 
 Every rule maps a lowercase token (part of a symbol name or a container image)
+or the canonical root of an import, package or callee (``packages.canonical_root``)
 to a canonical data store or external sink. Rules are plain data so the graph
 export stays deterministic and easy to extend without touching graph logic.
 """

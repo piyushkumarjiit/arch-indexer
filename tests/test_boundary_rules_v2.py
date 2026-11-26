@@ -169,8 +169,7 @@ def test_tier1_typescript_package_imports_are_data_store_evidence(tmp_path: Path
     result = ingest_scip(scip_path, unit)
 
     assert {
-        (ref["file_path"], ref["line"], ref["raw_symbol"])
-        for ref in result.unresolved_refs
+        (ref["file_path"], ref["line"], ref["raw_symbol"]) for ref in result.unresolved_refs
     } == {
         ("web/api/db.ts", 1, "better-sqlite3"),
         ("web/api/db2.ts", 1, "node:sqlite"),

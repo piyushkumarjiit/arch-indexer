@@ -1445,9 +1445,13 @@ def _parse_scip_payload(
                 ):
                     for span in import_info.spans:
                         span_start_line, span_start_col, span_end_line, span_end_col = span
-                        if (span_start_line, span_start_col) <= (start_line, col) < (
-                            span_end_line,
-                            span_end_col,
+                        if (
+                            (span_start_line, span_start_col)
+                            <= (start_line, col)
+                            < (
+                                span_end_line,
+                                span_end_col,
+                            )
                         ):
                             resolved_import_spans.add(span)
                             break
