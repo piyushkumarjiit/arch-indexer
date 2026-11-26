@@ -25,7 +25,6 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "infra_artifacts",
         "unresolved_refs",
         "units",
-        "meta",
         "facts",
         "synthetic_symbols",
     }

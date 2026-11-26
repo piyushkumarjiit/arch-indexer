@@ -48,8 +48,8 @@ from arch_indexer.storage.state import (
     write_json,
 )
 from arch_indexer.store import IndexStore
-from arch_indexer.units_hash import files_sha256_from_map, manifest_sha256, unit_file_hashes
 from arch_indexer.synthetic import build_synthetic_symbols, shared_module_names
+from arch_indexer.units_hash import files_sha256_from_map, manifest_sha256, unit_file_hashes
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
@@ -284,12 +284,25 @@ def _load_previous_index(
         return False, True, prev_units, prev_files, prev_symbols, prev_version != __version__
 
 
+def _needs_strict_recheck(
+    plugin: Any, prev_unit: dict[str, Any], force_strict_check: bool, strict_any: bool
+) -> bool:
+    """True when a strict flag must re-run Tier 1 for a unit that previously fell back."""
+    if not plugin.has_tier1_indexer:
+        return False
+    reason = prev_unit.get("fallback_reason")
+    if strict_any and reason:
+        return True
+    return force_strict_check and reason == "tool_unavailable"
+
+
 def _build_unit_plans(
     all_units: list[tuple[Any, IndexUnit]],
     *,
     incremental_available: bool,
     version_changed: bool,
     force_strict_check: bool,
+    strict_any: bool = False,
     prev_units: dict[str, dict[str, Any]],
     prev_files: dict[str, dict[str, Any]],
     prev_symbols: dict[str, list[dict[str, Any]]],
@@ -332,11 +345,7 @@ def _build_unit_plans(
             prev_u.get("manifest_sha256") == m_hash
             and prev_u.get("files_sha256") == f_hash
             and all_files_match
-            and not (
-                force_strict_check
-                and plugin.has_tier1_indexer
-                and prev_u.get("fallback_reason") == "tool_unavailable"
-            )
+            and not _needs_strict_recheck(plugin, prev_u, force_strict_check, strict_any)
         ):
             file_recs = [_hydrated_file_record(prev_files[rel]) for rel in sorted(path_by_rel)]
             sym_recs = [dict(s) for rel in sorted(path_by_rel) for s in prev_symbols.get(rel, ())]
@@ -363,11 +372,7 @@ def _build_unit_plans(
         if (
             manifest_changed
             or (prev_u.get("tier") == IndexingTier.TIER1.value and plugin.has_tier1_indexer)
-            or (
-                force_strict_check
-                and plugin.has_tier1_indexer
-                and prev_u.get("fallback_reason") == "tool_unavailable"
-            )
+            or _needs_strict_recheck(plugin, prev_u, force_strict_check, strict_any)
         ):
             file_recs, sym_recs = plugin.extract_definitions(unit)
             plans.append(
@@ -682,6 +687,7 @@ def run_index(
         incremental_available=incremental_available,
         version_changed=version_changed,
         force_strict_check=offline and strict_tier1,
+        strict_any=strict_tier1_any,
         prev_units=prev_units,
         prev_files=prev_files,
         prev_symbols=prev_symbols,

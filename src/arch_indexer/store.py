@@ -372,6 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_kind_name ON facts(kind, name_fqname);
 CREATE INDEX IF NOT EXISTS idx_synthetic_symbols_file_path ON synthetic_symbols(file_path);
 """
 
+
 def _parse_schema_major(version: str | None) -> int | None:
     if not version:
         return None
@@ -438,7 +439,8 @@ class IndexStore:
         self.needs_full_rebuild = False
         with self.conn:
             self.conn.executescript(SCHEMA_SQL)
-            self.conn.execute(f"PRAGMA user_version = {SCHEMA_MAJOR}")
+            if self.conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_MAJOR:
+                self.conn.execute(f"PRAGMA user_version = {SCHEMA_MAJOR}")
             self.conn.executemany(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
                 [
