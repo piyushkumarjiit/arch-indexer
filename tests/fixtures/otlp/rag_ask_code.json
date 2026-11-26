@@ -1,0 +1,57 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {"stringValue": "rag-api"}
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "rag.custom",
+            "version": "1.0.0"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "1111222233334444",
+              "name": "POST /ask",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1730000001000000000",
+              "endTimeUnixNano": "1730000001052000000",
+              "attributes": [
+                {
+                  "key": "http.route",
+                  "value": {"stringValue": "/ask"}
+                },
+                {
+                  "key": "http.request.method",
+                  "value": {"stringValue": "POST"}
+                },
+                {
+                  "key": "code.file.path",
+                  "value": {"stringValue": "/app/fastapi_rag_service.py"}
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {"intValue": "159"}
+                },
+                {
+                  "key": "code.function.name",
+                  "value": {"stringValue": "ask"}
+                }
+              ],
+              "status": {
+                "code": "STATUS_CODE_OK"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

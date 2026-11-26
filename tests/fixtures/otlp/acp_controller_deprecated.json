@@ -1,0 +1,88 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {"stringValue": "acp-backend"}
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "io.opentelemetry.spring-webmvc-6.0",
+            "version": "2.9.0"
+          },
+          "spans": [
+            {
+              "traceId": "7a112233445566778899aabbccddeeff",
+              "spanId": "9988776655443322",
+              "name": "POST /api/v1/search",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1730000002000000000",
+              "endTimeUnixNano": "1730000002120000000",
+              "attributes": [
+                {
+                  "key": "http.route",
+                  "value": {"stringValue": "/api/v1/search"}
+                },
+                {
+                  "key": "http.method",
+                  "value": {"stringValue": "POST"}
+                },
+                {
+                  "key": "code.filepath",
+                  "value": {"stringValue": "src/main/java/com/example/acp/LsqmSearchController.java"}
+                },
+                {
+                  "key": "code.lineno",
+                  "value": {"intValue": "118"}
+                },
+                {
+                  "key": "code.function",
+                  "value": {"stringValue": "search"}
+                },
+                {
+                  "key": "code.namespace",
+                  "value": {"stringValue": "com.example.acp.LsqmSearchController"}
+                },
+                {
+                  "key": "http.request.header.authorization",
+                  "value": {"stringValue": "Bearer top-secret-token"}
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1730000002110000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {"stringValue": "java.lang.IllegalStateException"}
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {"stringValue": "Sensitive user query failed: secret-token-123"}
+                    },
+                    {
+                      "key": "exception.stacktrace",
+                      "value": {
+                        "stringValue": "java.lang.IllegalStateException: Sensitive user query failed: secret-token-123\n\tat com.example.acp.LsqmSearchController.search(LsqmSearchController.java:118) ~[classes/:na]\n\tat java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": "STATUS_CODE_ERROR",
+                "message": "Sensitive user query failed"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
