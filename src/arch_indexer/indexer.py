@@ -42,6 +42,7 @@ from arch_indexer.storage.state import (
     write_json,
 )
 from arch_indexer.store import IndexStore
+from arch_indexer.synthetic import build_synthetic_symbols
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
@@ -214,6 +215,7 @@ def run_index(
     *,
     offline: bool = False,
     strict_tier1: bool = False,
+    strict_tier1_any: bool = False,
     force_full: bool = False,
     node_max_heap_mb: int | None = None,
     jvm_max_heap_mb: int | None = None,
@@ -317,7 +319,7 @@ def run_index(
     # This mode resolves every unit before the store is touched so that a missing
     # toolchain leaves any existing index.db intact; other runs stream per unit.
     strict_tier1_results: list[IndexResult | FallbackSignal] | None = None
-    if offline and strict_tier1:
+    if strict_tier1_any or (offline and strict_tier1):
         strict_tier1_results = [
             plugin.index_unit_tier1(
                 unit,
@@ -329,7 +331,19 @@ def run_index(
         ]
         for (plugin, unit), tier1_res in zip(all_units, strict_tier1_results, strict=True):
             if (
-                isinstance(tier1_res, FallbackSignal)
+                strict_tier1_any
+                and isinstance(tier1_res, FallbackSignal)
+                and plugin.has_tier1_indexer
+            ):
+                sys.stderr.write(
+                    f"Error: Tier 1 indexer fell back for unit {unit.unit_id} "
+                    f"({tier1_res.reason}) and --strict-tier1-any was requested\n"
+                )
+                return EXIT_TOOLCHAIN_MISSING
+            if (
+                offline
+                and strict_tier1
+                and isinstance(tier1_res, FallbackSignal)
                 and plugin.has_tier1_indexer
                 and tier1_res.reason == "tool_unavailable"
             ):
@@ -378,6 +392,9 @@ def run_index(
                         unit, unit_reason or "unknown", unit_message, len(res.files)
                     )
 
+            for file_record in res.files:
+                file_record["unit_id"] = unit.unit_id
+
             # 3. Stream unit data to SQLite with deterministic row ordering
             store.insert_unit_data(
                 files=res.files,
@@ -386,6 +403,8 @@ def run_index(
                 entrypoints=res.entrypoints,
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
+                facts=res.facts,
+                synthetic_symbols=build_synthetic_symbols(res.files, res.entrypoints),
             )
             unit_tier = IndexingTier.TIER2.value if _all_files_fell_back(res) else res.tier.value
             store.insert_unit_record(

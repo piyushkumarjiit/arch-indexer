@@ -41,8 +41,18 @@ VALID_NODE_KINDS = {
     "datastore",
     "external_sink",
     "frontend_caller",
+    "module_symbol",
 }
-VALID_EDGE_KINDS = {"calls", "http_request", "reads", "writes", "publishes", "depends_on"}
+VALID_EDGE_KINDS = {
+    "calls",
+    "http_request",
+    "reads",
+    "writes",
+    "publishes",
+    "depends_on",
+    "registers",
+    "boots",
+}
 VALID_TIERS = {"scip", "tree-sitter"}
 
 
@@ -79,7 +89,7 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
     assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
 
     graph = load_graph(repo / "docs" / "graph.json")
-    assert graph["schema_version"] == "1.1"
+    assert graph["schema_version"] == "1.2"
     assert graph["repo_name"] == "python_routes"
     assert isinstance(graph["generated_at_commit"], (str, type(None)))
     assert set(graph["tier_summary"]) == {
@@ -120,6 +130,7 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
             "line",
             "symbol",
             "tier",
+            "confidence",
             "metadata",
         }
         assert node["kind"] in VALID_NODE_KINDS
@@ -129,7 +140,7 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
         node_ids.add(node["id"])
 
     for edge in graph["edges"]:
-        assert set(edge) == {"source", "target", "kind", "file", "line", "tier"}
+        assert set(edge) == {"source", "target", "kind", "file", "line", "tier", "confidence"}
         assert edge["kind"] in VALID_EDGE_KINDS
         assert edge["tier"] in VALID_TIERS
         assert edge["source"] in node_ids | module_ids

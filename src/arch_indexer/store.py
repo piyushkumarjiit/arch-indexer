@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS files (
     line_count INTEGER NOT NULL,
     module TEXT NOT NULL,
     tier TEXT NOT NULL,
-    fallback_reason TEXT
+    fallback_reason TEXT,
+    unit_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -95,7 +96,10 @@ CREATE TABLE IF NOT EXISTS symbols (
     end_line INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL,
     visibility TEXT,
-    decorators_json TEXT
+    decorators_json TEXT,
+    start_col INTEGER,
+    end_col INTEGER,
+    docstring TEXT
 );
 
 CREATE TABLE IF NOT EXISTS "references" (
@@ -116,7 +120,11 @@ CREATE TABLE IF NOT EXISTS entrypoints (
     file_path TEXT NOT NULL,
     line INTEGER NOT NULL,
     symbol_fqname TEXT,
-    auth_symbols_json TEXT
+    auth_symbols_json TEXT,
+    col INTEGER,
+    block_end_line INTEGER,
+    confidence TEXT,
+    rule_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS infra_artifacts (
@@ -144,6 +152,36 @@ CREATE TABLE IF NOT EXISTS units (
     message TEXT
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    col INTEGER,
+    end_line INTEGER,
+    enclosing_fqname TEXT,
+    name_text TEXT,
+    name_fqname TEXT,
+    receiver_text TEXT,
+    args_json TEXT,
+    extra_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS synthetic_symbols (
+    fqname TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    start_col INTEGER,
+    end_line INTEGER NOT NULL,
+    end_col INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_symbols_fqname ON symbols(fqname);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_refs_symbol_fqname ON "references"(symbol_fqname);
@@ -151,7 +189,40 @@ CREATE INDEX IF NOT EXISTS idx_refs_file_path ON "references"(file_path);
 CREATE INDEX IF NOT EXISTS idx_entrypoints_file_path ON entrypoints(file_path);
 CREATE INDEX IF NOT EXISTS idx_infra_artifacts_file_path ON infra_artifacts(file_path);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file_path);
+CREATE INDEX IF NOT EXISTS idx_facts_file_path ON facts(file_path);
+CREATE INDEX IF NOT EXISTS idx_facts_kind_name ON facts(kind, name_fqname);
+CREATE INDEX IF NOT EXISTS idx_synthetic_symbols_file_path ON synthetic_symbols(file_path);
 """
+
+# Slice 2 raises the on-disk schema to 2.0 (spec 3.1). An index.db with a lower MAJOR is
+# a cache, so it is rebuilt in full and never migrated in place.
+SCHEMA_VERSION = "2.0"
+SCHEMA_MAJOR = 2
+
+# Every table, in drop order. ``purge_files`` and ``clear_all`` walk the per-file subset.
+ALL_TABLES = (
+    "references",
+    "symbols",
+    "entrypoints",
+    "infra_artifacts",
+    "unresolved_refs",
+    "facts",
+    "synthetic_symbols",
+    "units",
+    "files",
+    "meta",
+)
+# (table, path column) for every table keyed by a source file, so a purge covers new tables.
+FILE_SCOPED_TABLES = (
+    ("files", "path"),
+    ("symbols", "file_path"),
+    ("references", "file_path"),
+    ("entrypoints", "file_path"),
+    ("infra_artifacts", "file_path"),
+    ("unresolved_refs", "file_path"),
+    ("facts", "file_path"),
+    ("synthetic_symbols", "file_path"),
+)
 
 
 class IndexStore:
@@ -174,20 +245,31 @@ class IndexStore:
         return cls(cache_paths.index_db)
 
     def init_schema(self) -> None:
-        """Initialize table schema and indexes."""
+        """Initialize table schema and indexes, rebuilding an older-MAJOR index.db."""
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < SCHEMA_MAJOR:
+            existing = {
+                row[0]
+                for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if existing & set(ALL_TABLES):
+                self._drop_all_tables()
         with self.conn:
             self.conn.executescript(SCHEMA_SQL)
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_MAJOR}")
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (SCHEMA_VERSION,),
+            )
+
+    def _drop_all_tables(self) -> None:
+        with self.conn:
+            for table in ALL_TABLES:
+                self.conn.execute(f'DROP TABLE IF EXISTS "{table}"')
 
     def clear_all(self) -> None:
         """Drop and recreate all tables for a clean full index."""
-        with self.conn:
-            self.conn.execute('DROP TABLE IF EXISTS "references"')
-            self.conn.execute("DROP TABLE IF EXISTS symbols")
-            self.conn.execute("DROP TABLE IF EXISTS entrypoints")
-            self.conn.execute("DROP TABLE IF EXISTS infra_artifacts")
-            self.conn.execute("DROP TABLE IF EXISTS unresolved_refs")
-            self.conn.execute("DROP TABLE IF EXISTS units")
-            self.conn.execute("DROP TABLE IF EXISTS files")
+        self._drop_all_tables()
         self.init_schema()
 
     def close(self) -> None:
@@ -216,14 +298,15 @@ class IndexStore:
                 f["module"],
                 f["tier"],
                 f.get("fallback_reason"),
+                f.get("unit_id"),
             )
             for f in sorted_files
         ]
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO files
-            (path, language, sha256, line_count, module, tier, fallback_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (path, language, sha256, line_count, module, tier, fallback_reason, unit_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             records,
         )
@@ -249,6 +332,9 @@ class IndexStore:
                 s["body_sha256"],
                 s.get("visibility"),
                 s.get("decorators_json"),
+                s.get("start_col"),
+                s.get("end_col"),
+                s.get("docstring"),
             )
             for s in sorted_symbols
         ]
@@ -256,8 +342,8 @@ class IndexStore:
             """
             INSERT INTO symbols
             (fqname, name, kind, file_path, start_line, end_line,
-             body_sha256, visibility, decorators_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             body_sha256, visibility, decorators_json, start_col, end_col, docstring)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             records,
         )
@@ -305,6 +391,10 @@ class IndexStore:
                 e["line"],
                 e.get("symbol_fqname"),
                 e.get("auth_symbols_json"),
+                e.get("col"),
+                e.get("block_end_line"),
+                e.get("confidence"),
+                e.get("rule_id"),
             )
             for e in sorted_entries
         ]
@@ -312,8 +402,8 @@ class IndexStore:
             """
             INSERT INTO entrypoints
             (kind, name, method, route_or_trigger, file_path, line,
-             symbol_fqname, auth_symbols_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             symbol_fqname, auth_symbols_json, col, block_end_line, confidence, rule_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             records,
         )
@@ -360,6 +450,79 @@ class IndexStore:
             records,
         )
 
+    def insert_facts(self, facts: Iterable[dict[str, Any]]) -> None:
+        """Insert extracted facts in deterministic row order."""
+        with self.conn:
+            self._insert_facts(facts)
+
+    def _insert_facts(self, facts: Iterable[dict[str, Any]]) -> None:
+        sorted_facts = sorted(
+            facts,
+            key=lambda f: (
+                f["file_path"],
+                f["line"],
+                f.get("col") or 0,
+                f["kind"],
+                f.get("name_text") or "",
+            ),
+        )
+        records = [
+            (
+                f["kind"],
+                f["file_path"],
+                f["line"],
+                f.get("col"),
+                f.get("end_line"),
+                f.get("enclosing_fqname"),
+                f.get("name_text"),
+                f.get("name_fqname"),
+                f.get("receiver_text"),
+                f.get("args_json"),
+                f.get("extra_json"),
+            )
+            for f in sorted_facts
+        ]
+        self.conn.executemany(
+            """
+            INSERT INTO facts
+            (kind, file_path, line, col, end_line, enclosing_fqname, name_text,
+             name_fqname, receiver_text, args_json, extra_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
+
+    def insert_synthetic_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
+        """Insert synthetic ``<module>``/block symbols in deterministic row order."""
+        with self.conn:
+            self._insert_synthetic_symbols(symbols)
+
+    def _insert_synthetic_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
+        sorted_symbols = sorted(
+            symbols,
+            key=lambda s: (s["file_path"], s["start_line"], s.get("start_col") or 0, s["fqname"]),
+        )
+        records = [
+            (
+                s["fqname"],
+                s["kind"],
+                s["file_path"],
+                s["start_line"],
+                s.get("start_col"),
+                s["end_line"],
+                s.get("end_col"),
+            )
+            for s in sorted_symbols
+        ]
+        self.conn.executemany(
+            """
+            INSERT INTO synthetic_symbols
+            (fqname, kind, file_path, start_line, start_col, end_line, end_col)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
+
     def insert_unit_data(
         self,
         *,
@@ -369,6 +532,8 @@ class IndexStore:
         entrypoints: Iterable[dict[str, Any]] = (),
         infra_artifacts: Iterable[dict[str, Any]] = (),
         unresolved_refs: Iterable[dict[str, Any]] = (),
+        facts: Iterable[dict[str, Any]] = (),
+        synthetic_symbols: Iterable[dict[str, Any]] = (),
     ) -> None:
         """Stream insertion of all artifacts extracted from a unit within a single transaction."""
         with self.conn:
@@ -384,6 +549,10 @@ class IndexStore:
                 self._insert_infra_artifacts(infra_artifacts)
             if unresolved_refs:
                 self._insert_unresolved_refs(unresolved_refs)
+            if facts:
+                self._insert_facts(facts)
+            if synthetic_symbols:
+                self._insert_synthetic_symbols(synthetic_symbols)
 
     def insert_unit_record(
         self,
@@ -452,16 +621,8 @@ class IndexStore:
         purged = sorted({str(path) for path in paths if path})
         if not purged:
             return []
-        statements = (
-            ("files", "path"),
-            ("symbols", "file_path"),
-            ("references", "file_path"),
-            ("entrypoints", "file_path"),
-            ("infra_artifacts", "file_path"),
-            ("unresolved_refs", "file_path"),
-        )
         with self.conn:
-            for table, column in statements:
+            for table, column in FILE_SCOPED_TABLES:
                 self.conn.executemany(
                     f'DELETE FROM "{table}" WHERE {column} = ?',
                     [(path,) for path in purged],

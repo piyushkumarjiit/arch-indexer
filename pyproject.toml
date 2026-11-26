@@ -33,7 +33,7 @@ arch-indexer = "arch_indexer.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-arch_indexer = ["toolchain.toml", "skeletons/*.md", "viewer/assets/*"]
+arch_indexer = ["toolchain.toml", "skeletons/*.md", "viewer/assets/*", "facts/queries/*.scm"]
 
 [tool.ruff]
 line-length = 100
