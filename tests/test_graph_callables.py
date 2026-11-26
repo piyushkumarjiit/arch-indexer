@@ -112,3 +112,64 @@ def test_graph_schema_version_is_1_2(tmp_path: Path) -> None:
         store.insert_files([_file("app/a.py")])
         graph = build_graph(store, tmp_path)
     assert graph["schema_version"] == "1.2"
+
+
+def test_boundary_classification_is_memoized_per_run(tmp_path: Path, monkeypatch) -> None:
+    from arch_indexer import graph as graph_module
+    from arch_indexer.graph_rules import classify_token_rule, edge_kind_for_token
+
+    tokens = ["sqlite3.connect", "requests.get", "app.a.helper"]
+    rows = [(token, 2 + i) for i in range(5) for token in tokens[:2]] + [(tokens[2], 20)]
+
+    expected_stores: dict[str, dict] = {}
+    expected_sinks: dict[str, dict] = {}
+    expected_edges: set[tuple[str, str, str, int]] = set()
+    for token, line in rows:
+        rule = classify_token_rule(token)
+        if rule is None:
+            continue
+        boundary, kind, canonical, label, rule_id = rule
+        target = ("ds:" if boundary == "datastore" else "ext:") + canonical
+        records = expected_stores if boundary == "datastore" else expected_sinks
+        record = records.setdefault(
+            target,
+            {"id": target, "kind": kind, "label": label, "evidence": set(), "rule_id": rule_id},
+        )
+        record["evidence"].add(f"app/a.py:{line}")
+        expected_edges.add(
+            ("sym:app.a.run", target, edge_kind_for_token(token, boundary_kind=kind), line)
+        )
+    for record in list(expected_stores.values()) + list(expected_sinks.values()):
+        record["evidence"] = sorted(record["evidence"])
+
+    with IndexStore(tmp_path / "s.db") as store:
+        store.insert_files([_file("app/a.py")])
+        store.insert_symbols(
+            [
+                _symbol("app.a.run", "function", "app/a.py", 1, 40),
+                _symbol("app.a.helper", "function", "app/a.py", 41, 50),
+            ]
+        )
+        store.insert_unresolved_refs([_unresolved(token, "app/a.py", line) for token, line in rows])
+
+        calls: list[str] = []
+        real = graph_module.classify_token_rule
+
+        def counting(token: str):
+            calls.append(token)
+            return real(token)
+
+        monkeypatch.setattr(graph_module, "classify_token_rule", counting)
+        graph = build_graph(store, tmp_path)
+        assert sorted(calls) == sorted(tokens)  # once per distinct token
+
+        # A second run re-classifies: the cache does not outlive a run.
+        calls.clear()
+        build_graph(store, tmp_path)
+        assert sorted(calls) == sorted(tokens)
+
+    assert {record["id"]: record for record in graph["data_stores"]} == expected_stores
+    assert {record["id"]: record for record in graph["external_sinks"]} == expected_sinks
+    assert {(e["source"], e["target"], e["kind"], e["line"]) for e in graph["edges"]} == (
+        expected_edges
+    )
