@@ -58,6 +58,10 @@ arch-indexer/
 │   ├── query.py                     # Fast local query commands over index.db
 │   ├── known_symbols.py             # Known data-store & external-sink client symbol patterns
 │   ├── source_scope.py              # Test-vs-product path classification for architecture outputs
+│   ├── runtime/
+│   │   ├── otlp.py                  # OTLP JSON/JSONL, Jaeger envelope & protobuf span loader with allow-list redaction
+│   │   ├── jaeger.py                # Read-only Jaeger `/api/v3/traces` client with URI credential redaction
+│   │   └── _otlp/                   # Vendored opentelemetry-proto bindings (Apache-2.0, see its README)
 │   ├── checks/
 │   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
 │   │   └── mermaid.py               # Static Mermaid validator & AUTO-DIAGRAM verifier
