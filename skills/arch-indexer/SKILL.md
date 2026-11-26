@@ -50,7 +50,7 @@ Run offline deterministic indexing with automatic citation line-shift repair:
 ```bash
 arch-indexer index <repo> --offline --auto-relocate-citations
 ```
-*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--docs-dir docs`, `--maven-online` (drop Maven's `-o`), repeatable `--maven-arg=<arg>` (forward extra Maven arguments; use `=` when the value starts with `-`), `--maven-reactor` (one scip-java run at the Maven root instead of one per module; falls back per module when it yields nothing). `--include-tests` also makes Maven run `test-compile`. Check `<cache>/repos/<id>/index.db` unit tiers with `arch-indexer query <repo> units`.*
+*Optional flags: `--strict-tier1`, `--force-full`, `--node-max-heap-mb 2048`, `--jvm-max-heap-mb 2048`, `--unit-timeout-sec 300`, `--max-parallel-units 1` (concurrent Tier 1 unit indexing; each holds its own Node/JVM heap), `--docs-dir docs`, `--maven-online` (drop Maven's `-o`), repeatable `--maven-arg=<arg>` (forward extra Maven arguments; use `=` when the value starts with `-`), `--maven-reactor` (one scip-java run at the Maven root instead of one per module; falls back per module when it yields nothing). `--include-tests` also makes Maven run `test-compile`. Check `<cache>/repos/<id>/index.db` unit tiers with `arch-indexer query <repo> units`.*
 
 Evaluate exit code:
 - **`0` (`EXIT_NO_CHANGES`)**: Documentation is up to date, either because the repository is unchanged and every required section has a body, or because the only change was line shifts that `--auto-relocate-citations` repaired with no section left impacted. Stop immediately; report documentation is up to date.

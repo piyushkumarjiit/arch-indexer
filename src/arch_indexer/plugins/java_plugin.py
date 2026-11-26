@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -310,8 +311,17 @@ class JavaPlugin(LanguagePlugin):
 
     def __init__(self) -> None:
         self.language = _JAVA_LANGUAGE
-        self.parser = Parser(self.language)
+        self._parser_local = threading.local()
+        self._reactor_lock = threading.Lock()
         self._reactor: _ReactorRun | None = None
+
+    @property
+    def parser(self) -> Parser:
+        p = getattr(self._parser_local, "parser", None)
+        if p is None:
+            p = Parser(self.language)
+            self._parser_local.parser = p
+        return p
 
     @property
     def name(self) -> str:
@@ -407,8 +417,10 @@ class JavaPlugin(LanguagePlugin):
         """
         from arch_indexer.scip import ingest_scip, scip_output_path
 
-        reactor = self._reactor
-        if reactor is not None and unit.unit_id in reactor.pending:
+        with self._reactor_lock:
+            reactor = self._reactor
+            use_reactor = reactor is not None and unit.unit_id in reactor.pending
+        if use_reactor and reactor is not None:
             reactor_result = self._ingest_from_reactor(
                 reactor, unit, limits, symbol_context, definitions
             )
@@ -633,12 +645,26 @@ class JavaPlugin(LanguagePlugin):
         """Ingest one unit from the shared reactor ``.scip``; ``None`` means run it alone."""
         from arch_indexer.scip import ingest_scip, scip_output_path
 
-        reactor.pending.discard(unit.unit_id)
         unit_copy = scip_output_path(
             limits.get("scip_tmp_dir"), unit, get_cache_dir(limits.get("cache_dir"))
         )
+        with self._reactor_lock:
+            if unit.unit_id not in reactor.pending:
+                return None
+            reactor.pending.discard(unit.unit_id)
+            try:
+                shutil.copyfile(reactor.scip_file, unit_copy)
+            except OSError as e:
+                unit_copy.unlink(missing_ok=True)
+                _reactor_note(
+                    f"could not read {unit.unit_id} from reactor output ({e}); running it alone"
+                )
+                if not reactor.pending:
+                    self._discard_reactor()
+                return None
+            if not reactor.pending:
+                self._discard_reactor()
         try:
-            shutil.copyfile(reactor.scip_file, unit_copy)
             tier2_result = self.index_unit_tier2(
                 unit, symbol_context=symbol_context, definitions=definitions
             )
@@ -655,9 +681,6 @@ class JavaPlugin(LanguagePlugin):
                 f"could not read {unit.unit_id} from reactor output ({e}); running it alone"
             )
             return None
-        finally:
-            if not reactor.pending:
-                self._discard_reactor()
 
     def extract_definitions(
         self, unit: IndexUnit

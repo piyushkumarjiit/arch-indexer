@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arch_indexer import __version__
 from arch_indexer.config import RepoCachePaths
 from arch_indexer.module_identity import REVERSE_DOMAIN_TLDS
 from arch_indexer.source_scope import in_scope
 
 UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
+
+SCHEMA_MAJOR: int = 2
+SCHEMA_VERSION: str = "2.0"
 
 
 def _repo_namespaces(modules: Iterable[str], fqnames: Iterable[str]) -> set[str]:
@@ -74,7 +79,132 @@ def split_unresolved_refs(
     return external, in_repo
 
 
+@dataclass(frozen=True)
+class TableSpec:
+    """Registry entry defining how an index table is purged and deterministically upserted."""
+
+    name: str
+    file_column: str | None = None
+    unit_column: str | None = None
+    columns: tuple[str, ...] = ()
+    required_columns: frozenset[str] = frozenset()
+    upsert_mode: str = "insert"
+    sort_key: Callable[[dict[str, Any]], Any] | None = None
+
+
+TABLE_REGISTRY: dict[str, TableSpec] = {
+    "files": TableSpec(
+        name="files",
+        file_column="path",
+        unit_column="unit_id",
+        columns=(
+            "path",
+            "language",
+            "sha256",
+            "line_count",
+            "module",
+            "tier",
+            "fallback_reason",
+            "unit_id",
+        ),
+        required_columns=frozenset({"path", "language", "sha256", "line_count", "module", "tier"}),
+        upsert_mode="replace",
+        sort_key=lambda f: f["path"],
+    ),
+    "symbols": TableSpec(
+        name="symbols",
+        file_column="file_path",
+        columns=(
+            "fqname",
+            "name",
+            "kind",
+            "file_path",
+            "start_line",
+            "end_line",
+            "body_sha256",
+            "visibility",
+            "decorators_json",
+        ),
+        required_columns=frozenset(
+            {"fqname", "name", "kind", "file_path", "start_line", "end_line", "body_sha256"}
+        ),
+        upsert_mode="insert",
+        sort_key=lambda s: (s["file_path"], s["start_line"], s["end_line"], s["fqname"]),
+    ),
+    "references": TableSpec(
+        name="references",
+        file_column="file_path",
+        columns=("symbol_fqname", "file_path", "line", "col", "ref_kind"),
+        required_columns=frozenset({"symbol_fqname", "file_path", "line", "col", "ref_kind"}),
+        upsert_mode="insert",
+        sort_key=lambda r: (
+            r["file_path"],
+            r["line"],
+            r["col"],
+            r["symbol_fqname"],
+            r["ref_kind"],
+        ),
+    ),
+    "entrypoints": TableSpec(
+        name="entrypoints",
+        file_column="file_path",
+        columns=(
+            "kind",
+            "name",
+            "method",
+            "route_or_trigger",
+            "file_path",
+            "line",
+            "symbol_fqname",
+            "auth_symbols_json",
+        ),
+        required_columns=frozenset({"kind", "name", "route_or_trigger", "file_path", "line"}),
+        upsert_mode="insert",
+        sort_key=lambda e: (e["file_path"], e["line"], e["kind"], e["name"]),
+    ),
+    "infra_artifacts": TableSpec(
+        name="infra_artifacts",
+        file_column="file_path",
+        columns=("kind", "file_path", "line", "summary_json"),
+        required_columns=frozenset({"kind", "file_path", "line", "summary_json"}),
+        upsert_mode="insert",
+        sort_key=lambda a: (a["file_path"], a["line"], a["kind"]),
+    ),
+    "unresolved_refs": TableSpec(
+        name="unresolved_refs",
+        file_column="file_path",
+        columns=("file_path", "line", "raw_symbol", "language"),
+        required_columns=frozenset({"file_path", "line", "raw_symbol", "language"}),
+        upsert_mode="insert",
+        sort_key=lambda u: (u["file_path"], u["line"], u["raw_symbol"]),
+    ),
+    "units": TableSpec(
+        name="units",
+        unit_column="unit_id",
+        columns=(
+            "unit_id",
+            "language",
+            "tier",
+            "files_count",
+            "fallback_reason",
+            "message",
+            "manifest_sha256",
+            "files_sha256",
+            "indexed_at_commit",
+        ),
+        required_columns=frozenset({"unit_id", "language", "tier", "files_count"}),
+        upsert_mode="replace",
+        sort_key=lambda u: u["unit_id"],
+    ),
+}
+
+
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
     language TEXT NOT NULL,
@@ -82,7 +212,8 @@ CREATE TABLE IF NOT EXISTS files (
     line_count INTEGER NOT NULL,
     module TEXT NOT NULL,
     tier TEXT NOT NULL,
-    fallback_reason TEXT
+    fallback_reason TEXT,
+    unit_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -141,9 +272,13 @@ CREATE TABLE IF NOT EXISTS units (
     tier TEXT NOT NULL,
     files_count INTEGER NOT NULL,
     fallback_reason TEXT,
-    message TEXT
+    message TEXT,
+    manifest_sha256 TEXT,
+    files_sha256 TEXT,
+    indexed_at_commit TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_files_unit_id ON files(unit_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_fqname ON symbols(fqname);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_refs_symbol_fqname ON "references"(symbol_fqname);
@@ -154,14 +289,28 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file
 """
 
 
+def _parse_schema_major(version: str | None) -> int | None:
+    if not version:
+        return None
+    major_part = version.strip().split(".", 1)[0]
+    try:
+        return int(major_part)
+    except ValueError:
+        return None
+
+
 class IndexStore:
     """SQLite backing store for repository architecture index (index.db)."""
 
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(self.db_path) != ":memory:":
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        self._closed = False
+        self._extra_tables: dict[str, TableSpec] = {}
+        self.needs_full_rebuild = False
         self.init_schema()
 
     @classmethod
@@ -173,25 +322,77 @@ class IndexStore:
         cache_paths.ensure_dirs()
         return cls(cache_paths.index_db)
 
+    def register_table(self, spec: TableSpec) -> None:
+        """Register an additional index table for table-driven purge and upsert."""
+        self._extra_tables[spec.name] = spec
+
+    def _registered_tables(self) -> dict[str, TableSpec]:
+        if not self._extra_tables:
+            return dict(TABLE_REGISTRY)
+        return {**TABLE_REGISTRY, **self._extra_tables}
+
+    def _existing_tables(self) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {row[0] for row in rows}
+
     def init_schema(self) -> None:
-        """Initialize table schema and indexes."""
+        """Initialize table schema and indexes, flagging lower-MAJOR DBs for rebuild."""
+        existing = self._existing_tables()
+        if existing:
+            if "meta" not in existing:
+                self.needs_full_rebuild = True
+                return
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            major = _parse_schema_major(row[0] if row is not None else None)
+            if major != SCHEMA_MAJOR:
+                self.needs_full_rebuild = True
+                return
+
+        self.needs_full_rebuild = False
         with self.conn:
             self.conn.executescript(SCHEMA_SQL)
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_MAJOR}")
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                [
+                    ("schema_version", SCHEMA_VERSION),
+                    ("arch_indexer_version", __version__),
+                    ("created_at_commit", ""),
+                ],
+            )
+
+    def get_meta(self, key: str) -> str | None:
+        """Read a metadata value from the ``meta`` table."""
+        if "meta" not in self._existing_tables():
+            return None
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write a metadata value in the ``meta`` table."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (key, value),
+            )
 
     def clear_all(self) -> None:
-        """Drop and recreate all tables for a clean full index."""
+        """Drop all tables and recreate schema v2 for a clean full index."""
+        existing = self._existing_tables()
         with self.conn:
-            self.conn.execute('DROP TABLE IF EXISTS "references"')
-            self.conn.execute("DROP TABLE IF EXISTS symbols")
-            self.conn.execute("DROP TABLE IF EXISTS entrypoints")
-            self.conn.execute("DROP TABLE IF EXISTS infra_artifacts")
-            self.conn.execute("DROP TABLE IF EXISTS unresolved_refs")
-            self.conn.execute("DROP TABLE IF EXISTS units")
-            self.conn.execute("DROP TABLE IF EXISTS files")
+            for table in sorted(existing):
+                self.conn.execute(f'DROP TABLE IF EXISTS "{table}"')
         self.init_schema()
 
     def close(self) -> None:
         """Close database connection."""
+        if self._closed:
+            return
+        self._closed = True
         self.conn.close()
 
     def __enter__(self) -> IndexStore:
@@ -200,190 +401,111 @@ class IndexStore:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
-    def insert_files(self, files: Iterable[dict[str, Any]]) -> None:
-        """Insert file records in deterministic row order by path."""
+    def upsert_rows(self, table_name: str, rows: Iterable[dict[str, Any]]) -> None:
+        """Insert or replace rows in deterministic order for any registered table."""
         with self.conn:
-            self._insert_files(files)
+            self._upsert_rows(table_name, rows)
 
-    def _insert_files(self, files: Iterable[dict[str, Any]]) -> None:
-        sorted_files = sorted(files, key=lambda f: f["path"])
+    def _upsert_rows(self, table_name: str, rows: Iterable[dict[str, Any]]) -> None:
+        spec = self._registered_tables().get(table_name)
+        if spec is None:
+            raise KeyError(f"Unknown index table: {table_name!r}")
+        if not spec.columns:
+            raise ValueError(f"Table {table_name!r} has no registered columns for upsert")
+
+        row_list = list(rows)
+        if not row_list:
+            return
+        if spec.sort_key is not None:
+            row_list = sorted(row_list, key=spec.sort_key)
+
         records = [
-            (
-                f["path"],
-                f["language"],
-                f["sha256"],
-                f["line_count"],
-                f["module"],
-                f["tier"],
-                f.get("fallback_reason"),
+            tuple(
+                row[col] if col in spec.required_columns else row.get(col) for col in spec.columns
             )
-            for f in sorted_files
+            for row in row_list
         ]
+        verb = "INSERT OR REPLACE" if spec.upsert_mode == "replace" else "INSERT"
+        col_sql = ", ".join(f'"{col}"' for col in spec.columns)
+        placeholders = ", ".join("?" for _ in spec.columns)
         self.conn.executemany(
-            """
-            INSERT OR REPLACE INTO files
-            (path, language, sha256, line_count, module, tier, fallback_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
+            f'{verb} INTO "{spec.name}" ({col_sql}) VALUES ({placeholders})',
             records,
         )
+
+    def insert_files(self, files: Iterable[dict[str, Any]]) -> None:
+        """Insert file records in deterministic row order by path."""
+        self.upsert_rows("files", files)
+
+    def _insert_files(self, files: Iterable[dict[str, Any]]) -> None:
+        self._upsert_rows("files", files)
 
     def insert_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
         """Insert symbol records in deterministic row order."""
-        with self.conn:
-            self._insert_symbols(symbols)
+        self.upsert_rows("symbols", symbols)
 
     def _insert_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
-        sorted_symbols = sorted(
-            symbols,
-            key=lambda s: (s["file_path"], s["start_line"], s["end_line"], s["fqname"]),
-        )
-        records = [
-            (
-                s["fqname"],
-                s["name"],
-                s["kind"],
-                s["file_path"],
-                s["start_line"],
-                s["end_line"],
-                s["body_sha256"],
-                s.get("visibility"),
-                s.get("decorators_json"),
-            )
-            for s in sorted_symbols
-        ]
-        self.conn.executemany(
-            """
-            INSERT INTO symbols
-            (fqname, name, kind, file_path, start_line, end_line,
-             body_sha256, visibility, decorators_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            records,
-        )
+        self._upsert_rows("symbols", symbols)
 
     def insert_references(self, refs: Iterable[dict[str, Any]]) -> None:
         """Insert reference records in deterministic row order into quoted "references" table."""
-        with self.conn:
-            self._insert_references(refs)
+        self.upsert_rows("references", refs)
 
     def _insert_references(self, refs: Iterable[dict[str, Any]]) -> None:
-        sorted_refs = sorted(
-            refs,
-            key=lambda r: (r["file_path"], r["line"], r["col"], r["symbol_fqname"], r["ref_kind"]),
-        )
-        records = [
-            (r["symbol_fqname"], r["file_path"], r["line"], r["col"], r["ref_kind"])
-            for r in sorted_refs
-        ]
-        self.conn.executemany(
-            """
-            INSERT INTO "references"
-            (symbol_fqname, file_path, line, col, ref_kind)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            records,
-        )
+        self._upsert_rows("references", refs)
 
     def insert_entrypoints(self, entrypoints: Iterable[dict[str, Any]]) -> None:
         """Insert entrypoints in deterministic row order."""
-        with self.conn:
-            self._insert_entrypoints(entrypoints)
+        self.upsert_rows("entrypoints", entrypoints)
 
     def _insert_entrypoints(self, entrypoints: Iterable[dict[str, Any]]) -> None:
-        sorted_entries = sorted(
-            entrypoints,
-            key=lambda e: (e["file_path"], e["line"], e["kind"], e["name"]),
-        )
-        records = [
-            (
-                e["kind"],
-                e["name"],
-                e.get("method"),
-                e["route_or_trigger"],
-                e["file_path"],
-                e["line"],
-                e.get("symbol_fqname"),
-                e.get("auth_symbols_json"),
-            )
-            for e in sorted_entries
-        ]
-        self.conn.executemany(
-            """
-            INSERT INTO entrypoints
-            (kind, name, method, route_or_trigger, file_path, line,
-             symbol_fqname, auth_symbols_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            records,
-        )
+        self._upsert_rows("entrypoints", entrypoints)
 
     def insert_infra_artifacts(self, infra: Iterable[dict[str, Any]]) -> None:
         """Insert infra artifacts in deterministic row order."""
-        with self.conn:
-            self._insert_infra_artifacts(infra)
+        self.upsert_rows("infra_artifacts", infra)
 
     def _insert_infra_artifacts(self, infra: Iterable[dict[str, Any]]) -> None:
-        sorted_infra = sorted(
-            infra,
-            key=lambda a: (a["file_path"], a["line"], a["kind"]),
-        )
-        records = [(a["kind"], a["file_path"], a["line"], a["summary_json"]) for a in sorted_infra]
-        self.conn.executemany(
-            """
-            INSERT INTO infra_artifacts
-            (kind, file_path, line, summary_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            records,
-        )
+        self._upsert_rows("infra_artifacts", infra)
 
     def insert_unresolved_refs(self, unresolved: Iterable[dict[str, Any]]) -> None:
         """Insert unresolved refs in deterministic row order."""
-        with self.conn:
-            self._insert_unresolved_refs(unresolved)
+        self.upsert_rows("unresolved_refs", unresolved)
 
     def _insert_unresolved_refs(self, unresolved: Iterable[dict[str, Any]]) -> None:
-        sorted_unresolved = sorted(
-            unresolved,
-            key=lambda u: (u["file_path"], u["line"], u["raw_symbol"]),
-        )
-        records = [
-            (u["file_path"], u["line"], u["raw_symbol"], u["language"]) for u in sorted_unresolved
-        ]
-        self.conn.executemany(
-            """
-            INSERT INTO unresolved_refs
-            (file_path, line, raw_symbol, language)
-            VALUES (?, ?, ?, ?)
-            """,
-            records,
-        )
+        self._upsert_rows("unresolved_refs", unresolved)
 
     def insert_unit_data(
         self,
         *,
+        unit_id: str | None = None,
         files: Iterable[dict[str, Any]] = (),
         symbols: Iterable[dict[str, Any]] = (),
         references: Iterable[dict[str, Any]] = (),
         entrypoints: Iterable[dict[str, Any]] = (),
         infra_artifacts: Iterable[dict[str, Any]] = (),
         unresolved_refs: Iterable[dict[str, Any]] = (),
+        **extra_tables: Iterable[dict[str, Any]],
     ) -> None:
         """Stream insertion of all artifacts extracted from a unit within a single transaction."""
+        batches: dict[str, Iterable[dict[str, Any]]] = {
+            "files": files,
+            "symbols": symbols,
+            "references": references,
+            "entrypoints": entrypoints,
+            "infra_artifacts": infra_artifacts,
+            "unresolved_refs": unresolved_refs,
+            **extra_tables,
+        }
+        if unit_id is not None:
+            batches["files"] = [
+                {**f, "unit_id": f.get("unit_id") or unit_id} for f in batches["files"]
+            ]
         with self.conn:
-            if files:
-                self._insert_files(files)
-            if symbols:
-                self._insert_symbols(symbols)
-            if references:
-                self._insert_references(references)
-            if entrypoints:
-                self._insert_entrypoints(entrypoints)
-            if infra_artifacts:
-                self._insert_infra_artifacts(infra_artifacts)
-            if unresolved_refs:
-                self._insert_unresolved_refs(unresolved_refs)
+            for table_name in self._registered_tables():
+                rows = batches.get(table_name)
+                if rows:
+                    self._upsert_rows(table_name, rows)
 
     def insert_unit_record(
         self,
@@ -394,17 +516,27 @@ class IndexStore:
         files_count: int,
         fallback_reason: str | None = None,
         message: str = "",
+        manifest_sha256: str | None = None,
+        files_sha256: str | None = None,
+        indexed_at_commit: str | None = None,
     ) -> None:
-        """Record how one indexing unit resolved (tier, fallback reason, captured message)."""
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT OR REPLACE INTO units
-                (unit_id, language, tier, files_count, fallback_reason, message)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (unit_id, language, tier, files_count, fallback_reason, message),
-            )
+        """Record how one indexing unit resolved (tier, hashes, fallback reason, message)."""
+        self.upsert_rows(
+            "units",
+            [
+                {
+                    "unit_id": unit_id,
+                    "language": language,
+                    "tier": tier,
+                    "files_count": files_count,
+                    "fallback_reason": fallback_reason,
+                    "message": message,
+                    "manifest_sha256": manifest_sha256,
+                    "files_sha256": files_sha256,
+                    "indexed_at_commit": indexed_at_commit,
+                }
+            ],
+        )
 
     def get_unit_records(self) -> list[dict[str, Any]]:
         """Return every unit's tier and fallback detail in deterministic unit-id order."""
@@ -418,16 +550,26 @@ class IndexStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_file_records(self) -> list[dict[str, Any]]:
-        """Return every indexed file record in deterministic path order."""
+    def get_unit_states(self) -> list[dict[str, Any]]:
+        """Return every unit's full incremental state record in deterministic unit-id order."""
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT path, language, sha256, line_count, module, tier, fallback_reason
-            FROM files
-            ORDER BY path
+            SELECT unit_id, language, tier, files_count, fallback_reason, message,
+                   manifest_sha256, files_sha256, indexed_at_commit
+            FROM units
+            ORDER BY unit_id
             """
         )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_file_records(self, *, include_unit_id: bool = False) -> list[dict[str, Any]]:
+        """Return every indexed file record in deterministic path order."""
+        cols = "path, language, sha256, line_count, module, tier, fallback_reason"
+        if include_unit_id:
+            cols += ", unit_id"
+        cursor = self.conn.cursor()
+        cursor.execute(f"SELECT {cols} FROM files ORDER BY path")
         return [dict(row) for row in cursor.fetchall()]
 
     def get_symbol_records(self) -> list[dict[str, Any]]:
@@ -443,8 +585,26 @@ class IndexStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def _file_keyed_tables(self) -> list[TableSpec]:
+        specs = [spec for spec in self._registered_tables().values() if spec.file_column]
+        specs.sort(key=lambda s: 1 if s.name == "files" else 0)
+        return specs
+
+    def _unit_keyed_tables(self) -> list[TableSpec]:
+        return [spec for spec in self._registered_tables().values() if spec.unit_column]
+
+    def _purge_files_in_tx(self, purged: list[str]) -> None:
+        if not purged:
+            return
+        params = [(path,) for path in purged]
+        for spec in self._file_keyed_tables():
+            self.conn.executemany(
+                f'DELETE FROM "{spec.name}" WHERE "{spec.file_column}" = ?',
+                params,
+            )
+
     def purge_files(self, paths: Iterable[str]) -> list[str]:
-        """Delete every row referencing the given file paths from all index tables (spec 5.3).
+        """Delete every row referencing the given file paths from all registered tables.
 
         Returns the sorted list of purged paths. Safe to call with an empty list and
         idempotent, so a deleted file can never remain indexed in any table.
@@ -452,19 +612,29 @@ class IndexStore:
         purged = sorted({str(path) for path in paths if path})
         if not purged:
             return []
-        statements = (
-            ("files", "path"),
-            ("symbols", "file_path"),
-            ("references", "file_path"),
-            ("entrypoints", "file_path"),
-            ("infra_artifacts", "file_path"),
-            ("unresolved_refs", "file_path"),
-        )
         with self.conn:
-            for table, column in statements:
-                self.conn.executemany(
-                    f'DELETE FROM "{table}" WHERE {column} = ?',
-                    [(path,) for path in purged],
+            self._purge_files_in_tx(purged)
+        return purged
+
+    def purge_unit(self, unit_id: str, *, remove_unit: bool = True) -> list[str]:
+        """Delete all rows in every registered table for files belonging to ``unit_id``.
+
+        Also deletes rows keyed directly by ``unit_id`` (including ``units`` when
+        ``remove_unit`` is true). Returns the sorted list of file paths purged.
+        """
+        rows = self.conn.execute(
+            "SELECT path FROM files WHERE unit_id = ? ORDER BY path",
+            (unit_id,),
+        ).fetchall()
+        purged = [row[0] for row in rows]
+        with self.conn:
+            self._purge_files_in_tx(purged)
+            for spec in self._unit_keyed_tables():
+                if spec.name == "units" and not remove_unit:
+                    continue
+                self.conn.execute(
+                    f'DELETE FROM "{spec.name}" WHERE "{spec.unit_column}" = ?',
+                    (unit_id,),
                 )
         return purged
 

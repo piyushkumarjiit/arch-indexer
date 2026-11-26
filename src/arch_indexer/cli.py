@@ -12,6 +12,7 @@ from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
     DEFAULT_DOCS_DIR,
     DEFAULT_MAX_LINES_PER_WORKER,
+    DEFAULT_MAX_PARALLEL_UNITS,
     DEFAULT_MAX_SECTIONS_PER_WORKER,
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
     DEFAULT_UNIT_TIMEOUT_SEC,
@@ -162,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_UNIT_TIMEOUT_SEC,
         help="Timeout in seconds per index unit",
+    )
+    index_parser.add_argument(
+        "--max-parallel-units",
+        type=_positive_int,
+        default=DEFAULT_MAX_PARALLEL_UNITS,
+        help="Maximum number of Tier 1 units to index concurrently",
     )
     index_parser.add_argument(
         "--chunk-files",
@@ -428,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 node_max_heap_mb=args.node_max_heap_mb,
                 jvm_max_heap_mb=args.jvm_max_heap_mb,
                 unit_timeout_sec=args.unit_timeout_sec,
+                max_parallel_units=args.max_parallel_units,
                 chunk_files=args.chunk_files,
                 docs_dir=args.docs_dir,
                 auto_relocate_citations=args.auto_relocate_citations,
