@@ -190,6 +190,7 @@ export function GraphCanvas({
         maxZoom={2}
         nodesDraggable={false}
         nodesConnectable={false}
+        zoomOnDoubleClick={false}
         onNodeClick={(_ev, node) => onSelectNode(node.id)}
         onNodeDoubleClick={(_ev, node) => {
           const vn = nodes.find((n) => n.id === node.id);
