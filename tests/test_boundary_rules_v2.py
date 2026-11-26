@@ -189,3 +189,93 @@ def test_tier1_typescript_package_imports_are_data_store_evidence(tmp_path: Path
         (data_store["id"], data_store["kind"], data_store["evidence"])
         for data_store in graph["data_stores"]
     ] == [("ds:sqlite", "sql", ["web/api/db.ts:1", "web/api/db2.ts:1"])]
+
+
+def test_tier1_typescript_in_repo_bare_import_is_not_external(tmp_path: Path) -> None:
+    """A bare specifier resolved to a repo symbol is not an external boundary.
+
+    With tsconfig ``baseUrl: "src"`` scip-typescript resolves ``github/client`` to
+    ``src/github/client.ts`` and records an occurrence for the imported symbol, so
+    the import statement names repo code rather than the GitHub API.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src" / "github").mkdir(parents=True)
+    (repo / "src" / "app").mkdir(parents=True)
+    client = repo / "src" / "github" / "client.ts"
+    client.write_text("export function listRepos(): string[] {\n  return [];\n}\n")
+    main = repo / "src" / "app" / "main.ts"
+    main.write_text(
+        'import { listRepos } from "github/client";\n'
+        "\n"
+        "export function run(): string[] {\n"
+        "  return listRepos();\n"
+        "}\n"
+    )
+
+    client_module = "scip-typescript npm fqd-like 0.1.0 src/github/`client.ts`/"
+    list_repos = f"{client_module}listRepos()."
+    main_module = "scip-typescript npm fqd-like 0.1.0 src/app/`main.ts`/"
+    scip_index = scip_pb2.Index(
+        documents=[
+            scip_pb2.Document(
+                relative_path="src/github/client.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=client_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=list_repos,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 16, 25],
+                    ),
+                ],
+            ),
+            scip_pb2.Document(
+                relative_path="src/app/main.ts",
+                language="TypeScript",
+                occurrences=[
+                    scip_pb2.Occurrence(
+                        symbol=main_module,
+                        symbol_roles=scip_pb2.SymbolRole.Definition,
+                        range=[0, 0, 0],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=list_repos,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[0, 9, 18],
+                    ),
+                    scip_pb2.Occurrence(
+                        symbol=list_repos,
+                        symbol_roles=scip_pb2.SymbolRole.ReadAccess,
+                        range=[3, 9, 18],
+                    ),
+                ],
+            ),
+        ]
+    )
+    scip_path = tmp_path / "typescript_in_repo_import.scip"
+    scip_path.write_bytes(scip_index.SerializeToString())
+    unit = IndexUnit(
+        unit_id="typescript:root",
+        name="root",
+        language="typescript",
+        root_dir=repo,
+        files=[client, main],
+    )
+
+    result = ingest_scip(scip_path, unit)
+
+    assert result.unresolved_refs == []
+    with IndexStore(tmp_path / "index.db") as store:
+        store.insert_unit_data(
+            files=result.files,
+            symbols=result.symbols,
+            references=result.references,
+            unresolved_refs=result.unresolved_refs,
+        )
+        graph = build_graph(store, repo)
+
+    assert graph["external_sinks"] == []
