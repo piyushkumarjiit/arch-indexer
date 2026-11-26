@@ -347,8 +347,6 @@ def _collect_boundaries(
     unresolved_rows: list[dict[str, Any]],
     symbols_by_file: dict[str, list[dict[str, Any]]],
     symbols_by_fqname: dict[str, dict[str, Any]],
-    *,
-    memoize: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Detect data stores/sinks and the symbol-to-boundary edges that use them.
 
@@ -360,8 +358,6 @@ def _collect_boundaries(
     memo: dict[str, tuple[str, str, str, str, str] | None] = {}
 
     def classify(token: str) -> tuple[str, str, str, str, str] | None:
-        if not memoize:
-            return classify_token_rule(token)
         if token not in memo:
             memo[token] = classify_token_rule(token)
         return memo[token]
