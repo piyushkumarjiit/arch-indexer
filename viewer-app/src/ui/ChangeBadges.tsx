@@ -1,9 +1,3 @@
-/*
- * Portions adapted from floorplan (https://github.com/haydenschmitty/floorplan)
- * commit 94f81b4, assets/ui/25-recent.js. Copyright (c) 2026 Hayden Smith. MIT License.
- * See THIRD_PARTY_NOTICES.md.
- */
-
 import type { DeltaInfo, OverviewData, PartChunk } from "../types/bundle";
 
 export type ChangeKind = "new" | "changed";
@@ -14,6 +8,22 @@ export interface ChangeItem {
   file: string;
   partId?: string;
   change: ChangeKind;
+}
+
+const trimTrailingSlashes = (p: string): string => p.replace(/\/+$/, "");
+
+/** True when `file` is `dir` itself or lives somewhere beneath it. */
+const isUnder = (file: string, dir: string): boolean =>
+  file === dir || file.startsWith(`${dir}/`);
+
+/** New files take precedence over changed ones; `null` when neither matches. */
+function classify(
+  delta: DeltaInfo,
+  predicate: (file: string) => boolean,
+): ChangeKind | null {
+  if (delta.new_files.some(predicate)) return "new";
+  if (delta.changed_files.some(predicate)) return "changed";
+  return null;
 }
 
 export function buildDeltaFileSets(delta?: DeltaInfo | null): {
@@ -31,94 +41,87 @@ export function getFileChangeStatus(
   delta?: DeltaInfo | null,
 ): ChangeKind | null {
   if (!filePath || !delta) return null;
-  if (delta.new_files.includes(filePath)) return "new";
-  if (delta.changed_files.includes(filePath)) return "changed";
-  return null;
+  return classify(delta, (f) => f === filePath);
 }
 
 export function getPartChangeStatus(
   partId: string,
   overview: OverviewData | null,
 ): ChangeKind | null {
-  if (!overview?.delta) return null;
+  const delta = overview?.delta;
+  if (!overview || !delta) return null;
   const part = overview.parts.find((p) => p.id === partId);
   if (!part) return null;
-  const { newFiles, changedFiles } = buildDeltaFileSets(overview.delta);
-  const rootPrefix = part.root ? `${part.root.replace(/\/+$/, "")}/` : "";
-  const groupPaths = overview.groups
+
+  const root = part.root ? trimTrailingSlashes(part.root) : "";
+  const evidenceFiles = new Set(part.evidence.map((e) => e.file));
+  const groupDirs = overview.groups
     .filter((g) => g.part_id === partId)
-    .map((g) => g.path.replace(/\/+$/, ""));
+    .map((g) => trimTrailingSlashes(g.path))
+    .filter((dir) => dir !== "");
 
-  const matchesPart = (filePath: string) => {
-    if (part.evidence.some((e) => e.file === filePath)) return true;
-    if (rootPrefix && (filePath === part.root || filePath.startsWith(rootPrefix))) {
-      return true;
-    }
-    return groupPaths.some((gp) => gp && (filePath === gp || filePath.startsWith(`${gp}/`)));
-  };
-
-  for (const f of newFiles) {
-    if (matchesPart(f)) return "new";
-  }
-  for (const f of changedFiles) {
-    if (matchesPart(f)) return "changed";
-  }
-  return null;
+  return classify(
+    delta,
+    (file) =>
+      evidenceFiles.has(file) ||
+      (root !== "" && isUnder(file, root)) ||
+      groupDirs.some((dir) => isUnder(file, dir)),
+  );
 }
 
 export function getGroupChangeStatus(
   groupId: string,
   overview: OverviewData | null,
 ): ChangeKind | null {
-  if (!overview?.delta) return null;
+  const delta = overview?.delta;
+  if (!overview || !delta) return null;
   const group = overview.groups.find((g) => g.id === groupId);
   if (!group) return null;
-  const prefix = group.path.replace(/\/+$/, "");
-  if (!prefix) return null;
-  const matches = (f: string) => f === prefix || f.startsWith(`${prefix}/`);
-  if (overview.delta.new_files.some(matches)) return "new";
-  if (overview.delta.changed_files.some(matches)) return "changed";
-  return null;
+  const dir = trimTrailingSlashes(group.path);
+  if (!dir) return null;
+  return classify(delta, (file) => isUnder(file, dir));
 }
 
 export function collectChangeItems(
   overview: OverviewData | null,
   chunks: Record<string, PartChunk>,
 ): ChangeItem[] {
-  if (!overview?.delta) return [];
-  const items: ChangeItem[] = [];
-  const seen = new Set<string>();
+  const delta = overview?.delta;
+  if (!overview || !delta) return [];
 
-  const pushFile = (filePath: string, change: ChangeKind) => {
-    const id = `file:${filePath}`;
-    if (seen.has(id)) return;
-    seen.add(id);
-    let partId: string | undefined;
-    for (const [pid, chunk] of Object.entries(chunks)) {
-      if (chunk.files.some((f) => f.path === filePath)) {
-        partId = pid;
-        break;
-      }
-    }
-    if (!partId) {
-      const grp = overview.groups.find(
-        (g) => g.path && (filePath === g.path || filePath.startsWith(`${g.path.replace(/\/+$/, "")}/`)),
-      );
-      partId = grp?.part_id;
-    }
-    items.push({
-      id,
-      label: filePath.split("/").pop() || filePath,
-      file: filePath,
-      partId,
-      change,
-    });
+  const owningPart = (file: string): string | undefined => {
+    const hit = Object.entries(chunks).find(([, chunk]) =>
+      chunk.files.some((f) => f.path === file),
+    );
+    if (hit) return hit[0];
+    return overview.groups.find((g) => g.path && isUnder(file, trimTrailingSlashes(g.path)))
+      ?.part_id;
   };
 
-  for (const f of overview.delta.new_files) pushFile(f, "new");
-  for (const f of overview.delta.changed_files) pushFile(f, "changed");
-  return items.sort((a, b) => a.file.localeCompare(b.file));
+  const byId = new Map<string, ChangeItem>();
+  const tagged: Array<[string, ChangeKind]> = [
+    ...delta.new_files.map((f): [string, ChangeKind] => [f, "new"]),
+    ...delta.changed_files.map((f): [string, ChangeKind] => [f, "changed"]),
+  ];
+  for (const [file, change] of tagged) {
+    const id = `file:${file}`;
+    if (byId.has(id)) continue;
+    byId.set(id, {
+      id,
+      label: file.split("/").pop() || file,
+      file,
+      partId: owningPart(file),
+      change,
+    });
+  }
+
+  return [...byId.values()].sort((a, b) => a.file.localeCompare(b.file));
 }
+
+const BADGE_TITLES: Record<ChangeKind, string> = {
+  new: "New since last index",
+  changed: "Changed since last index",
+};
 
 export function ChangeBadge({ status }: { status?: ChangeKind | null }) {
   if (!status) return null;
@@ -126,7 +129,7 @@ export function ChangeBadge({ status }: { status?: ChangeKind | null }) {
     <span
       className={`arch-badge arch-badge--${status}`}
       data-testid={`change-badge-${status}`}
-      title={status === "new" ? "New since last index" : "Changed since last index"}
+      title={BADGE_TITLES[status]}
     >
       {status}
     </span>
@@ -143,11 +146,12 @@ export function ChangeOverlayButton({
   onClick: () => void;
 }) {
   if (count === 0) return null;
+  const className = active ? "arch-btn arch-btn--active" : "arch-btn";
   return (
     <button
       type="button"
       id="btn-recent"
-      className={`arch-btn ${active ? "arch-btn--active" : ""}`}
+      className={className}
       onClick={onClick}
       title="Files changed or added since last index"
     >
@@ -176,15 +180,15 @@ export function ChangeOverlayPanel({
         </button>
       </div>
       <div className="arch-recent-list">
-        {items.map((it) => (
+        {items.map((item) => (
           <button
-            key={it.id}
+            key={item.id}
             type="button"
             className="arch-recent-item"
-            onClick={() => onSelect(it.id)}
+            onClick={() => onSelect(item.id)}
           >
-            <ChangeBadge status={it.change} />
-            <span className="arch-recent-path">{it.file}</span>
+            <ChangeBadge status={item.change} />
+            <span className="arch-recent-path">{item.file}</span>
           </button>
         ))}
       </div>
