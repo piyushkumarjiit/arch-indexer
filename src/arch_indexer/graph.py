@@ -18,7 +18,7 @@ from arch_indexer.config import DEFAULT_DOCS_DIR
 from arch_indexer.graph_rules import (
     classify_image,
     classify_terraform,
-    classify_token,
+    classify_token_rule,
     edge_kind_for_token,
 )
 from arch_indexer.module_identity import (
@@ -32,7 +32,10 @@ from arch_indexer.source_scope import filter_rows
 from arch_indexer.store import IndexStore
 from arch_indexer.viewer import render_viewer
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+
+# Symbol kinds that may become service nodes; fields, parameters and locals may not.
+CALLABLE_KINDS = frozenset({"function", "method", "class", "interface"})
 
 _SOURCE_ROOTS = SOURCE_ROOTS
 _REVERSE_DOMAIN_TLDS = REVERSE_DOMAIN_TLDS
@@ -266,16 +269,23 @@ def _collect_boundaries(
     candidates: list[dict[str, Any]] = []
 
     def consider(token: str, file_path: str, line: int) -> None:
-        classified = classify_token(token)
+        classified = classify_token_rule(token)
         if classified is None:
             return
-        boundary, kind, canonical, label = classified
+        boundary, kind, canonical, label, rule_id = classified
         target_id = _boundary_id(boundary, canonical)
         record = boundaries.setdefault(
             target_id,
-            {"boundary": boundary, "kind": kind, "label": label, "evidence": set()},
+            {
+                "boundary": boundary,
+                "kind": kind,
+                "label": label,
+                "evidence": set(),
+                "rule_ids": set(),
+            },
         )
         record["evidence"].add(f"{file_path}:{line}")
+        record["rule_ids"].add(rule_id)
         symbol = _enclosing_symbol(symbols_by_file, file_path, line)
         if symbol is not None:
             candidates.append(
@@ -420,13 +430,14 @@ def build_graph(
     for boundary_id, record in _collect_infra_boundaries(infra_rows).items():
         merged = boundaries.setdefault(boundary_id, record)
         merged["evidence"].update(record["evidence"])
+        merged.setdefault("rule_ids", set())
 
     call_edges: list[dict[str, Any]] = []
     for row in ref_rows:
         if row["ref_kind"] != "call":
             continue
         callee = symbols_by_fqname.get(row["symbol_fqname"])
-        if callee is None:
+        if callee is None or callee["kind"] not in CALLABLE_KINDS:
             continue
         caller = _enclosing_symbol(symbols_by_file, row["file_path"], row["line"])
         if caller is None or caller["fqname"] == callee["fqname"]:
@@ -532,14 +543,15 @@ def build_graph(
             record = boundaries[boundary_id]
             if record["boundary"] != which:
                 continue
-            records.append(
-                {
-                    "id": boundary_id,
-                    "kind": record["kind"],
-                    "label": record["label"],
-                    "evidence": sorted(record["evidence"]),
-                }
-            )
+            entry = {
+                "id": boundary_id,
+                "kind": record["kind"],
+                "label": record["label"],
+                "evidence": sorted(record["evidence"]),
+            }
+            if record.get("rule_ids"):
+                entry["rule_id"] = min(record["rule_ids"])
+            records.append(entry)
         return records
 
     return {
