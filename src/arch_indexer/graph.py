@@ -307,13 +307,19 @@ def _bound_entry(
     row: dict[str, Any],
     callers_by_file: dict[str, list[dict[str, Any]]],
     module_fq_by_file: dict[str, str],
+    block_fq_by_file_line: dict[tuple[str, int], str],
 ) -> dict[str, Any]:
-    """Bind a ``main``/``cli`` entry with no symbol to the innermost symbol around it.
+    """Bind a ``main``/``cli`` entry to the innermost symbol around it.
 
-    The entry's ``(line, col)`` picks the innermost enclosing symbol, else the file's
-    ``<module>`` symbol, so its top-level code gets edges.
+    The entry's block symbol wins, else its own symbol, else the innermost enclosing
+    symbol, else the file's ``<module>`` symbol, so its top-level code gets edges.
     """
-    if row["symbol_fqname"] or row["kind"] not in _MODULE_OWNER_KINDS:
+    if row["kind"] not in _MODULE_OWNER_KINDS:
+        return row
+    block_fqname = block_fq_by_file_line.get((row["file_path"], row["line"]))
+    if block_fqname:
+        return {**row, "symbol_fqname": block_fqname}
+    if row["symbol_fqname"]:
         return row
     symbol = _enclosing_symbol(callers_by_file, row["file_path"], row["line"], row.get("col"))
     fqname = symbol["fqname"] if symbol else module_fq_by_file.get(row["file_path"])
@@ -649,8 +655,14 @@ def build_graph(
     module_fq_by_file = {
         row["file_path"]: row["fqname"] for row in synthetic_rows if row["kind"] == "module"
     }
+    block_fq_by_file_line = {
+        (row["file_path"], row["start_line"]): row["fqname"]
+        for row in synthetic_rows
+        if row["kind"] == "block"
+    }
     entrypoint_rows = [
-        _bound_entry(row, callers_by_file, module_fq_by_file) for row in entrypoint_rows
+        _bound_entry(row, callers_by_file, module_fq_by_file, block_fq_by_file_line)
+        for row in entrypoint_rows
     ]
     entrypoint_nodes, handler_to_nodes = _entrypoint_nodes(
         entrypoint_rows, module_by_file, tier_by_file
@@ -919,7 +931,11 @@ def build_graph(
 
 def _block_label(symbol: dict[str, Any]) -> str:
     fqname = symbol["fqname"]
-    return f"block@L{symbol['start_line']}" if "#L" in fqname else fqname.rsplit(".", 1)[-1]
+    return (
+        f"block@L{symbol['start_line']}"
+        if "#L" in fqname
+        else fqname.split("@", 1)[0].rsplit(".", 1)[-1]
+    )
 
 
 def _file_records(

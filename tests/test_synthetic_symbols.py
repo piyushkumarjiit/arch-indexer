@@ -108,6 +108,27 @@ def test_module_symbol_is_not_a_caller_in_files_without_an_entry(tmp_path: Path)
     assert not any(e["source"].endswith("<module>") for e in graph["edges"])
 
 
+def test_same_module_name_in_two_units_stays_attributed_to_its_file(tmp_path: Path) -> None:
+    repo = tmp_path / "two_units"
+    (repo / "src").mkdir(parents=True)
+    (repo / "main.py").write_text(
+        'def root_work():\n    return "root"\n\n\nroot_work()\n\n'
+        'if __name__ == "__main__":\n    root_work()\n'
+    )
+    (repo / "src" / "main.py").write_text(
+        'def src_work():\n    return "src"\n\n\nsrc_work()\n\n'
+        'if __name__ == "__main__":\n    src_work()\n'
+    )
+    graph = _index(repo, tmp_path / "cache")
+
+    def call_sources(target: str) -> set[str]:
+        sources = {e["source"] for e in graph["edges"] if e["target"] == target}
+        return {n["file"] for n in graph["nodes"] if n["id"] in sources}
+
+    assert call_sources("sym:main.root_work") == {"main.py"}
+    assert call_sources("sym:main.src_work") == {"src/main.py"}
+
+
 def test_build_synthetic_symbols_shapes() -> None:
     files = [
         {"path": "pkg/a.py", "language": "python", "module": "pkg.a", "line_count": 30},
