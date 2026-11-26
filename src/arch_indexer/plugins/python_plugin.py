@@ -22,6 +22,9 @@ from arch_indexer.config import (
     get_cache_dir,
     get_node_heap_mb,
 )
+from arch_indexer.facts import extract_facts
+from arch_indexer.facts.columns import LineColumns
+from arch_indexer.facts.definitions import definition_extras
 from arch_indexer.plugins.base import (
     FallbackSignal,
     IndexingTier,
@@ -1195,14 +1198,31 @@ class PythonPlugin(LanguagePlugin):
             )
 
             tree = self.parser.parse(source_bytes)
+            columns = LineColumns(source_bytes)
             self._collect_definitions(
-                tree.root_node, source_bytes, rel_path, module_name, symbol_records
+                tree.root_node,
+                source_bytes,
+                rel_path,
+                module_name,
+                symbol_records,
+                columns=columns,
             )
             self._collect_variables(
-                tree.root_node, source_bytes, rel_path, module_name, symbol_records
+                tree.root_node,
+                source_bytes,
+                rel_path,
+                module_name,
+                symbol_records,
+                columns=columns,
             )
 
         return file_records, symbol_records
+
+    @staticmethod
+    def _extras(node: Node, source_bytes: bytes, columns: LineColumns | None) -> dict[str, Any]:
+        if columns is None:
+            return {}
+        return definition_extras("python", node, source_bytes, columns)
 
     def _collect_variables(
         self,
@@ -1211,6 +1231,7 @@ class PythonPlugin(LanguagePlugin):
         rel_path: str,
         module_name: str,
         symbols: list[dict[str, Any]],
+        columns: LineColumns | None = None,
     ) -> None:
         """Record module-level ``name = callee(...)`` assignments as ``variable`` symbols.
 
@@ -1240,6 +1261,7 @@ class PythonPlugin(LanguagePlugin):
                             ).hexdigest(),
                             "visibility": "private" if name.startswith("_") else "public",
                             "decorators_json": "[]",
+                            **self._extras(node, source_bytes, columns),
                         }
                     )
                 continue
@@ -1253,6 +1275,7 @@ class PythonPlugin(LanguagePlugin):
         scope: str,
         symbols: list[dict[str, Any]],
         in_class: bool = False,
+        columns: LineColumns | None = None,
     ) -> None:
         """Iteratively collect classes, functions, and methods."""
         stack: list[tuple[Node, str, bool]] = [(node, scope, in_class)]
@@ -1289,6 +1312,7 @@ class PythonPlugin(LanguagePlugin):
                             "body_sha256": body_hash,
                             "visibility": visibility,
                             "decorators_json": json.dumps(decorators),
+                            **self._extras(child, source_bytes, columns),
                         }
                     )
                     # Traverse class body for methods
@@ -1326,6 +1350,7 @@ class PythonPlugin(LanguagePlugin):
                             "body_sha256": body_hash,
                             "visibility": visibility,
                             "decorators_json": json.dumps(decorators),
+                            **self._extras(child, source_bytes, columns),
                         }
                     )
                     if body is not None:
@@ -1454,6 +1479,7 @@ class PythonPlugin(LanguagePlugin):
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
         entrypoints: list[dict[str, Any]] = []
+        facts: list[dict[str, Any]] = []
 
         parsed_files: list[tuple[Path, str, str, str, bool, str, bytes, Node]] = []
         for full_path in unit.files:
@@ -1521,6 +1547,7 @@ class PythonPlugin(LanguagePlugin):
                 references,
                 unresolved_refs,
                 entrypoints,
+                facts,
             )
 
         return IndexResult(
@@ -1536,6 +1563,7 @@ class PythonPlugin(LanguagePlugin):
             references=references,
             entrypoints=entrypoints,
             infra_artifacts=[],
+            facts=facts,
         )
 
     def _route_entrypoints(
@@ -1753,8 +1781,10 @@ class PythonPlugin(LanguagePlugin):
         references: list[dict[str, Any]],
         unresolved_refs: list[dict[str, Any]],
         entrypoints: list[dict[str, Any]],
+        facts: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Extract imports, call references, and entrypoints for a Python file."""
+        """Extract imports, call references, entrypoints and facts for a Python file."""
+        columns = LineColumns(source_bytes)
         file_imports: dict[str, str] = {}  # local_alias -> target_fqname
         bound_names: set[str] = set()
         argparse_modules: set[str] = set()  # local names bound to the argparse module
@@ -2032,6 +2062,8 @@ class PythonPlugin(LanguagePlugin):
                                 "route_or_trigger": '__name__ == "__main__"',
                                 "file_path": rel_path,
                                 "line": node.start_point[0] + 1,
+                                "col": columns.col(node.start_point[0], node.start_point[1]),
+                                "block_end_line": node.end_point[0] + 1,
                                 "symbol_fqname": f"{module_name}.__main__",
                                 "auth_symbols_json": "[]",
                             }
@@ -2067,4 +2099,18 @@ class PythonPlugin(LanguagePlugin):
                     "symbol_fqname": None,
                     "auth_symbols_json": "[]",
                 }
+            )
+
+        if facts is not None:
+            facts.extend(
+                extract_facts(
+                    "python",
+                    rel_path,
+                    source_bytes,
+                    root,
+                    module_name,
+                    imports=file_imports,
+                    known_fqnames=known_fqnames,
+                    known_names=known_names,
+                )
             )

@@ -57,6 +57,7 @@ class IndexResult:
     references: list[dict[str, Any]] = field(default_factory=list)
     entrypoints: list[dict[str, Any]] = field(default_factory=list)
     infra_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    facts: list[dict[str, Any]] = field(default_factory=list)
 
 
 DEFAULT_FALLBACK_MESSAGE_CHARS = 800

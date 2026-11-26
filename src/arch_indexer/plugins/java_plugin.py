@@ -21,6 +21,9 @@ from arch_indexer.config import (
     get_cache_dir,
     get_jvm_heap_mb,
 )
+from arch_indexer.facts import extract_facts
+from arch_indexer.facts.columns import LineColumns
+from arch_indexer.facts.definitions import definition_extras
 from arch_indexer.plugins.base import (
     DEFAULT_FALLBACK_MESSAGE_CHARS,
     FallbackSignal,
@@ -68,6 +71,14 @@ def _maven_argv(limits: dict[str, Any]) -> list[str]:
         argv.append("-o")
     argv.extend(str(arg) for arg in limits.get("maven_args") or ())
     return argv
+
+
+def _maven_argv_no_clean(limits: dict[str, Any]) -> list[str]:
+    """``_maven_argv`` without ``clean``, for hosts whose offline repo lacks maven-clean-plugin."""
+    return [arg for arg in _maven_argv(limits) if arg != "clean"]
+
+
+_CLEAN_PLUGIN_MARKER = "maven-clean-plugin"
 
 
 def _reactor_note(message: str) -> None:
@@ -140,6 +151,8 @@ _LISTENER_ANNOTATIONS: dict[str, tuple[str, ...]] = {
     "JmsListener": ("destination", "value"),
 }
 _LISTENER_HANDLERS = frozenset({"KafkaHandler", "RabbitHandler"})
+# Spring application-event listeners; ``classes=`` or the first parameter names the trigger.
+_EVENT_ANNOTATIONS = ("TransactionalEventListener", "EventListener")
 _SCHEDULE_RE = re.compile(
     r"\b(cron|fixedRateString|fixedDelayString|fixedRate|fixedDelay)\s*=\s*(\"[^\"]*\"|[^,)\s]+)"
 )
@@ -194,6 +207,27 @@ def _is_main_method(node: Node, source_bytes: bytes, name: str) -> bool:
     params = node.child_by_field_name("parameters")
     param_text = _get_node_text(params, source_bytes) if params else ""
     return is_static and "String" in param_text
+
+
+def _event_trigger(node: Node, source_bytes: bytes, annotation: str) -> str:
+    """The event type(s) an ``@EventListener`` handles: ``classes=`` else the first parameter."""
+    args = _annotation_args(annotation)
+    classes = re.search(r"\b(?:classes|value)\s*=\s*\{?([^}=]*?)\}?\s*(?:,|$)", args)
+    if classes:
+        names = re.findall(r"([\w.]+)\.class\b", classes.group(1))
+        if names:
+            return ",".join(names)
+    elif args.strip():
+        names = re.findall(r"([\w.]+)\.class\b", args)
+        if names:
+            return ",".join(names)
+    params = node.child_by_field_name("parameters")
+    if params is not None:
+        for param in params.named_children:
+            if param.type in ("formal_parameter", "spread_parameter"):
+                type_text = _get_node_text(param.child_by_field_name("type") or param, source_bytes)
+                return re.sub(r"<.*>", "", type_text).strip() or f"@{_annotation_name(annotation)}"
+    return f"@{_annotation_name(annotation)}"
 
 
 def _is_grpc_rpc_handler(node: Node, source_bytes: bytes) -> bool:
@@ -502,7 +536,47 @@ class JavaPlugin(LanguagePlugin):
         limits: dict[str, Any],
         timeout: float,
     ) -> FallbackSignal | None:
-        """Run scip-java over Maven in ``work_dir``; ``None`` means ``scip_file`` was produced."""
+        """Run scip-java over Maven in ``work_dir``; ``None`` means ``scip_file`` was produced.
+
+        The default argv keeps ``clean``. When an offline run fails because the local
+        repository has no ``maven-clean-plugin`` (a repo primed with ``install`` alone), the
+        build output directories are removed by hand - what ``clean`` would do - and the
+        run is retried once without ``clean``.
+        """
+        failure, output = self._scip_java_once(
+            tooling, scip_file, work_dir, _maven_argv(limits), timeout
+        )
+        if failure is None:
+            return None
+        if limits.get("maven_online", False) or _CLEAN_PLUGIN_MARKER not in output:
+            return failure
+        targets = ["target/classes"]
+        if limits.get("include_tests"):
+            targets.append("target/test-classes")
+        for target in targets:
+            shutil.rmtree(work_dir / target, ignore_errors=True)
+        retry_failure, _retry_output = self._scip_java_once(
+            tooling, scip_file, work_dir, _maven_argv_no_clean(limits), timeout
+        )
+        if retry_failure is None:
+            return None
+        return FallbackSignal(
+            reason="maven_clean_plugin_offline",
+            message=(
+                "maven-clean-plugin is not in the offline Maven repository and the retry "
+                f"without clean failed ({retry_failure.reason}): {retry_failure.message}"
+            ),
+        )
+
+    def _scip_java_once(
+        self,
+        tooling: _Tooling,
+        scip_file: Path,
+        work_dir: Path,
+        maven_argv: list[str],
+        timeout: float,
+    ) -> tuple[FallbackSignal | None, str]:
+        """One scip-java invocation: ``(failure or None, combined process output)``."""
         cmd = [
             str(tooling.launcher),
             "index",
@@ -510,7 +584,7 @@ class JavaPlugin(LanguagePlugin):
             "--output",
             str(scip_file),
             "--",
-            *_maven_argv(limits),
+            *maven_argv,
         ]
         try:
             proc = subprocess.run(
@@ -524,21 +598,21 @@ class JavaPlugin(LanguagePlugin):
             )
         except subprocess.TimeoutExpired:
             scip_file.unlink(missing_ok=True)
-            return FallbackSignal(reason="timeout", message=f"Timeout after {timeout}s")
+            return FallbackSignal(reason="timeout", message=f"Timeout after {timeout}s"), ""
         except OSError as e:
             scip_file.unlink(missing_ok=True)
-            return FallbackSignal(reason="tool_unavailable", message=str(e))
+            return FallbackSignal(reason="tool_unavailable", message=str(e)), ""
 
+        out = (proc.stderr or "") + (proc.stdout or "")
         if proc.returncode != 0:
             scip_file.unlink(missing_ok=True)
-            out = (proc.stderr or "") + (proc.stdout or "")
             summary = _summarize_maven_failure(proc.stderr or "", proc.stdout or "")
             if (
                 proc.returncode in (137, -9)
                 or "OutOfMemoryError" in out
                 or "Java heap space" in out
             ):
-                return FallbackSignal(reason="oom_limit", message=summary)
+                return FallbackSignal(reason="oom_limit", message=summary), out
 
             missing_patterns = (
                 "Could not find artifact",
@@ -550,16 +624,19 @@ class JavaPlugin(LanguagePlugin):
                 "Non-resolvable parent POM",
             )
             if any(pat in out for pat in missing_patterns):
-                return FallbackSignal(reason="maven_unresolved_artifact", message=summary)
+                return FallbackSignal(reason="maven_unresolved_artifact", message=summary), out
 
-            return FallbackSignal(reason="build_failure", message=summary)
+            return FallbackSignal(reason="build_failure", message=summary), out
 
         if not scip_file.is_file():
-            return FallbackSignal(
-                reason="build_failure",
-                message=f"scip-java exited 0 but did not produce {scip_file}",
+            return (
+                FallbackSignal(
+                    reason="build_failure",
+                    message=f"scip-java exited 0 but did not produce {scip_file}",
+                ),
+                out,
             )
-        return None
+        return None, out
 
     def prepare_tier1(self, units: list[IndexUnit], limits: dict[str, Any]) -> None:
         """Optionally index the whole Maven reactor with one scip-java invocation.
@@ -722,7 +799,12 @@ class JavaPlugin(LanguagePlugin):
             )
 
             self._collect_definitions(
-                tree.root_node, source_bytes, rel_path, pkg_name, symbol_records
+                tree.root_node,
+                source_bytes,
+                rel_path,
+                pkg_name,
+                symbol_records,
+                columns=LineColumns(source_bytes),
             )
 
         return file_records, symbol_records
@@ -737,8 +819,15 @@ class JavaPlugin(LanguagePlugin):
         rel_path: str,
         scope: str,
         symbols: list[dict[str, Any]],
+        columns: LineColumns | None = None,
     ) -> None:
         """Collect classes, interfaces, records, enums, and methods in Java AST."""
+
+        def extras(definition: Node) -> dict[str, Any]:
+            if columns is None:
+                return {}
+            return definition_extras("java", definition, source_bytes, columns)
+
         stack: list[tuple[Node, str]] = [(node, scope)]
         while stack:
             current, scope = stack.pop()
@@ -767,6 +856,7 @@ class JavaPlugin(LanguagePlugin):
                             "body_sha256": body_hash,
                             "visibility": visibility,
                             "decorators_json": json.dumps(annotations),
+                            **extras(child),
                         }
                     )
                     if body_node is not None:
@@ -795,6 +885,7 @@ class JavaPlugin(LanguagePlugin):
                             "body_sha256": body_hash,
                             "visibility": visibility,
                             "decorators_json": json.dumps(annotations),
+                            **extras(child),
                         }
                     )
 
@@ -836,6 +927,7 @@ class JavaPlugin(LanguagePlugin):
         references: list[dict[str, Any]] = []
         unresolved_refs: list[dict[str, Any]] = []
         entrypoints: list[dict[str, Any]] = []
+        facts: list[dict[str, Any]] = []
 
         for full_path in unit.files:
             try:
@@ -862,6 +954,7 @@ class JavaPlugin(LanguagePlugin):
                 references,
                 unresolved_refs,
                 entrypoints,
+                facts,
             )
 
         return IndexResult(
@@ -877,6 +970,7 @@ class JavaPlugin(LanguagePlugin):
             references=references,
             entrypoints=entrypoints,
             infra_artifacts=[],
+            facts=facts,
         )
 
     def _collect_non_spring_entrypoints(
@@ -888,8 +982,9 @@ class JavaPlugin(LanguagePlugin):
         auth_symbols: list[str],
         where: tuple[str, str, int, str],
         entrypoints: list[dict[str, Any]],
+        m_col: int = 0,
     ) -> None:
-        """Process, scheduled, queue, JAX-RS and gRPC entrypoints of one method."""
+        """Process, scheduled, queue, event, JAX-RS and gRPC entrypoints of one method."""
         m_name, m_fqname, m_line, rel_path = where
 
         def add(kind: str, method: str | None, trigger: str, auth: list[str] | None = None) -> None:
@@ -901,6 +996,7 @@ class JavaPlugin(LanguagePlugin):
                     "route_or_trigger": trigger,
                     "file_path": rel_path,
                     "line": m_line,
+                    "col": m_col,
                     "symbol_fqname": m_fqname,
                     "auth_symbols_json": json.dumps(auth or []),
                 }
@@ -927,6 +1023,10 @@ class JavaPlugin(LanguagePlugin):
             if ann_name in by_name:
                 targets = _annotation_targets(by_name[ann_name], attributes)
                 add("queue", None, targets or f"@{ann_name}")
+        for event_ann in _EVENT_ANNOTATIONS:
+            if event_ann in by_name:
+                add("event", None, _event_trigger(node, source_bytes, by_name[event_ann]))
+                break
         listener = class_ctx.get("listener")
         if listener and _LISTENER_HANDLERS & by_name.keys():
             add("queue", None, listener[1] or f"@{listener[0]}")
@@ -958,9 +1058,11 @@ class JavaPlugin(LanguagePlugin):
         references: list[dict[str, Any]],
         unresolved_refs: list[dict[str, Any]],
         entrypoints: list[dict[str, Any]],
+        facts: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Extract imports, call references, and Spring annotations."""
+        """Extract imports, call references, Spring annotations and facts."""
         file_imports: dict[str, str] = {}
+        columns = LineColumns(source_bytes)
 
         walk_stack: list[tuple[Node, str, str, list[str], dict[str, Any]]] = [
             (root, "", "", [], {})
@@ -1058,6 +1160,7 @@ class JavaPlugin(LanguagePlugin):
                 name_node = node.child_by_field_name("name")
                 m_name = _get_node_text(name_node, source_bytes) if name_node else ""
                 m_line = node.start_point[0] + 1
+                m_col = columns.col(node.start_point[0], node.start_point[1])
                 m_fqname = f"{current_class}.{m_name}" if current_class else m_name
                 _, annotations = _get_modifiers_and_annotations(node, source_bytes)
 
@@ -1119,6 +1222,7 @@ class JavaPlugin(LanguagePlugin):
                                 "route_or_trigger": full_route,
                                 "file_path": rel_path,
                                 "line": m_line,
+                                "col": m_col,
                                 "symbol_fqname": m_fqname,
                                 "auth_symbols_json": json.dumps(auth_symbols),
                             }
@@ -1132,9 +1236,24 @@ class JavaPlugin(LanguagePlugin):
                     auth_symbols,
                     (m_name, m_fqname, m_line, rel_path),
                     entrypoints,
+                    m_col,
                 )
 
             walk_stack.extend(
                 (child, child_class, child_base_path, child_auth, child_ctx)
                 for child in reversed(node.children)
+            )
+
+        if facts is not None:
+            facts.extend(
+                extract_facts(
+                    "java",
+                    rel_path,
+                    source_bytes,
+                    root,
+                    pkg_name,
+                    imports=file_imports,
+                    known_fqnames=known_fqnames,
+                    known_names=known_names,
+                )
             )

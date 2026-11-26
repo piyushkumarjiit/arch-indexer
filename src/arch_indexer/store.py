@@ -124,6 +124,9 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
             "body_sha256",
             "visibility",
             "decorators_json",
+            "start_col",
+            "end_col",
+            "docstring",
         ),
         required_columns=frozenset(
             {"fqname", "name", "kind", "file_path", "start_line", "end_line", "body_sha256"}
@@ -157,6 +160,10 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
             "line",
             "symbol_fqname",
             "auth_symbols_json",
+            "col",
+            "block_end_line",
+            "confidence",
+            "rule_id",
         ),
         required_columns=frozenset({"kind", "name", "route_or_trigger", "file_path", "line"}),
         upsert_mode="insert",
@@ -177,6 +184,48 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
         required_columns=frozenset({"file_path", "line", "raw_symbol", "language"}),
         upsert_mode="insert",
         sort_key=lambda u: (u["file_path"], u["line"], u["raw_symbol"]),
+    ),
+    "facts": TableSpec(
+        name="facts",
+        file_column="file_path",
+        columns=(
+            "kind",
+            "file_path",
+            "line",
+            "col",
+            "end_line",
+            "enclosing_fqname",
+            "name_text",
+            "name_fqname",
+            "receiver_text",
+            "args_json",
+            "extra_json",
+        ),
+        required_columns=frozenset({"kind", "file_path", "line"}),
+        upsert_mode="insert",
+        sort_key=lambda f: (
+            f["file_path"],
+            f["line"],
+            f.get("col") or 0,
+            f["kind"],
+            f.get("name_text") or "",
+        ),
+    ),
+    "synthetic_symbols": TableSpec(
+        name="synthetic_symbols",
+        file_column="file_path",
+        columns=(
+            "fqname",
+            "kind",
+            "file_path",
+            "start_line",
+            "start_col",
+            "end_line",
+            "end_col",
+        ),
+        required_columns=frozenset({"fqname", "kind", "file_path", "start_line", "end_line"}),
+        upsert_mode="insert",
+        sort_key=lambda s: (s["file_path"], s["start_line"], s.get("start_col") or 0, s["fqname"]),
     ),
     "units": TableSpec(
         name="units",
@@ -226,7 +275,10 @@ CREATE TABLE IF NOT EXISTS symbols (
     end_line INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL,
     visibility TEXT,
-    decorators_json TEXT
+    decorators_json TEXT,
+    start_col INTEGER,
+    end_col INTEGER,
+    docstring TEXT
 );
 
 CREATE TABLE IF NOT EXISTS "references" (
@@ -247,7 +299,11 @@ CREATE TABLE IF NOT EXISTS entrypoints (
     file_path TEXT NOT NULL,
     line INTEGER NOT NULL,
     symbol_fqname TEXT,
-    auth_symbols_json TEXT
+    auth_symbols_json TEXT,
+    col INTEGER,
+    block_end_line INTEGER,
+    confidence TEXT,
+    rule_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS infra_artifacts (
@@ -264,6 +320,31 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     line INTEGER NOT NULL,
     raw_symbol TEXT NOT NULL,
     language TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    col INTEGER,
+    end_line INTEGER,
+    enclosing_fqname TEXT,
+    name_text TEXT,
+    name_fqname TEXT,
+    receiver_text TEXT,
+    args_json TEXT,
+    extra_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS synthetic_symbols (
+    fqname TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    start_col INTEGER,
+    end_line INTEGER NOT NULL,
+    end_col INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS units (
@@ -286,8 +367,10 @@ CREATE INDEX IF NOT EXISTS idx_refs_file_path ON "references"(file_path);
 CREATE INDEX IF NOT EXISTS idx_entrypoints_file_path ON entrypoints(file_path);
 CREATE INDEX IF NOT EXISTS idx_infra_artifacts_file_path ON infra_artifacts(file_path);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file_path);
+CREATE INDEX IF NOT EXISTS idx_facts_file_path ON facts(file_path);
+CREATE INDEX IF NOT EXISTS idx_facts_kind_name ON facts(kind, name_fqname);
+CREATE INDEX IF NOT EXISTS idx_synthetic_symbols_file_path ON synthetic_symbols(file_path);
 """
-
 
 def _parse_schema_major(version: str | None) -> int | None:
     if not version:
@@ -474,6 +557,14 @@ class IndexStore:
 
     def _insert_unresolved_refs(self, unresolved: Iterable[dict[str, Any]]) -> None:
         self._upsert_rows("unresolved_refs", unresolved)
+
+    def insert_facts(self, facts: Iterable[dict[str, Any]]) -> None:
+        """Insert extracted facts in deterministic row order."""
+        self.upsert_rows("facts", facts)
+
+    def insert_synthetic_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
+        """Insert synthetic ``<module>``/block symbols in deterministic row order."""
+        self.upsert_rows("synthetic_symbols", symbols)
 
     def insert_unit_data(
         self,

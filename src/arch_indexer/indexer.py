@@ -49,6 +49,7 @@ from arch_indexer.storage.state import (
 )
 from arch_indexer.store import IndexStore
 from arch_indexer.units_hash import files_sha256_from_map, manifest_sha256, unit_file_hashes
+from arch_indexer.synthetic import build_synthetic_symbols
 
 EXIT_OK: int = 0
 EXIT_ERROR: int = 1
@@ -617,6 +618,7 @@ def run_index(
     *,
     offline: bool = False,
     strict_tier1: bool = False,
+    strict_tier1_any: bool = False,
     force_full: bool = False,
     node_max_heap_mb: int | None = None,
     jvm_max_heap_mb: int | None = None,
@@ -752,13 +754,25 @@ def run_index(
         symbol_context,
         max_parallel_units=max_parallel_units,
     )
-    if offline and strict_tier1:
+    if strict_tier1_any or (offline and strict_tier1):
         for idx, plan in enumerate(unit_plans):
             if plan.action != "full_unit":
                 continue
             tier1_res = tier1_results[idx]
             if (
-                isinstance(tier1_res, FallbackSignal)
+                strict_tier1_any
+                and isinstance(tier1_res, FallbackSignal)
+                and plan.plugin.has_tier1_indexer
+            ):
+                sys.stderr.write(
+                    f"Error: Tier 1 indexer fell back for unit {plan.unit.unit_id} "
+                    f"({tier1_res.reason}) and --strict-tier1-any was requested\n"
+                )
+                return EXIT_TOOLCHAIN_MISSING
+            if (
+                offline
+                and strict_tier1
+                and isinstance(tier1_res, FallbackSignal)
                 and plan.plugin.has_tier1_indexer
                 and tier1_res.reason == "tool_unavailable"
             ):
@@ -816,6 +830,8 @@ def run_index(
                         entrypoints=res.entrypoints,
                         infra_artifacts=res.infra_artifacts,
                         unresolved_refs=res.unresolved_refs,
+                        facts=res.facts,
+                        synthetic_symbols=build_synthetic_symbols(res.files, res.entrypoints),
                     )
                 store.insert_unit_record(
                     unit_id=plan.unit.unit_id,
@@ -863,6 +879,8 @@ def run_index(
                 entrypoints=res.entrypoints,
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
+                facts=res.facts,
+                synthetic_symbols=build_synthetic_symbols(res.files, res.entrypoints),
             )
             unit_tier = IndexingTier.TIER2.value if _all_files_fell_back(res) else res.tier.value
             store.insert_unit_record(

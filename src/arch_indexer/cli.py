@@ -30,6 +30,7 @@ from arch_indexer.toolchain import (
     format_status_report,
     get_toolchain_status,
     load_toolchain_manifest,
+    prime_toolchain,
 )
 
 # Exit codes per spec section 7.2
@@ -89,6 +90,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # toolchain prime
+    tc_prime = toolchain_sub.add_parser(
+        "prime",
+        help="Prime the local Maven repository (online) so index --offline can build",
+    )
+    tc_prime.add_argument("--repo", required=True, help="Target repository path")
+    tc_prime.add_argument("--cache-dir", default=None, help="Cache directory override")
+    tc_prime.add_argument(
+        "--fetch-runtime",
+        action="store_true",
+        default=False,
+        help="Fetch the pinned portable JDK/Maven when the host ones are missing or too old",
+    )
+    tc_prime.add_argument(
+        "--maven-arg",
+        action="append",
+        dest="maven_args",
+        default=None,
+        metavar="ARG",
+        help="Extra Maven argument (repeatable; use '=' when it starts with '-')",
+    )
+
     # 2. index
     index_parser = subparsers.add_parser("index", help="Deterministic indexing and delta detection")
     index_parser.add_argument("repo", help="Target repository path")
@@ -139,6 +162,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="With --offline, exit 4 if a Tier 1 indexer is unavailable",
+    )
+    index_parser.add_argument(
+        "--strict-tier1-any",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit 4 if any unit with a Tier 1 indexer falls back to Tier 2, for any reason, "
+            "online or offline; index.db is left untouched"
+        ),
     )
     index_parser.add_argument(
         "--force-full",
@@ -416,6 +448,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sys.stderr.write(f"Error ensuring toolchain: {e}\n")
                 return EXIT_ERROR
 
+        elif args.toolchain_action == "prime":
+            try:
+                primed = prime_toolchain(
+                    args.repo,
+                    cache_dir=args.cache_dir,
+                    fetch_runtime=args.fetch_runtime,
+                    maven_args=args.maven_args,
+                )
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+                sys.stderr.write(f"Error priming toolchain: {e}\n")
+                return EXIT_ERROR
+            print(f"Maven prime: {' '.join(primed['argv'])}")
+            if primed["returncode"] != 0:
+                sys.stderr.write(primed["output"][-2000:])
+                sys.stderr.write(f"Error: Maven prime exited {primed['returncode']}\n")
+                return EXIT_ERROR
+            print("Maven prime completed; index --offline can now run `clean compile -o`.")
+            return EXIT_OK
+
     elif args.command == "index":
         try:
             if not args.offline:
@@ -431,6 +482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.repo,
                 offline=args.offline,
                 strict_tier1=args.strict_tier1,
+                strict_tier1_any=args.strict_tier1_any,
                 force_full=args.force_full,
                 node_max_heap_mb=args.node_max_heap_mb,
                 jvm_max_heap_mb=args.jvm_max_heap_mb,

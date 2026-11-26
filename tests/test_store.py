@@ -25,6 +25,9 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "infra_artifacts",
         "unresolved_refs",
         "units",
+        "meta",
+        "facts",
+        "synthetic_symbols",
     }
 
     # Verify meta table and user_version
@@ -78,6 +81,9 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "body_sha256",
         "visibility",
         "decorators_json",
+        "start_col",
+        "end_col",
+        "docstring",
     ]
 
     # Verify column names for quoted "references"
@@ -98,6 +104,10 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "line",
         "symbol_fqname",
         "auth_symbols_json",
+        "col",
+        "block_end_line",
+        "confidence",
+        "rule_id",
     ]
 
     # Verify column names for infra_artifacts
@@ -109,6 +119,39 @@ def test_schema_creation_and_column_names(tmp_path: Path):
     c.execute("PRAGMA table_info('unresolved_refs')")
     cols = [r[1] for r in c.fetchall()]
     assert cols == ["id", "file_path", "line", "raw_symbol", "language"]
+
+    # Slice 2 tables (spec 3.1)
+    c.execute("PRAGMA table_info('meta')")
+    assert [r[1] for r in c.fetchall()] == ["key", "value"]
+    c.execute("PRAGMA table_info('facts')")
+    assert [r[1] for r in c.fetchall()] == [
+        "id",
+        "kind",
+        "file_path",
+        "line",
+        "col",
+        "end_line",
+        "enclosing_fqname",
+        "name_text",
+        "name_fqname",
+        "receiver_text",
+        "args_json",
+        "extra_json",
+    ]
+    c.execute("PRAGMA table_info('synthetic_symbols')")
+    assert [r[1] for r in c.fetchall()] == [
+        "fqname",
+        "kind",
+        "file_path",
+        "start_line",
+        "start_col",
+        "end_line",
+        "end_col",
+    ]
+    c.execute("SELECT value FROM meta WHERE key = 'schema_version'")
+    assert c.fetchone()[0] == "2.0"
+    c.execute("PRAGMA user_version")
+    assert c.fetchone()[0] == 2
 
     store.close()
 

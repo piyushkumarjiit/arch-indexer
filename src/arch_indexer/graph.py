@@ -32,10 +32,24 @@ from arch_indexer.source_scope import filter_rows
 from arch_indexer.store import IndexStore
 from arch_indexer.viewer import render_viewer
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 # Symbol kinds that may become service nodes; fields, parameters and locals may not.
 CALLABLE_KINDS = frozenset({"function", "method", "class", "interface"})
+
+# Calls that start an application: the enclosing entry then boots every trigger entry
+# (scheduled, event, queue, runner) that lives under the booting file's package.
+BOOT_CALLEES = (
+    "org.springframework.boot.SpringApplication.run",
+    "uvicorn.run",
+    "NestFactory.create",
+)
+# Method names a framework invokes on a registered Python/TS callback object.
+CALLBACK_METHOD_PATTERNS = re.compile(r"^(on_.*|handle.*|run|__call__|call|apply|execute)$")
+_CALLBACK_LANGUAGES = frozenset({"python", "typescript"})
+_BOOTED_KINDS = frozenset({"scheduled", "event", "queue"})
+# Entry kinds whose file owns top-level code, so its ``<module>`` symbol may be a caller.
+_MODULE_OWNER_KINDS = frozenset({"main", "cli"})
 
 _SOURCE_ROOTS = SOURCE_ROOTS
 _REVERSE_DOMAIN_TLDS = REVERSE_DOMAIN_TLDS
@@ -159,26 +173,72 @@ def _build_modules(
     return modules, module_by_file, tier_by_file
 
 
-def _symbol_index(symbol_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Index callable definitions by file for innermost-enclosing-symbol lookup."""
+_REAL_KINDS = ("function", "method", "class")
+_SYNTHETIC_RANK = {"block": 1, "module": 2}
+
+
+def _symbol_index(
+    symbol_rows: list[dict[str, Any]], synthetic_rows: list[dict[str, Any]] | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    """Index callable definitions by file for innermost-enclosing-symbol lookup.
+
+    Synthetic symbols are appended after the real ones and carry a lower precedence:
+    a real symbol wins over a block symbol, and a block symbol over ``<module>``.
+    """
     index: dict[str, list[dict[str, Any]]] = {}
     for symbol in symbol_rows:
-        if symbol["kind"] in ("function", "method", "class"):
+        if symbol["kind"] in _REAL_KINDS:
             index.setdefault(symbol["file_path"], []).append(symbol)
+    for symbol in synthetic_rows or ():
+        index.setdefault(symbol["file_path"], []).append(
+            {**symbol, "synthetic": True, "rank": _SYNTHETIC_RANK.get(symbol["kind"], 2)}
+        )
     for symbols in index.values():
-        symbols.sort(key=lambda symbol: (symbol["start_line"], -symbol["end_line"]))
+        symbols.sort(
+            key=lambda symbol: (
+                symbol.get("rank", 0),
+                symbol["start_line"],
+                -symbol["end_line"],
+            )
+        )
     return index
 
 
+def _contains(symbol: dict[str, Any], line: int, col: int | None) -> bool:
+    """Whether ``(line, col)`` lies in the symbol's span; columns refine line-only spans."""
+    if not symbol["start_line"] <= line <= symbol["end_line"]:
+        return False
+    if col is None:
+        return True
+    start_col, end_col = symbol.get("start_col"), symbol.get("end_col")
+    if line == symbol["start_line"] and start_col is not None and col < start_col:
+        return False
+    return not (line == symbol["end_line"] and end_col is not None and col >= end_col)
+
+
 def _enclosing_symbol(
-    symbols_by_file: dict[str, list[dict[str, Any]]], file_path: str, line: int
+    symbols_by_file: dict[str, list[dict[str, Any]]],
+    file_path: str,
+    line: int,
+    col: int | None = None,
 ) -> dict[str, Any] | None:
-    """Innermost callable definition whose span contains ``line``."""
+    """Innermost definition whose span contains ``(line, col)``.
+
+    Real symbols win over block symbols, and block symbols over ``<module>``. Without a
+    column, or where a symbol has none, the comparison falls back to lines.
+    """
     enclosing: dict[str, Any] | None = None
     for symbol in symbols_by_file.get(file_path, []):
-        if symbol["start_line"] <= line <= symbol["end_line"] and (
-            enclosing is None or symbol["start_line"] >= enclosing["start_line"]
-        ):
+        if not _contains(symbol, line, col):
+            continue
+        rank = symbol.get("rank", 0)
+        start = (symbol["start_line"], symbol.get("start_col") or 0)
+        if enclosing is None:
+            enclosing = symbol
+            continue
+        best_rank = enclosing.get("rank", 0)
+        best_start = (enclosing["start_line"], enclosing.get("start_col") or 0)
+        if rank < best_rank or (rank == best_rank and start >= best_start):
             enclosing = symbol
     return enclosing
 
@@ -233,6 +293,7 @@ def _entrypoint_nodes(
                 "line": row["line"],
                 "symbol": row["name"],
                 "tier": tier_by_file.get(row["file_path"], "tree-sitter"),
+                "confidence": row.get("confidence") or "exact",
                 "metadata": metadata,
             }
         )
@@ -240,6 +301,23 @@ def _entrypoint_nodes(
         if fqname:
             handler_to_nodes.setdefault(fqname, []).append(node_id)
     return nodes, handler_to_nodes
+
+
+def _bound_entry(
+    row: dict[str, Any],
+    callers_by_file: dict[str, list[dict[str, Any]]],
+    module_fq_by_file: dict[str, str],
+) -> dict[str, Any]:
+    """Bind a ``main``/``cli`` entry with no symbol to the innermost symbol around it.
+
+    The entry's ``(line, col)`` picks the innermost enclosing symbol, else the file's
+    ``<module>`` symbol, so its top-level code gets edges.
+    """
+    if row["symbol_fqname"] or row["kind"] not in _MODULE_OWNER_KINDS:
+        return row
+    symbol = _enclosing_symbol(callers_by_file, row["file_path"], row["line"], row.get("col"))
+    fqname = symbol["fqname"] if symbol else module_fq_by_file.get(row["file_path"])
+    return {**row, "symbol_fqname": fqname} if fqname else row
 
 
 def _boundary_id(boundary: str, canonical: str) -> str:
@@ -347,6 +425,166 @@ def _collect_infra_boundaries(infra_rows: list[dict[str, Any]]) -> dict[str, dic
     return boundaries
 
 
+def _json_list(raw: str | None) -> list[dict[str, Any]]:
+    """Parse a JSON list-of-objects column, tolerating NULL and malformed rows."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _matches_boot_callee(fact: dict[str, Any]) -> bool:
+    """Whether a call fact is one of ``BOOT_CALLEES``, written qualified or imported."""
+    name_text = fact.get("name_text") or ""
+    name_fqname = fact.get("name_fqname") or ""
+    return any(
+        callee in (name_fqname, name_text)
+        or ("." in name_text and callee.endswith(f".{name_text}"))
+        for callee in BOOT_CALLEES
+    )
+
+
+def _register_edges(
+    register_facts: list[dict[str, Any]],
+    symbols_by_file: dict[str, list[dict[str, Any]]],
+    symbols_by_fqname: dict[str, dict[str, Any]],
+    language_by_file: dict[str, str],
+    module_owner_files: set[str],
+) -> list[dict[str, Any]]:
+    """``registers`` edges: the enclosing symbol passes a callable as an argument.
+
+    A reference to an in-repo function or method links to it directly. A reference to an
+    in-repo class links to the class's callback-named methods (Python and TypeScript
+    only). Slice 3's ``overrides`` relations will replace that name pattern.
+    """
+    methods_by_class: dict[str, list[dict[str, Any]]] = {}
+    for symbol in symbols_by_fqname.values():
+        if symbol["kind"] == "method" and "." in symbol["fqname"]:
+            methods_by_class.setdefault(symbol["fqname"].rsplit(".", 1)[0], []).append(symbol)
+
+    edges: list[dict[str, Any]] = []
+    for fact in register_facts:
+        caller = _enclosing_symbol(symbols_by_file, fact["file_path"], fact["line"], fact["col"])
+        if caller is None or _skips_module_caller(caller, fact["file_path"], module_owner_files):
+            continue
+        for arg in _json_list(fact["args_json"]):
+            target = symbols_by_fqname.get(arg.get("ref_fqname") or "")
+            if arg.get("kind") != "ref" or target is None:
+                continue
+            if arg.get("ctor") and target["kind"] != "class":
+                continue
+            if target["kind"] in ("function", "method") and not arg.get("alias"):
+                targets, confidence = [target], "exact"
+            elif target["kind"] == "class" and (
+                language_by_file.get(fact["file_path"]) in _CALLBACK_LANGUAGES
+            ):
+                targets = sorted(
+                    (
+                        method
+                        for method in methods_by_class.get(target["fqname"], ())
+                        if CALLBACK_METHOD_PATTERNS.match(method["name"])
+                    ),
+                    key=lambda method: method["fqname"],
+                )
+                confidence = "heuristic"
+            else:
+                continue
+            for callee in targets:
+                if callee["fqname"] != caller["fqname"]:
+                    edges.append(
+                        {
+                            "source_fqname": caller["fqname"],
+                            "target_fqname": callee["fqname"],
+                            "file": fact["file_path"],
+                            "line": fact["line"],
+                            "confidence": confidence,
+                        }
+                    )
+    return edges
+
+
+def _skips_module_caller(
+    caller: dict[str, Any], file_path: str, module_owner_files: set[str]
+) -> bool:
+    """A ``<module>`` symbol is a caller only in files that own an entry point."""
+    return caller.get("kind") == "module" and file_path not in module_owner_files
+
+
+def _scan_base_packages(args_json: str | None) -> list[str]:
+    """Packages named by ``@SpringBootApplication(scanBasePackages = ...)``."""
+    packages: list[str] = []
+    for arg in _json_list(args_json):
+        text = arg.get("text") or ""
+        if "scanBasePackages" in text or "scanBasePackageClasses" in text:
+            packages.extend(re.findall(r'"([\w.]+)"', text))
+    return packages
+
+
+def _boots_edges(
+    boot_facts: list[dict[str, Any]],
+    symbols_by_file: dict[str, list[dict[str, Any]]],
+    entry_rows: list[dict[str, Any]],
+    entry_nodes: list[dict[str, Any]],
+    handler_to_nodes: dict[str, list[str]],
+    file_info: dict[str, dict[str, Any]],
+    scan_packages: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """``boots`` edges from the entry that starts the application to its trigger entries."""
+    triggers: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row, node in zip(entry_rows, entry_nodes, strict=True):
+        is_runner = row["kind"] == "process" and "main(" not in (row["route_or_trigger"] or "")
+        if row["kind"] in _BOOTED_KINDS or is_runner:
+            triggers.append((row, node))
+
+    edges: list[dict[str, Any]] = []
+    for fact in boot_facts:
+        caller = _enclosing_symbol(symbols_by_file, fact["file_path"], fact["line"], fact["col"])
+        sources = handler_to_nodes.get(caller["fqname"], []) if caller else []
+        if not sources:
+            continue
+        boot_info = file_info.get(fact["file_path"], {})
+        boot_dir = fact["file_path"].rsplit("/", 1)[0] + "/" if "/" in fact["file_path"] else ""
+
+        def under(row: dict[str, Any], boot_dir: str = boot_dir) -> bool:
+            return row["file_path"].startswith(boot_dir)
+
+        scanned = (scan_packages or {}).get(fact["file_path"], [])
+
+        def scanned_by_annotation(row: dict[str, Any], scanned: list[str] = scanned) -> bool:
+            package = file_info.get(row["file_path"], {}).get("module") or ""
+            return any(package == p or package.startswith(f"{p}.") for p in scanned)
+
+        matches = [
+            (row, node)
+            for row, node in triggers
+            if (under(row) or scanned_by_annotation(row))
+            and file_info.get(row["file_path"], {}).get("unit_id") == boot_info.get("unit_id")
+        ]
+        package = boot_info.get("module") or ""
+        if not matches and boot_info.get("language") == "java" and package:
+            # A Maven reactor splits one base package across units.
+            matches = [
+                (row, node)
+                for row, node in triggers
+                if (file_info.get(row["file_path"], {}).get("module") or "").startswith(package)
+            ]
+        for source in sources:
+            for _row, node in matches:
+                if node["id"] != source:
+                    edges.append(
+                        {
+                            "source": source,
+                            "target": node["id"],
+                            "file": fact["file_path"],
+                            "line": fact["line"],
+                        }
+                    )
+    return edges
+
+
 def build_graph(
     store: IndexStore,
     repo_path: str | Path,
@@ -361,7 +599,8 @@ def build_graph(
     """
     repo = Path(repo_path)
     all_file_rows = _row_dicts(
-        store, "SELECT path, language, module, tier, line_count FROM files ORDER BY path"
+        store,
+        "SELECT path, language, module, tier, line_count, unit_id FROM files ORDER BY path",
     )
     file_rows = filter_rows(all_file_rows, include_tests, key="path")
     tier_counts = Counter(row["tier"] for row in file_rows)
@@ -378,31 +617,54 @@ def build_graph(
     symbol_rows = filter_rows(
         _row_dicts(
             store,
-            "SELECT fqname, name, kind, file_path, start_line, end_line "
+            "SELECT fqname, name, kind, file_path, start_line, end_line, start_col, end_col "
             "FROM symbols ORDER BY file_path, start_line, fqname",
         ),
         include_tests,
     )
+    synthetic_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT fqname, kind, file_path, start_line, start_col, end_line, end_col "
+            "FROM synthetic_symbols ORDER BY file_path, start_line, fqname",
+        ),
+        include_tests,
+    )
     symbols_by_fqname = {row["fqname"]: row for row in symbol_rows}
+    synthetic_by_fqname = {row["fqname"]: row for row in synthetic_rows}
+    # Boundary detection keeps seeing real symbols only (spec 4.2: synthetic symbols are
+    # never the source of boundary candidates); calls and facts also see synthetic ones.
     symbols_by_file = _symbol_index(symbol_rows)
+    callers_by_file = _symbol_index(symbol_rows, synthetic_rows)
 
     entrypoint_rows = filter_rows(
         _row_dicts(
             store,
-            "SELECT kind, name, method, route_or_trigger, file_path, line, symbol_fqname, "
-            "auth_symbols_json FROM entrypoints "
+            "SELECT kind, name, method, route_or_trigger, file_path, line, col, "
+            "symbol_fqname, auth_symbols_json, confidence FROM entrypoints "
             "ORDER BY file_path, line, kind, name, method, route_or_trigger",
         ),
         include_tests,
     )
+    module_fq_by_file = {
+        row["file_path"]: row["fqname"] for row in synthetic_rows if row["kind"] == "module"
+    }
+    entrypoint_rows = [
+        _bound_entry(row, callers_by_file, module_fq_by_file) for row in entrypoint_rows
+    ]
     entrypoint_nodes, handler_to_nodes = _entrypoint_nodes(
         entrypoint_rows, module_by_file, tier_by_file
     )
+    module_owner_files = {
+        row["file_path"] for row in entrypoint_rows if row["kind"] in _MODULE_OWNER_KINDS
+    }
+    language_by_file = {row["path"]: row["language"] for row in all_file_rows}
+    file_info = {row["path"]: row for row in all_file_rows}
 
     ref_rows = filter_rows(
         _row_dicts(
             store,
-            'SELECT symbol_fqname, file_path, line, ref_kind FROM "references" '
+            'SELECT symbol_fqname, file_path, line, col, ref_kind FROM "references" '
             "ORDER BY file_path, line, col, symbol_fqname, ref_kind",
         ),
         include_tests,
@@ -424,6 +686,22 @@ def build_graph(
         include_tests,
     )
 
+    boot_clauses = " OR ".join(
+        f"name_text LIKE '%{'.'.join(callee.split('.')[-2:])}' "
+        f"OR name_fqname LIKE '%{'.'.join(callee.split('.')[-2:])}'"
+        for callee in BOOT_CALLEES
+    )
+    fact_rows = filter_rows(
+        _row_dicts(
+            store,
+            "SELECT kind, file_path, line, col, name_text, name_fqname, args_json FROM facts "
+            f"WHERE kind = 'register' OR (kind = 'call' AND ({boot_clauses})) "
+            "OR (kind = 'decorator' AND name_text LIKE '%SpringBootApplication') "
+            "ORDER BY file_path, line, col, kind, name_text",
+        ),
+        include_tests,
+    )
+
     boundaries, boundary_candidates = _collect_boundaries(
         ref_rows, unresolved_rows, symbols_by_file, symbols_by_fqname
     )
@@ -439,8 +717,10 @@ def build_graph(
         callee = symbols_by_fqname.get(row["symbol_fqname"])
         if callee is None or callee["kind"] not in CALLABLE_KINDS:
             continue
-        caller = _enclosing_symbol(symbols_by_file, row["file_path"], row["line"])
+        caller = _enclosing_symbol(callers_by_file, row["file_path"], row["line"], row["col"])
         if caller is None or caller["fqname"] == callee["fqname"]:
+            continue
+        if _skips_module_caller(caller, row["file_path"], module_owner_files):
             continue
         call_edges.append(
             {
@@ -451,9 +731,34 @@ def build_graph(
             }
         )
 
+    register_edges = _register_edges(
+        [fact for fact in fact_rows if fact["kind"] == "register"],
+        callers_by_file,
+        symbols_by_fqname,
+        language_by_file,
+        module_owner_files,
+    )
+    scan_packages: dict[str, list[str]] = {}
+    for fact in fact_rows:
+        if fact["kind"] == "decorator":
+            scan_packages.setdefault(fact["file_path"], []).extend(
+                _scan_base_packages(fact["args_json"])
+            )
+    boots = _boots_edges(
+        [fact for fact in fact_rows if fact["kind"] == "call" and _matches_boot_callee(fact)],
+        callers_by_file,
+        entrypoint_rows,
+        entrypoint_nodes,
+        handler_to_nodes,
+        file_info,
+        scan_packages,
+    )
+
     participants = (
         {edge["source_fqname"] for edge in call_edges}
         | {edge["target_fqname"] for edge in call_edges}
+        | {edge["source_fqname"] for edge in register_edges}
+        | {edge["target_fqname"] for edge in register_edges}
         | {candidate["source_fqname"] for candidate in boundary_candidates}
     )
     service_fqnames = participants - set(handler_to_nodes)
@@ -465,17 +770,24 @@ def build_graph(
 
     service_nodes: list[dict[str, Any]] = []
     for fqname in sorted(service_fqnames):
-        symbol = symbols_by_fqname[fqname]
+        symbol = symbols_by_fqname.get(fqname)
+        synthetic = symbol is None
+        if symbol is None:
+            symbol = synthetic_by_fqname[fqname]
+            label = "<module>" if symbol["kind"] == "module" else _block_label(symbol)
+        else:
+            label = symbol["name"]
         service_nodes.append(
             {
                 "id": f"sym:{fqname}",
-                "kind": "service",
-                "label": symbol["name"],
+                "kind": "module_symbol" if synthetic else "service",
+                "label": label,
                 "module_id": module_by_file.get(symbol["file_path"], "mod:root"),
                 "file": symbol["file_path"],
                 "line": symbol["start_line"],
                 "symbol": fqname,
                 "tier": tier_by_file.get(symbol["file_path"], "tree-sitter"),
+                "confidence": "exact",
                 "metadata": {"symbol_kind": symbol["kind"]},
             }
         )
@@ -485,6 +797,7 @@ def build_graph(
     edge_map: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def add_edge(edge: dict[str, Any]) -> None:
+        edge.setdefault("confidence", "exact" if edge.get("tier") == "scip" else "heuristic")
         key = (edge["source"], edge["target"], edge["kind"], edge.get("file"), edge.get("line"))
         edge_map.setdefault(key, edge)
 
@@ -506,6 +819,33 @@ def build_graph(
                         "tier": tier,
                     }
                 )
+
+    for register in register_edges:
+        tier = tier_by_file.get(register["file"], "tree-sitter")
+        for source in node_ids_for(register["source_fqname"]):
+            for target in node_ids_for(register["target_fqname"]):
+                if source != target:
+                    add_edge(
+                        {
+                            "source": source,
+                            "target": target,
+                            "kind": "registers",
+                            "file": register["file"],
+                            "line": register["line"],
+                            "tier": tier,
+                            "confidence": register["confidence"],
+                        }
+                    )
+
+    for boot in boots:
+        add_edge(
+            {
+                **boot,
+                "kind": "boots",
+                "tier": tier_by_file.get(boot["file"], "tree-sitter"),
+                "confidence": "heuristic",
+            }
+        )
 
     for candidate in boundary_candidates:
         edge_kind = edge_kind_for_token(
@@ -534,7 +874,7 @@ def build_graph(
             edge.get("line") or 0,
         ),
     )
-    kind_rank = {"entrypoint": 0, "frontend_caller": 1, "service": 2}
+    kind_rank = {"entrypoint": 0, "frontend_caller": 1, "service": 2, "module_symbol": 3}
     nodes.sort(key=lambda node: (kind_rank.get(node["kind"], 9), node["id"]))
 
     def boundary_records(which: str) -> list[dict[str, Any]]:
@@ -568,12 +908,43 @@ def build_graph(
             "excluded_test_files": max(len(all_file_rows) - len(file_rows), 0),
         },
         "modules": modules,
+        "files": _file_records(file_rows, module_by_file, symbol_rows),
         "nodes": nodes,
         "edges": edges,
         "data_stores": boundary_records("datastore"),
         "external_sinks": boundary_records("sink"),
         "unresolved_refs_count": len(unresolved_rows),
     }
+
+
+def _block_label(symbol: dict[str, Any]) -> str:
+    fqname = symbol["fqname"]
+    return f"block@L{symbol['start_line']}" if "#L" in fqname else fqname.rsplit(".", 1)[-1]
+
+
+def _file_records(
+    file_rows: list[dict[str, Any]],
+    module_by_file: dict[str, str],
+    symbol_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """``files[]``: every in-scope file with its module, size and symbols (spec 3.2)."""
+    symbols_in_file: dict[str, list[dict[str, Any]]] = {}
+    for symbol in sorted(symbol_rows, key=lambda r: (r["start_line"], r["name"], r["kind"])):
+        symbols_in_file.setdefault(symbol["file_path"], []).append(
+            {"name": symbol["name"], "kind": symbol["kind"], "line": symbol["start_line"]}
+        )
+    return [
+        {
+            "path": row["path"],
+            "module_id": module_by_file.get(row["path"], "mod:root"),
+            "language": row["language"],
+            "tier": row["tier"],
+            "loc": row["line_count"],
+            "is_infra": row["language"] == "infra",
+            "symbols": symbols_in_file.get(row["path"], []),
+        }
+        for row in sorted(file_rows, key=lambda r: r["path"])
+    ]
 
 
 def graph_to_json(graph: dict[str, Any]) -> str:
