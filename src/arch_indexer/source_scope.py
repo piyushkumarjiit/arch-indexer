@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -25,6 +26,7 @@ TEST_FILE_PATTERNS = (
 )
 
 
+@lru_cache(maxsize=16384)
 def is_test_path(path: str) -> bool:
     """Whether a repository-relative path is test code rather than product code."""
     parts = PurePosixPath(str(path).replace("\\", "/")).parts

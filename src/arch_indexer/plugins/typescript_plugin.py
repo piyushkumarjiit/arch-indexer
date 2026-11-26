@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -211,8 +212,23 @@ class TypeScriptPlugin(LanguagePlugin):
     def __init__(self) -> None:
         self.ts_lang = Language(tstypescript.language_typescript())
         self.tsx_lang = Language(tstypescript.language_tsx())
-        self.ts_parser = Parser(self.ts_lang)
-        self.tsx_parser = Parser(self.tsx_lang)
+        self._parser_local = threading.local()
+
+    @property
+    def ts_parser(self) -> Parser:
+        p = getattr(self._parser_local, "ts_parser", None)
+        if p is None:
+            p = Parser(self.ts_lang)
+            self._parser_local.ts_parser = p
+        return p
+
+    @property
+    def tsx_parser(self) -> Parser:
+        p = getattr(self._parser_local, "tsx_parser", None)
+        if p is None:
+            p = Parser(self.tsx_lang)
+            self._parser_local.tsx_parser = p
+        return p
 
     @property
     def name(self) -> str:

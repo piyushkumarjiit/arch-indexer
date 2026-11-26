@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -994,11 +995,20 @@ class PythonPlugin(LanguagePlugin):
 
     def __init__(self) -> None:
         self.language = Language(tspython.language())
-        self.parser = Parser(self.language)
+        self._parser_local = threading.local()
         self._root_cache: dict[tuple[str, ...], bool] = {}
+        self._mount_lock = threading.Lock()
         self._mount_cache: dict[
             tuple[str, tuple[tuple[str, str], ...]], dict[_Target, list[_MountRecord]]
         ] = {}
+
+    @property
+    def parser(self) -> Parser:
+        p = getattr(self._parser_local, "parser", None)
+        if p is None:
+            p = Parser(self.language)
+            self._parser_local.parser = p
+        return p
 
     @property
     def name(self) -> str:
@@ -1344,36 +1354,40 @@ class PythonPlugin(LanguagePlugin):
             str(repo_root),
             tuple((p, records[p].get("sha256", "")) for p in sorted(records)),
         )
-        cached = self._mount_cache.get(key)
-        if cached is not None:
-            resolver.mounts = {target: list(entries) for target, entries in cached.items()}
-            return
+        with self._mount_lock:
+            cached = self._mount_cache.get(key)
+            if cached is not None:
+                resolver.mounts = {target: list(entries) for target, entries in cached.items()}
+                return
 
-        for rel_path in sorted(records):
-            if _is_test_path(rel_path):
-                continue
-            if rel_path in parsed_by_path:
-                m_name, src_bytes, root_node = parsed_by_path[rel_path]
-            else:
-                try:
-                    src_bytes = (repo_root / rel_path).read_bytes()
-                except OSError:
+            for rel_path in sorted(records):
+                if _is_test_path(rel_path):
                     continue
-                if b"include_router" not in src_bytes and b"register_blueprint" not in src_bytes:
-                    continue
-                m_name, importable, is_package, project = _module_info(
-                    repo_root, rel_path, self._root_cache
-                )
-                root_node = self.parser.parse(src_bytes).root_node
-                if m_name not in resolver.cache:
-                    resolver.cache[m_name] = _gather_module_facts(
-                        root_node, src_bytes, m_name, importable, is_package, project
+                if rel_path in parsed_by_path:
+                    m_name, src_bytes, root_node = parsed_by_path[rel_path]
+                else:
+                    try:
+                        src_bytes = (repo_root / rel_path).read_bytes()
+                    except OSError:
+                        continue
+                    if (
+                        b"include_router" not in src_bytes
+                        and b"register_blueprint" not in src_bytes
+                    ):
+                        continue
+                    m_name, importable, is_package, project = _module_info(
+                        repo_root, rel_path, self._root_cache
                     )
-            self._scan_router_mounts(root_node, src_bytes, rel_path, m_name, resolver)
+                    root_node = self.parser.parse(src_bytes).root_node
+                    if m_name not in resolver.cache:
+                        resolver.cache[m_name] = _gather_module_facts(
+                            root_node, src_bytes, m_name, importable, is_package, project
+                        )
+                self._scan_router_mounts(root_node, src_bytes, rel_path, m_name, resolver)
 
-        self._mount_cache[key] = {
-            target: list(entries) for target, entries in resolver.mounts.items()
-        }
+            self._mount_cache[key] = {
+                target: list(entries) for target, entries in resolver.mounts.items()
+            }
 
     def _scan_router_mounts(
         self,

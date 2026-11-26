@@ -164,18 +164,37 @@ class RepoSnapshot:
     symbols: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
     @classmethod
-    def from_store(cls, store: Any, repo_path: str | Path | None = None) -> RepoSnapshot:
+    def from_store(
+        cls,
+        store: Any,
+        repo_path: str | Path | None = None,
+        previous_files: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> RepoSnapshot:
         """Build a snapshot from the freshly indexed SQLite tables."""
         files = {record["path"]: record for record in store.get_file_records()}
         snapshot = cls(files=files, symbols=_group_symbols(store.get_symbol_records()))
         if repo_path is not None:
-            snapshot.record_content_hashes(repo_path)
+            snapshot.record_content_hashes(repo_path, previous_files=previous_files)
         return snapshot
 
-    def record_content_hashes(self, repo_path: str | Path) -> None:
+    def record_content_hashes(
+        self,
+        repo_path: str | Path,
+        *,
+        previous_files: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         """Record a line-number-independent content signature for each indexed file."""
         root = Path(repo_path)
         for path, record in self.files.items():
+            if previous_files is not None:
+                prev = previous_files.get(path)
+                if (
+                    prev is not None
+                    and prev.get("sha256") == record.get("sha256")
+                    and prev.get("content_sha256")
+                ):
+                    record["content_sha256"] = prev["content_sha256"]
+                    continue
             try:
                 source = (root / path).read_bytes()
             except OSError:

@@ -13,10 +13,11 @@ def test_schema_creation_and_column_names(tmp_path: Path):
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
 
-    # Verify exact table names per spec 4.5
+    # Verify exact table names per spec 3.1 / 4.6 (v2 schema)
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
     tables = {r[0] for r in c.fetchall()}
     assert tables == {
+        "meta",
         "files",
         "symbols",
         "references",
@@ -26,7 +27,15 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "units",
     }
 
-    # Verify column names for units (per-unit tier, fallback reason and captured message)
+    # Verify meta table and user_version
+    c.execute("PRAGMA user_version")
+    assert c.fetchone()[0] == 2
+    c.execute("SELECT key, value FROM meta ORDER BY key")
+    meta_rows = dict(c.fetchall())
+    assert meta_rows["schema_version"] == "2.0"
+    assert "arch_indexer_version" in meta_rows
+
+    # Verify column names for units (per-unit tier, hashes, commit, fallback reason, message)
     c.execute("PRAGMA table_info('units')")
     cols = [r[1] for r in c.fetchall()]
     assert cols == [
@@ -36,12 +45,24 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "files_count",
         "fallback_reason",
         "message",
+        "manifest_sha256",
+        "files_sha256",
+        "indexed_at_commit",
     ]
 
     # Verify column names for files
     c.execute("PRAGMA table_info('files')")
     cols = [r[1] for r in c.fetchall()]
-    assert cols == ["path", "language", "sha256", "line_count", "module", "tier", "fallback_reason"]
+    assert cols == [
+        "path",
+        "language",
+        "sha256",
+        "line_count",
+        "module",
+        "tier",
+        "fallback_reason",
+        "unit_id",
+    ]
 
     # Verify column names for symbols
     c.execute("PRAGMA table_info('symbols')")
