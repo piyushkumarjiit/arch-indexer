@@ -347,13 +347,27 @@ def _collect_boundaries(
     unresolved_rows: list[dict[str, Any]],
     symbols_by_file: dict[str, list[dict[str, Any]]],
     symbols_by_fqname: dict[str, dict[str, Any]],
+    *,
+    memoize: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Detect data stores/sinks and the symbol-to-boundary edges that use them."""
+    """Detect data stores/sinks and the symbol-to-boundary edges that use them.
+
+    Classification depends only on the token, so results are memoized in a dict local
+    to this call (one ``build_graph`` run); nothing leaks across runs.
+    """
     boundaries: dict[str, dict[str, Any]] = {}
     candidates: list[dict[str, Any]] = []
+    memo: dict[str, tuple[str, str, str, str, str] | None] = {}
+
+    def classify(token: str) -> tuple[str, str, str, str, str] | None:
+        if not memoize:
+            return classify_token_rule(token)
+        if token not in memo:
+            memo[token] = classify_token_rule(token)
+        return memo[token]
 
     def consider(token: str, file_path: str, line: int) -> None:
-        classified = classify_token_rule(token)
+        classified = classify(token)
         if classified is None:
             return
         boundary, kind, canonical, label, rule_id = classified

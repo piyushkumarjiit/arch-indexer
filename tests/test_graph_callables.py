@@ -112,3 +112,52 @@ def test_graph_schema_version_is_1_2(tmp_path: Path) -> None:
         store.insert_files([_file("app/a.py")])
         graph = build_graph(store, tmp_path)
     assert graph["schema_version"] == "1.2"
+
+
+def test_boundary_classification_is_memoized_per_run(tmp_path: Path, monkeypatch) -> None:
+    import functools
+    import json
+
+    from arch_indexer import graph as graph_module
+
+    tokens = ["sqlite3.connect", "requests.get", "app.a.helper"]
+    with IndexStore(tmp_path / "s.db") as store:
+        store.insert_files([_file("app/a.py")])
+        store.insert_symbols(
+            [
+                _symbol("app.a.run", "function", "app/a.py", 1, 40),
+                _symbol("app.a.helper", "function", "app/a.py", 41, 50),
+            ]
+        )
+        store.insert_unresolved_refs(
+            [_unresolved(token, "app/a.py", 2 + i) for i in range(5) for token in tokens[:2]]
+            + [_unresolved(tokens[2], "app/a.py", 20)]
+        )
+
+        calls: list[str] = []
+        real = graph_module.classify_token_rule
+
+        def counting(token: str):
+            calls.append(token)
+            return real(token)
+
+        monkeypatch.setattr(graph_module, "classify_token_rule", counting)
+        cached = build_graph(store, tmp_path)
+        assert sorted(calls) == sorted(tokens)  # once per distinct token
+
+        calls.clear()
+        original = graph_module._collect_boundaries
+        monkeypatch.setattr(
+            graph_module, "_collect_boundaries", functools.partial(original, memoize=False)
+        )
+        uncached = build_graph(store, tmp_path)
+        assert len(calls) == 11  # every row classified when the cache is off
+
+        # A second cached run re-classifies: the cache does not outlive a run.
+        calls.clear()
+        monkeypatch.setattr(graph_module, "_collect_boundaries", original)
+        build_graph(store, tmp_path)
+        assert sorted(calls) == sorted(tokens)
+
+    assert cached["data_stores"] and cached["external_sinks"]
+    assert json.dumps(cached, sort_keys=True) == json.dumps(uncached, sort_keys=True)
