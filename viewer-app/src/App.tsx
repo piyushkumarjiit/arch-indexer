@@ -180,7 +180,7 @@ export function App() {
     [currentGraph.edges, selectedEdgeId],
   );
 
-  // Global keyboard shortcuts (§4.4)
+  // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent) => {
       const target = ev.target as HTMLElement | null;

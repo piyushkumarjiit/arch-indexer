@@ -21,7 +21,7 @@ function copyViewerAssetsAndNotices(): Plugin {
         path.join(vendorDir, "elk-worker.min.js"),
       );
 
-      // Upstream licence texts required by §4.4 and §5.5
+      // Upstream licence texts shipped beside the built assets
       copyFileSync(
         path.join(appRoot, "node_modules/elkjs/LICENSE.md"),
         path.join(licensesDir, "elkjs-EPL-2.0.txt"),
