@@ -32,7 +32,9 @@ from arch_indexer.plugins.base import (
     IndexUnit,
     LanguagePlugin,
     build_name_table,
+    ecosystem_for_language,
     module_with_parents,
+    relations_from_inherits_facts,
 )
 from arch_indexer.toolchain import check_tool_status, get_repo_files
 
@@ -1194,6 +1196,7 @@ class PythonPlugin(LanguagePlugin):
                     "module": module_name,
                     "tier": IndexingTier.TIER2.value,
                     "fallback_reason": "tool_unavailable",
+                    "ecosystem": ecosystem_for_language("python"),
                 }
             )
 
@@ -1564,6 +1567,7 @@ class PythonPlugin(LanguagePlugin):
             entrypoints=entrypoints,
             infra_artifacts=[],
             facts=facts,
+            symbol_relations=relations_from_inherits_facts(facts),
         )
 
     def _route_entrypoints(
@@ -1826,6 +1830,7 @@ class PythonPlugin(LanguagePlugin):
                         "line": line,
                         "raw_symbol": raw_symbol,
                         "language": "python",
+                        "ref_kind": "import",
                     }
                 )
 

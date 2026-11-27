@@ -8,3 +8,11 @@
 (decorated_definition
   (decorator (_) @decorator) @decorator_node
   definition: (_) @target)
+
+(comparison_operator
+  . (_) @lhs
+  (_) @literal) @compare
+
+(call
+  function: (attribute object: (_) @lhs attribute: (identifier) @op)
+  arguments: (argument_list (_) @literal .)) @compare

@@ -27,6 +27,8 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "units",
         "facts",
         "synthetic_symbols",
+        "symbol_relations",
+        "resources",
     }
 
     # Verify meta table and user_version
@@ -34,7 +36,7 @@ def test_schema_creation_and_column_names(tmp_path: Path):
     assert c.fetchone()[0] == 2
     c.execute("SELECT key, value FROM meta ORDER BY key")
     meta_rows = dict(c.fetchall())
-    assert meta_rows["schema_version"] == "2.0"
+    assert meta_rows["schema_version"] == "2.1"
     assert "arch_indexer_version" in meta_rows
 
     # Verify column names for units (per-unit tier, hashes, commit, fallback reason, message)
@@ -64,6 +66,7 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "tier",
         "fallback_reason",
         "unit_id",
+        "ecosystem",
     ]
 
     # Verify column names for symbols
@@ -117,9 +120,9 @@ def test_schema_creation_and_column_names(tmp_path: Path):
     # Verify column names for unresolved_refs
     c.execute("PRAGMA table_info('unresolved_refs')")
     cols = [r[1] for r in c.fetchall()]
-    assert cols == ["id", "file_path", "line", "raw_symbol", "language"]
+    assert cols == ["id", "file_path", "line", "raw_symbol", "language", "ref_kind"]
 
-    # Slice 2 tables (spec 3.1)
+    # Slice 2 & 3 tables (spec 3.1)
     c.execute("PRAGMA table_info('meta')")
     assert [r[1] for r in c.fetchall()] == ["key", "value"]
     c.execute("PRAGMA table_info('facts')")
@@ -147,8 +150,28 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "end_line",
         "end_col",
     ]
+    c.execute("PRAGMA table_info('symbol_relations')")
+    assert [r[1] for r in c.fetchall()] == [
+        "source_fqname",
+        "target_fqname",
+        "kind",
+        "file_path",
+        "line",
+        "tier",
+    ]
+    c.execute("PRAGMA table_info('resources')")
+    assert [r[1] for r in c.fetchall()] == [
+        "id",
+        "kind",
+        "value",
+        "role",
+        "symbol_fqname",
+        "file_path",
+        "line",
+        "rule_id",
+    ]
     c.execute("SELECT value FROM meta WHERE key = 'schema_version'")
-    assert c.fetchone()[0] == "2.0"
+    assert c.fetchone()[0] == "2.1"
     c.execute("PRAGMA user_version")
     assert c.fetchone()[0] == 2
 

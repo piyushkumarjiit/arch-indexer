@@ -42,6 +42,7 @@ VALID_NODE_KINDS = {
     "external_sink",
     "frontend_caller",
     "module_symbol",
+    "sidecar",
 }
 VALID_EDGE_KINDS = {
     "calls",
@@ -52,6 +53,7 @@ VALID_EDGE_KINDS = {
     "depends_on",
     "registers",
     "boots",
+    "implements",
 }
 VALID_TIERS = {"scip", "tree-sitter"}
 
@@ -89,7 +91,7 @@ def test_graph_schema_conformance_on_fixture(tmp_path):
     assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
 
     graph = load_graph(repo / "docs" / "graph.json")
-    assert graph["schema_version"] == "1.2"
+    assert graph["schema_version"] == "1.3"
     assert graph["repo_name"] == "python_routes"
     assert isinstance(graph["generated_at_commit"], (str, type(None)))
     assert set(graph["tier_summary"]) == {

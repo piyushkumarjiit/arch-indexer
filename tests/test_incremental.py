@@ -456,7 +456,7 @@ def test_v1_database_without_meta_is_rebuilt_in_full(tmp_path: Path):
     with sqlite3.connect(paths.index_db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-        assert meta["schema_version"] == "2.0"
+        assert meta["schema_version"] == "2.1"
         stale = conn.execute("SELECT path FROM files WHERE path = 'stale/ghost.py'").fetchall()
         assert stale == []
         file_units = dict(conn.execute("SELECT path, unit_id FROM files").fetchall())

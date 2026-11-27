@@ -16,8 +16,17 @@ from pathlib import Path
 from typing import Any
 
 from arch_indexer.config import get_cache_dir, get_repo_cache_id
-from arch_indexer.graph import _build_modules
+from arch_indexer.graph import (
+    _BOOTED_KINDS,
+    _CALLBACK_LANGUAGES,
+    BOOT_CALLEES,
+    CALLBACK_METHOD_PATTERNS,
+    DEFAULT_DISPATCH_FANOUT_CAP,
+    _build_modules,
+    _matches_boot_callee,
+)
 from arch_indexer.known_symbols import classify_sink
+from arch_indexer.route_link import link_calls
 from arch_indexer.source_scope import filter_rows, in_scope
 
 DEFAULT_QUERY_LIMIT: int = 100
@@ -384,7 +393,11 @@ def _resolve_entrypoint(
 def _resolve_root_symbol(
     conn: sqlite3.Connection, entrypoint: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Find the symbol to start a trace from: the entrypoint symbol or its enclosing one."""
+    """Find the symbol to start a trace from: the entrypoint symbol or its enclosing one.
+
+    ``flow_trace`` falls back to ``synthetic_symbols`` for ``main``/``cli``/``route-literal``
+    entrypoints without exposing synthetic rows through ``query def`` or ``query file-symbols``.
+    """
     fqname = entrypoint["symbol_fqname"]
     if fqname:
         row = conn.execute(
@@ -393,8 +406,28 @@ def _resolve_root_symbol(
         if row is not None:
             return _symbol_dict(row)
 
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    has_synth = "synthetic_symbols" in tables
+
     if entrypoint["kind"] in _MODULE_SCOPE_ENTRYPOINT_KINDS:
-        return None
+        if not has_synth:
+            return None
+        if fqname:
+            srow = conn.execute(
+                "SELECT fqname, fqname AS name, kind, file_path, start_line, end_line "
+                "FROM synthetic_symbols WHERE fqname = ? ORDER BY start_line LIMIT 1",
+                (fqname,),
+            ).fetchone()
+            if srow is not None:
+                return {**dict(srow), "visibility": "public"}
+        srow = conn.execute(
+            "SELECT fqname, fqname AS name, kind, file_path, start_line, end_line "
+            "FROM synthetic_symbols WHERE file_path = ? AND start_line <= ? AND end_line >= ? "
+            "ORDER BY CASE WHEN kind = 'block' THEN 0 ELSE 1 END, (end_line - start_line) ASC "
+            "LIMIT 1",
+            (entrypoint["file_path"], entrypoint["line"], entrypoint["line"]),
+        ).fetchone()
+        return {**dict(srow), "visibility": "public"} if srow is not None else None
 
     row = conn.execute(
         f"""
@@ -405,30 +438,233 @@ def _resolve_root_symbol(
         """,
         (entrypoint["file_path"], entrypoint["line"], entrypoint["line"]),
     ).fetchone()
-    return _symbol_dict(row) if row is not None else None
+    if row is not None:
+        return _symbol_dict(row)
+    if has_synth and fqname:
+        srow = conn.execute(
+            "SELECT fqname, fqname AS name, kind, file_path, start_line, end_line "
+            "FROM synthetic_symbols WHERE fqname = ? AND kind = 'block' "
+            "ORDER BY start_line LIMIT 1",
+            (fqname,),
+        ).fetchone()
+        if srow is not None:
+            return {**dict(srow), "visibility": "public"}
+    return None
 
 
 def _call_adjacency(
     conn: sqlite3.Connection, *, include_tests: bool = False
 ) -> dict[str, list[dict[str, Any]]]:
-    defined = {row[0] for row in conn.execute("SELECT fqname FROM symbols")}
+    sym_rows = [dict(r) for r in conn.execute(f"{_SYMBOL_SELECT}{_SYMBOL_ORDER}").fetchall()]
+    defined = {r["fqname"] for r in sym_rows}
+    sym_by_fq = {r["fqname"]: r for r in sym_rows}
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    synth_rows: list[dict[str, Any]] = []
+    if "synthetic_symbols" in tables:
+        synth_rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT fqname, fqname AS name, kind, file_path, start_line, end_line "
+                "FROM synthetic_symbols ORDER BY file_path, start_line, fqname"
+            ).fetchall()
+        ]
+    callers_by_file: dict[str, list[dict[str, Any]]] = {}
+    for s in sym_rows:
+        if s["kind"] in ("function", "method", "class"):
+            callers_by_file.setdefault(s["file_path"], []).append({**s, "synthetic": False})
+    for s in synth_rows:
+        callers_by_file.setdefault(s["file_path"], []).append({**s, "synthetic": True})
+
+    def enclosing_fq(file_path: str, line: int) -> str | None:
+        best: dict[str, Any] | None = None
+        best_key: tuple[int, int, int] | None = None
+        for sym in callers_by_file.get(file_path, ()):
+            if not (sym["start_line"] <= line <= sym["end_line"]):
+                continue
+            rank = 2 if sym["kind"] == "module" else 0
+            key = (rank, sym["end_line"] - sym["start_line"], 1 if sym.get("synthetic") else 0)
+            if best is None or key < best_key:  # type: ignore[operator]
+                best = sym
+                best_key = key
+        return best["fqname"] if best else None
+
     adjacency: dict[str, list[dict[str, Any]]] = {}
-    for row in conn.execute(_CALL_EDGE_SQL):
-        caller = row["caller"]
-        if not caller:
-            continue
-        # A call made from a test file is not part of the architecture flow.
-        if not in_scope(row["ref_file"], include_tests):
-            continue
-        callee = row["callee"]
+
+    def add_edge(caller: str | None, callee: str, file_path: str, line: int) -> None:
+        if not caller or not in_scope(file_path, include_tests) or caller == callee:
+            return
         adjacency.setdefault(caller, []).append(
             {
                 "callee": callee,
-                "file": row["ref_file"],
-                "line": row["ref_line"],
+                "file": file_path,
+                "line": line,
                 "sink": None if callee in defined else classify_sink(callee),
             }
         )
+
+    for row in conn.execute(_CALL_EDGE_SQL):
+        caller = row["caller"] or enclosing_fq(row["ref_file"], row["ref_line"])
+        add_edge(caller, row["callee"], row["ref_file"], row["ref_line"])
+
+    # Follow polymorphic dispatch targets (implements/overrides) within fan-out cap.
+    if "symbol_relations" in tables:
+        rels = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT source_fqname, target_fqname, kind FROM symbol_relations "
+                "ORDER BY source_fqname, kind, target_fqname"
+            ).fetchall()
+        ]
+        impls_of: dict[str, set[str]] = {}
+        overrides_of: dict[str, list[str]] = {}
+        methods_by_class: dict[str, dict[str, str]] = {}
+        for s in sym_rows:
+            if s["kind"] in ("method", "function") and "." in s["fqname"]:
+                cls_fq = s["fqname"].rsplit(".", 1)[0]
+                methods_by_class.setdefault(cls_fq, {})[s["name"]] = s["fqname"]
+        for r in rels:
+            if r["kind"] in ("implements", "extends"):
+                impls_of.setdefault(r["target_fqname"], set()).add(r["source_fqname"])
+            elif r["kind"] == "overrides":
+                overrides_of.setdefault(r["target_fqname"], []).append(r["source_fqname"])
+        for caller_fq, edges in list(adjacency.items()):
+            for edge in list(edges):
+                callee_fq = edge["callee"]
+                callee_sym = sym_by_fq.get(callee_fq)
+                if callee_sym is None or "." not in callee_fq:
+                    continue
+                owner_fq = callee_fq.rsplit(".", 1)[0]
+                owner_sym = sym_by_fq.get(owner_fq)
+                if owner_sym is None or (
+                    owner_sym["kind"] != "interface" and owner_fq not in impls_of
+                ):
+                    continue
+                targets = sorted(set(overrides_of.get(callee_fq, ())))
+                if not targets:
+                    mname = callee_sym["name"]
+                    for impl_fq in sorted(impls_of.get(owner_fq, ())):
+                        m_fq = methods_by_class.get(impl_fq, {}).get(mname)
+                        if m_fq:
+                            targets.append(m_fq)
+                if 1 <= len(targets) <= DEFAULT_DISPATCH_FANOUT_CAP:
+                    for tgt in targets:
+                        add_edge(caller_fq, tgt, edge["file"], edge["line"])
+
+    # Follow registers, boots, and http_request edges when facts exist.
+    if "facts" in tables:
+        file_info = {
+            r["path"]: dict(r)
+            for r in conn.execute("SELECT path, language, module, unit_id FROM files").fetchall()
+        }
+        methods_by_class_list: dict[str, list[dict[str, Any]]] = {}
+        for s in sym_rows:
+            if s["kind"] == "method" and "." in s["fqname"]:
+                methods_by_class_list.setdefault(s["fqname"].rsplit(".", 1)[0], []).append(s)
+
+        reg_rows = conn.execute(
+            "SELECT file_path, line, name_text, name_fqname, args_json FROM facts "
+            "WHERE kind = 'register' ORDER BY file_path, line"
+        ).fetchall()
+        for r in reg_rows:
+            caller = enclosing_fq(r["file_path"], r["line"])
+            if not caller:
+                continue
+            try:
+                args = json.loads(r["args_json"] or "[]")
+            except json.JSONDecodeError:
+                args = []
+            for arg in args if isinstance(args, list) else ():
+                tgt = sym_by_fq.get(arg.get("ref_fqname") or "") if isinstance(arg, dict) else None
+                if tgt is None:
+                    continue
+                if tgt["kind"] in ("function", "method") and not arg.get("alias"):
+                    add_edge(caller, tgt["fqname"], r["file_path"], r["line"])
+                elif tgt["kind"] == "class" and (
+                    file_info.get(r["file_path"], {}).get("language") in _CALLBACK_LANGUAGES
+                ):
+                    for m in sorted(
+                        methods_by_class_list.get(tgt["fqname"], ()), key=lambda x: x["fqname"]
+                    ):
+                        if CALLBACK_METHOD_PATTERNS.match(m["name"]):
+                            add_edge(caller, m["fqname"], r["file_path"], r["line"])
+
+        # Boot facts -> trigger entrypoints
+        ep_rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, kind, name, method, route_or_trigger, file_path, line, symbol_fqname "
+                "FROM entrypoints ORDER BY file_path, line"
+            ).fetchall()
+        ]
+        triggers = [
+            ep
+            for ep in ep_rows
+            if ep["kind"] in _BOOTED_KINDS
+            or (ep["kind"] == "process" and "main(" not in (ep["route_or_trigger"] or ""))
+        ]
+        boot_clauses = " OR ".join(
+            f"name_text LIKE '%{'.'.join(c.split('.')[-2:])}' "
+            f"OR name_fqname LIKE '%{'.'.join(c.split('.')[-2:])}'"
+            for c in BOOT_CALLEES
+        )
+        boot_rows = conn.execute(
+            f"SELECT file_path, line, name_text, name_fqname FROM facts "
+            f"WHERE kind = 'call' AND ({boot_clauses}) ORDER BY file_path, line"
+        ).fetchall()
+        for b in boot_rows:
+            br = dict(b)
+            if not _matches_boot_callee(br):
+                continue
+            caller = enclosing_fq(br["file_path"], br["line"])
+            if not caller:
+                continue
+            b_info = file_info.get(br["file_path"], {})
+            b_dir = br["file_path"].rsplit("/", 1)[0] + "/" if "/" in br["file_path"] else ""
+            for trig in triggers:
+                t_info = file_info.get(trig["file_path"], {})
+                if trig["file_path"].startswith(b_dir) and t_info.get("unit_id") == b_info.get(
+                    "unit_id"
+                ):
+                    tgt_sym = trig.get("symbol_fqname")
+                    if tgt_sym:
+                        add_edge(caller, tgt_sym, br["file_path"], br["line"])
+
+        # Frontend api_call -> HTTP ep:* symbol
+        api_calls = [
+            {
+                "id": f"fe:{ep['file_path']}:{ep['line']}",
+                "source_id": ep.get("symbol_fqname") or enclosing_fq(ep["file_path"], ep["line"]),
+                "file": ep["file_path"],
+                "line": ep["line"],
+                "method": ep.get("method"),
+                "path": ep.get("route_or_trigger"),
+            }
+            for ep in ep_rows
+            if ep["kind"] == "api_call" and ep.get("route_or_trigger")
+        ]
+        http_entries = [
+            {
+                "id": ep.get("symbol_fqname")
+                or f"ep:{ep['method'] or 'ANY'}:{ep['route_or_trigger']}",
+                "kind": "http",
+                "file": ep["file_path"],
+                "line": ep["line"],
+                "method": ep.get("method"),
+                "path": ep.get("route_or_trigger"),
+            }
+            for ep in ep_rows
+            if ep["kind"] == "http" and ep.get("symbol_fqname")
+        ]
+        if api_calls and http_entries:
+            for link in link_calls(api_calls, http_entries):
+                add_edge(
+                    link["source"],
+                    link["target"],
+                    link["metadata"]["file_path"],
+                    link["metadata"]["line"],
+                )
+
     return adjacency
 
 

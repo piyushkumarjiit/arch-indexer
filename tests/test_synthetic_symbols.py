@@ -85,7 +85,7 @@ def test_main_entry_is_bound_to_a_resolvable_block_symbol(flow_repo) -> None:
 
 def test_edges_and_nodes_carry_confidence(flow_repo) -> None:
     graph = _index(*flow_repo)
-    assert graph["schema_version"] == "1.2"
+    assert graph["schema_version"] == "1.3"
     assert all(e["confidence"] in {"exact", "heuristic", "runtime"} for e in graph["edges"])
     assert all(n["confidence"] in {"exact", "heuristic", "runtime"} for n in graph["nodes"])
     registers = [e for e in graph["edges"] if e["kind"] == "registers"]

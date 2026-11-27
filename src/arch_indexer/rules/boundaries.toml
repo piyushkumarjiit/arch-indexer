@@ -1,0 +1,1321 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Built-in boundary rules for arch-indexer (spec §6.1).
+
+# --- Anchored package store rules (checked before DATA_STORE_RULES) ---
+
+[[rule]]
+id = "builtin:faiss"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "faiss"
+label = "FAISS index"
+match = { package = "faiss", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["faiss.IndexFlatL2"], negative = ["com.acme.faiss_helper.Run"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.faiss"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "faiss"
+label = "FAISS index"
+match = { package = "langchain_community.vectorstores.faiss", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.FAISS"], negative = ["langchain_community.llms.Ollama"] }
+
+[[rule]]
+id = "builtin:node:sqlite"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlite"
+label = "SQLite"
+match = { package = "node:sqlite", anchor = "root" }
+ecosystems = ["npm"]
+confidence = "exact"
+examples = { positive = ["node:sqlite"], negative = ["my_sqlite_helper"] }
+
+[[rule]]
+id = "builtin:better-sqlite3"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlite"
+label = "SQLite"
+match = { package = "better-sqlite3", anchor = "root" }
+ecosystems = ["npm"]
+confidence = "exact"
+examples = { positive = ["better-sqlite3"], negative = ["acme.better-sqlite3.wrapper"] }
+
+[[rule]]
+id = "builtin:chromadb"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "chroma"
+label = "Chroma vector store"
+match = { package = "chromadb", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["chromadb.Client"], negative = ["com.acme.chromadb"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.chroma"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "chroma"
+label = "Chroma vector store"
+match = { package = "langchain_community.vectorstores.chroma", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.chroma.Client"], negative = ["com.unrelated.langchain_community_vectorstores_chroma_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.chromadb"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "chroma"
+label = "Chroma vector store"
+match = { package = "langchain_community.vectorstores.chromadb", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.chromadb.Client"], negative = ["com.unrelated.langchain_community_vectorstores_chromadb_wrapper"] }
+
+[[rule]]
+id = "builtin:qdrant_client"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "qdrant"
+label = "Qdrant vector store"
+match = { package = "qdrant_client", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["qdrant_client.QdrantClient"], negative = ["acme.qdrant_client"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.qdrant"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "qdrant"
+label = "Qdrant vector store"
+match = { package = "langchain_community.vectorstores.qdrant", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.qdrant.Client"], negative = ["com.unrelated.langchain_community_vectorstores_qdrant_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.qdrant_client"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "qdrant"
+label = "Qdrant vector store"
+match = { package = "langchain_community.vectorstores.qdrant_client", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.qdrant_client.Client"], negative = ["com.unrelated.langchain_community_vectorstores_qdrant_client_wrapper"] }
+
+[[rule]]
+id = "builtin:pinecone"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "pinecone"
+label = "Pinecone vector store"
+match = { package = "pinecone", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["pinecone.Pinecone"], negative = ["acme.pinecone"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.pinecone"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "pinecone"
+label = "Pinecone vector store"
+match = { package = "langchain_community.vectorstores.pinecone", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.pinecone.Client"], negative = ["com.unrelated.langchain_community_vectorstores_pinecone_wrapper"] }
+
+[[rule]]
+id = "builtin:weaviate"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "weaviate"
+label = "Weaviate vector store"
+match = { package = "weaviate", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["weaviate.Client"], negative = ["acme.weaviate"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.weaviate"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "weaviate"
+label = "Weaviate vector store"
+match = { package = "langchain_community.vectorstores.weaviate", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.weaviate.Client"], negative = ["com.unrelated.langchain_community_vectorstores_weaviate_wrapper"] }
+
+[[rule]]
+id = "builtin:lancedb"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "lancedb"
+label = "LanceDB vector store"
+match = { package = "lancedb", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["lancedb.connect"], negative = ["acme.lancedb"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.lancedb"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "lancedb"
+label = "LanceDB vector store"
+match = { package = "langchain_community.vectorstores.lancedb", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.lancedb.Client"], negative = ["com.unrelated.langchain_community_vectorstores_lancedb_wrapper"] }
+
+[[rule]]
+id = "builtin:pgvector"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "pgvector"
+label = "pgvector vector store"
+match = { package = "pgvector", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["pgvector.sqlalchemy.Vector"], negative = ["acme.pgvector"] }
+
+[[rule]]
+id = "builtin:langchain_community.vectorstores.pgvector"
+kind = "data_store"
+boundary_kind = "vector_store"
+canonical = "pgvector"
+label = "pgvector vector store"
+match = { package = "langchain_community.vectorstores.pgvector", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.vectorstores.pgvector.Client"], negative = ["com.unrelated.langchain_community_vectorstores_pgvector_wrapper"] }
+
+# Slice 3 repository/ORM base package store rules (§4.3)
+[[rule]]
+id = "builtin:org.springframework.data.jpa"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA/Hibernate"
+match = { package = "org.springframework.data.jpa", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.springframework.data.jpa.repository.JpaRepository"], negative = ["com.acme.jpa.Foo"] }
+
+[[rule]]
+id = "builtin:org.springframework.data.repository"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA/Hibernate"
+match = { package = "org.springframework.data.repository", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.springframework.data.repository.CrudRepository"], negative = ["com.acme.repository.Foo"] }
+
+[[rule]]
+id = "builtin:org.springframework.jdbc"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jdbc"
+label = "JDBC database"
+match = { package = "org.springframework.jdbc", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.springframework.jdbc.core.JdbcTemplate"], negative = ["com.acme.jdbc.Foo"] }
+
+[[rule]]
+id = "builtin:typeorm"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "typeorm"
+label = "SQL database (TypeORM)"
+match = { package = "typeorm", anchor = "root" }
+also_token = true
+ecosystems = ["npm"]
+confidence = "exact"
+examples = { positive = ["typeorm.Repository"], negative = ["com.acme.typeorm.Foo"] }
+
+[[rule]]
+id = "builtin:sqlalchemy.orm"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlalchemy"
+label = "SQL database (SQLAlchemy)"
+match = { package = "sqlalchemy.orm", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["sqlalchemy.orm.Session"], negative = ["acme.sqlalchemy.Foo"] }
+
+[[rule]]
+id = "builtin:django.db.models"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "django-orm"
+label = "Django ORM"
+match = { package = "django.db.models", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["django.db.models.Model"], negative = ["acme.django.Foo"] }
+
+# --- Data store token/image fragment rules ---
+
+[[rule]]
+id = "builtin:asyncpg"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "postgres"
+label = "PostgreSQL"
+match = { token = "asyncpg" }
+confidence = "exact"
+examples = { positive = ["asyncpg.connect"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:azure.storage"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "azure-blob"
+label = "Azure Blob Storage"
+match = { token = "azure.storage" }
+confidence = "exact"
+examples = { positive = ["azure.storage.blob"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:boto3"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "s3"
+label = "Amazon S3"
+match = { token = "boto3" }
+confidence = "exact"
+examples = { positive = ["boto3.client"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:cassandra"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "cassandra"
+label = "Cassandra"
+match = { token = "cassandra" }
+confidence = "exact"
+examples = { positive = ["cassandra.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:couchdb"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "couchdb"
+label = "CouchDB"
+match = { token = "couchdb" }
+confidence = "exact"
+examples = { positive = ["couchdb.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:diesel"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "diesel"
+label = "SQL database (Diesel)"
+match = { token = "diesel" }
+confidence = "exact"
+examples = { positive = ["diesel.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:dynamodb"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "dynamodb"
+label = "DynamoDB"
+match = { token = "dynamodb" }
+confidence = "exact"
+examples = { positive = ["dynamodb.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:elasticsearch"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "elasticsearch"
+label = "Elasticsearch"
+match = { token = "elasticsearch" }
+confidence = "exact"
+examples = { positive = ["elasticsearch.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:entitymanager"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA persistence context"
+match = { token = "entitymanager" }
+confidence = "exact"
+examples = { positive = ["entitymanager.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:firestore"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "firestore"
+label = "Firestore"
+match = { token = "firestore" }
+confidence = "exact"
+examples = { positive = ["firestore.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:fsspec"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "filesystem"
+label = "Filesystem storage"
+match = { token = "fsspec" }
+confidence = "exact"
+examples = { positive = ["fsspec.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:gcs"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "gcs"
+label = "Google Cloud Storage"
+match = { token = "gcs" }
+confidence = "exact"
+examples = { positive = ["gcs.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:google.cloud.storage"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "gcs"
+label = "Google Cloud Storage"
+match = { token = "google.cloud.storage" }
+confidence = "exact"
+examples = { positive = ["google.cloud.storage.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:gorm"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "gorm"
+label = "SQL database (GORM)"
+match = { token = "gorm" }
+confidence = "exact"
+examples = { positive = ["gorm.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:hibernate"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA/Hibernate"
+match = { token = "hibernate" }
+confidence = "exact"
+examples = { positive = ["hibernate.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:jakarta.persistence"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA/Hibernate"
+match = { token = "jakarta.persistence" }
+confidence = "exact"
+examples = { positive = ["jakarta.persistence.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:javax.persistence"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jpa"
+label = "JPA/Hibernate"
+match = { token = "javax.persistence" }
+confidence = "exact"
+examples = { positive = ["javax.persistence.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:jdbc"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jdbc"
+label = "JDBC database"
+match = { token = "jdbc" }
+confidence = "exact"
+examples = { positive = ["jdbc.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:jdbctemplate"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "jdbc"
+label = "JDBC database"
+match = { token = "jdbctemplate" }
+confidence = "exact"
+examples = { positive = ["jdbctemplate.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:kafka"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "kafka"
+label = "Kafka"
+match = { token = "kafka" }
+confidence = "exact"
+examples = { positive = ["kafka.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:knex"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "knex"
+label = "SQL database (Knex)"
+match = { token = "knex" }
+confidence = "exact"
+examples = { positive = ["knex.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:kombu"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "rabbitmq"
+label = "RabbitMQ"
+match = { token = "kombu" }
+confidence = "exact"
+examples = { positive = ["kombu.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:memcached"
+kind = "data_store"
+boundary_kind = "cache"
+canonical = "memcached"
+label = "Memcached"
+match = { token = "memcached" }
+confidence = "exact"
+examples = { positive = ["memcached.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:minio"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "s3"
+label = "S3-compatible object store"
+match = { token = "minio" }
+confidence = "exact"
+examples = { positive = ["minio.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:mongo"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "mongodb"
+label = "MongoDB"
+match = { token = "mongo" }
+confidence = "exact"
+examples = { positive = ["mongo.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:mongoose"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "mongodb"
+label = "MongoDB"
+match = { token = "mongoose" }
+confidence = "exact"
+examples = { positive = ["mongoose.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:mysql"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "mysql"
+label = "MySQL"
+match = { token = "mysql" }
+confidence = "exact"
+examples = { positive = ["mysql.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:nats"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "nats"
+label = "NATS"
+match = { token = "nats" }
+confidence = "exact"
+examples = { positive = ["nats.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:neo4j"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "neo4j"
+label = "Neo4j"
+match = { token = "neo4j" }
+confidence = "exact"
+examples = { positive = ["neo4j.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:opensearch"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "opensearch"
+label = "OpenSearch"
+match = { token = "opensearch" }
+confidence = "exact"
+examples = { positive = ["opensearch.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:pika"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "rabbitmq"
+label = "RabbitMQ"
+match = { token = "pika" }
+confidence = "exact"
+examples = { positive = ["pika.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:postgres"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "postgres"
+label = "PostgreSQL"
+match = { token = "postgres" }
+confidence = "exact"
+examples = { positive = ["postgres:15"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:prisma"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "prisma"
+label = "SQL database (Prisma)"
+match = { token = "prisma" }
+confidence = "exact"
+examples = { positive = ["@prisma/client"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:psycopg"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "postgres"
+label = "PostgreSQL"
+match = { token = "psycopg" }
+confidence = "exact"
+examples = { positive = ["psycopg.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:pubsub"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "pubsub"
+label = "Pub/Sub"
+match = { token = "pubsub" }
+confidence = "exact"
+examples = { positive = ["pubsub.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:pymysql"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "mysql"
+label = "MySQL"
+match = { token = "pymysql" }
+confidence = "exact"
+examples = { positive = ["pymysql.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:rabbitmq"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "rabbitmq"
+label = "RabbitMQ"
+match = { token = "rabbitmq" }
+confidence = "exact"
+examples = { positive = ["rabbitmq.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:redis"
+kind = "data_store"
+boundary_kind = "cache"
+canonical = "redis"
+label = "Redis"
+match = { token = "redis" }
+confidence = "exact"
+examples = { positive = ["docker.io/library/redis:7"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:s3"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "s3"
+label = "Amazon S3"
+match = { token = "s3" }
+confidence = "exact"
+examples = { positive = ["s3.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:sequelize"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sequelize"
+label = "SQL database (Sequelize)"
+match = { token = "sequelize" }
+confidence = "exact"
+examples = { positive = ["sequelize.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:sqlalchemy"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlalchemy"
+label = "SQL database (SQLAlchemy)"
+match = { token = "sqlalchemy" }
+confidence = "exact"
+examples = { positive = ["sqlalchemy.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:sqlite"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlite"
+label = "SQLite"
+match = { token = "sqlite" }
+confidence = "exact"
+examples = { positive = ["sqlite.connect"], negative = ["acme.noop"] }
+
+[[rule]]
+id = "builtin:sqlmodel"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "sqlalchemy"
+label = "SQL database (SQLModel)"
+match = { token = "sqlmodel" }
+confidence = "exact"
+examples = { positive = ["sqlmodel.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:sqs"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "sqs"
+label = "Amazon SQS"
+match = { token = "sqs" }
+confidence = "exact"
+examples = { positive = ["sqs.connect"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:sns"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "sns"
+label = "Amazon SNS"
+match = { token = "sns" }
+confidence = "exact"
+examples = { positive = ["sns.connect"], negative = ["com.unrelated.noop"] }
+
+# --- Anchored package external sink rules ---
+
+[[rule]]
+id = "builtin:org.kohsuke.github"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "github"
+label = "GitHub API"
+match = { package = "org.kohsuke.github", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.kohsuke.github.GitHub"], negative = ["com.github.benmanes.caffeine.cache.Caffeine"] }
+
+[[rule]]
+id = "builtin:@octokit"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "github"
+label = "GitHub API"
+match = { package = "@octokit", anchor = "root" }
+ecosystems = ["npm"]
+confidence = "exact"
+examples = { positive = ["@octokit/rest"], negative = ["com.acme.octokit.Foo"] }
+
+[[rule]]
+id = "builtin:github"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "github"
+label = "GitHub API"
+match = { sink_token = "github" }
+confidence = "exact"
+examples = { positive = ["github.Github"], negative = ["github.com/gin-gonic/gin"] }
+
+[[rule]]
+id = "builtin:java.net.http"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "java.net.http", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["java.net.http.HttpClient"], negative = ["com.acme.http.Foo"] }
+
+[[rule]]
+id = "builtin:org.springframework.web.client"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "org.springframework.web.client", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.springframework.web.client.RestClient"], negative = ["com.acme.client.Foo"] }
+
+[[rule]]
+id = "builtin:org.springframework.web.reactive.function.client"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "org.springframework.web.reactive.function.client", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.springframework.web.reactive.function.client.Client"], negative = ["com.unrelated.org_springframework_web_reactive_function_client_wrapper"] }
+
+[[rule]]
+id = "builtin:okhttp3"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "okhttp3", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["okhttp3.Client"], negative = ["com.unrelated.okhttp3_wrapper"] }
+
+[[rule]]
+id = "builtin:org.apache.hc.client5"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "org.apache.hc.client5", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.apache.hc.client5.Client"], negative = ["com.unrelated.org_apache_hc_client5_wrapper"] }
+
+[[rule]]
+id = "builtin:org.apache.http"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { package = "org.apache.http", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["org.apache.http.Client"], negative = ["com.unrelated.org_apache_http_wrapper"] }
+
+[[rule]]
+id = "builtin:openai"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "openai"
+label = "OpenAI LLM API"
+match = { package = "openai", anchor = "root" }
+confidence = "exact"
+examples = { positive = ["openai.OpenAI"], negative = ["com.acme.openai.Helper"] }
+
+[[rule]]
+id = "builtin:com.openai"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "openai"
+label = "OpenAI LLM API"
+match = { package = "com.openai", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["com.openai.Client"], negative = ["com.unrelated.com_openai_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_openai"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "openai"
+label = "OpenAI LLM API"
+match = { package = "langchain_openai", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_openai.Client"], negative = ["com.unrelated.langchain_openai_wrapper"] }
+
+[[rule]]
+id = "builtin:anthropic"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "anthropic"
+label = "Anthropic LLM API"
+match = { package = "anthropic", anchor = "root" }
+confidence = "exact"
+examples = { positive = ["anthropic.Client"], negative = ["com.unrelated.anthropic_wrapper"] }
+
+[[rule]]
+id = "builtin:com.anthropic"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "anthropic"
+label = "Anthropic LLM API"
+match = { package = "com.anthropic", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["com.anthropic.Client"], negative = ["com.unrelated.com_anthropic_wrapper"] }
+
+[[rule]]
+id = "builtin:google.genai"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "google-genai"
+label = "Google GenAI LLM API"
+match = { package = "google.genai", anchor = "root" }
+confidence = "exact"
+examples = { positive = ["google.genai.Client"], negative = ["google.genaiclient.Thing"] }
+
+[[rule]]
+id = "builtin:google.generativeai"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "google-genai"
+label = "Google GenAI LLM API"
+match = { package = "google.generativeai", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["google.generativeai.Client"], negative = ["com.unrelated.google_generativeai_wrapper"] }
+
+[[rule]]
+id = "builtin:huggingface_hub"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "huggingface"
+label = "Hugging Face LLM API"
+match = { package = "huggingface_hub", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["huggingface_hub.Client"], negative = ["com.unrelated.huggingface_hub_wrapper"] }
+
+[[rule]]
+id = "builtin:dev.langchain4j"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "langchain4j"
+label = "LangChain4j LLM API"
+match = { package = "dev.langchain4j", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["dev.langchain4j.Client"], negative = ["com.unrelated.dev_langchain4j_wrapper"] }
+
+[[rule]]
+id = "builtin:ollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "ollama", anchor = "root" }
+confidence = "exact"
+examples = { positive = ["ollama.Client"], negative = ["com.unrelated.ollama_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_ollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_ollama", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_ollama.OllamaEmbeddings"], negative = ["acme.langchain_ollama"] }
+
+[[rule]]
+id = "builtin:langchain_community.llms.ollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_community.llms.ollama", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.llms.ollama.Client"], negative = ["com.unrelated.langchain_community_llms_ollama_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.chat_models.ollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_community.chat_models.ollama", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.chat_models.ollama.Client"], negative = ["com.unrelated.langchain_community_chat_models_ollama_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.chat_models.chatollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_community.chat_models.chatollama", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.chat_models.chatollama.Client"], negative = ["com.unrelated.langchain_community_chat_models_chatollama_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.embeddings.ollama"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_community.embeddings.ollama", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.embeddings.ollama.Client"], negative = ["com.unrelated.langchain_community_embeddings_ollama_wrapper"] }
+
+[[rule]]
+id = "builtin:langchain_community.embeddings.ollamaembeddings"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "langchain_community.embeddings.ollamaembeddings", anchor = "root" }
+ecosystems = ["pypi"]
+confidence = "exact"
+examples = { positive = ["langchain_community.embeddings.ollamaembeddings.Client"], negative = ["com.unrelated.langchain_community_embeddings_ollamaembeddings_wrapper"] }
+
+[[rule]]
+id = "builtin:io.github.ollama4j"
+kind = "external"
+boundary_kind = "llm_api"
+canonical = "ollama"
+label = "Ollama"
+match = { package = "io.github.ollama4j", anchor = "root" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["io.github.ollama4j.Client"], negative = ["com.unrelated.io_github_ollama4j_wrapper"] }
+
+# --- Anchored external sink head/prefix rules ---
+
+[[rule]]
+id = "builtin:auth0"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "auth0"
+label = "Auth0 API"
+match = { sink_token = "auth0" }
+confidence = "exact"
+examples = { positive = ["auth0.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:axios"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "axios" }
+confidence = "exact"
+examples = { positive = ["axios.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:fetch"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "fetch" }
+confidence = "exact"
+examples = { positive = ["lib.lib.dom.d.ts.fetch"], negative = ["acme.fetch.Helper"] }
+
+[[rule]]
+id = "builtin:got"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "got" }
+confidence = "exact"
+examples = { positive = ["got.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:http.client"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "http.client" }
+confidence = "exact"
+examples = { positive = ["http.client.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:httpx"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "httpx" }
+confidence = "exact"
+examples = { positive = ["httpx.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:javax.mail"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "smtp"
+label = "SMTP mail"
+match = { sink_token = "javax.mail" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["javax.mail.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:jakarta.mail"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "smtp"
+label = "SMTP mail"
+match = { sink_token = "jakarta.mail" }
+ecosystems = ["maven"]
+confidence = "exact"
+examples = { positive = ["jakarta.mail.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:mailgun"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "mailgun"
+label = "Mailgun"
+match = { sink_token = "mailgun" }
+confidence = "exact"
+examples = { positive = ["mailgun.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:nodemailer"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "smtp"
+label = "SMTP mail"
+match = { sink_token = "nodemailer" }
+confidence = "exact"
+examples = { positive = ["nodemailer.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:okhttp"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "okhttp" }
+confidence = "exact"
+examples = { positive = ["okhttp.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:requests"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "requests" }
+confidence = "exact"
+examples = { positive = ["requests.post"], negative = ["com.acme.requests.Foo"] }
+
+[[rule]]
+id = "builtin:sendgrid"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "sendgrid"
+label = "SendGrid"
+match = { sink_token = "sendgrid" }
+confidence = "exact"
+examples = { positive = ["@sendgrid/mail"], negative = ["com.acme.sendgrid.Foo"] }
+
+[[rule]]
+id = "builtin:ses"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "ses"
+label = "Amazon SES"
+match = { sink_token = "ses" }
+confidence = "exact"
+examples = { positive = ["ses.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:slack"
+kind = "external"
+boundary_kind = "webhook"
+canonical = "slack"
+label = "Slack API"
+match = { sink_token = "slack" }
+confidence = "exact"
+examples = { positive = ["slack.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:smtplib"
+kind = "external"
+boundary_kind = "smtp"
+canonical = "smtp"
+label = "SMTP mail"
+match = { sink_token = "smtplib" }
+confidence = "exact"
+examples = { positive = ["smtplib.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:stripe"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "stripe"
+label = "Stripe API"
+match = { sink_token = "stripe" }
+confidence = "exact"
+examples = { positive = ["stripe/lib"], negative = ["com.acme.stripe.Foo"] }
+
+[[rule]]
+id = "builtin:superagent"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "superagent" }
+confidence = "exact"
+examples = { positive = ["superagent.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:twilio"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "twilio"
+label = "Twilio API"
+match = { sink_token = "twilio" }
+confidence = "exact"
+examples = { positive = ["twilio.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:urllib"
+kind = "external"
+boundary_kind = "http_api"
+canonical = "http"
+label = "HTTP API"
+match = { sink_token = "urllib" }
+confidence = "exact"
+examples = { positive = ["urllib.send"], negative = ["com.unrelated.noop"] }
+
+[[rule]]
+id = "builtin:webhook"
+kind = "external"
+boundary_kind = "webhook"
+canonical = "webhook"
+label = "Webhook"
+match = { sink_token = "webhook" }
+confidence = "exact"
+examples = { positive = ["webhook.send"], negative = ["com.unrelated.noop"] }
+
+# --- Terraform resource rules ---
+
+[[rule]]
+id = "builtin:aws_db_instance"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "rds"
+label = "AWS RDS"
+match = { terraform = "aws_db_instance" }
+confidence = "exact"
+examples = { positive = ["aws_db_instance"], negative = ["aws_instance"] }
+
+[[rule]]
+id = "builtin:aws_dynamodb_table"
+kind = "data_store"
+boundary_kind = "nosql"
+canonical = "dynamodb"
+label = "DynamoDB"
+match = { terraform = "aws_dynamodb_table" }
+confidence = "exact"
+examples = { positive = ["aws_dynamodb_table"], negative = ["aws_dynamodb_table_unrelated"] }
+
+[[rule]]
+id = "builtin:aws_elasticache_cluster"
+kind = "data_store"
+boundary_kind = "cache"
+canonical = "redis"
+label = "ElastiCache"
+match = { terraform = "aws_elasticache_cluster" }
+confidence = "exact"
+examples = { positive = ["aws_elasticache_cluster"], negative = ["aws_elasticache_cluster_unrelated"] }
+
+[[rule]]
+id = "builtin:aws_s3_bucket"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "s3"
+label = "Amazon S3"
+match = { terraform = "aws_s3_bucket" }
+confidence = "exact"
+examples = { positive = ["aws_s3_bucket"], negative = ["aws_s3_bucket_unrelated"] }
+
+[[rule]]
+id = "builtin:aws_sns_topic"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "sns"
+label = "Amazon SNS"
+match = { terraform = "aws_sns_topic" }
+confidence = "exact"
+examples = { positive = ["aws_sns_topic"], negative = ["aws_sns_topic_unrelated"] }
+
+[[rule]]
+id = "builtin:aws_sqs_queue"
+kind = "data_store"
+boundary_kind = "queue"
+canonical = "sqs"
+label = "Amazon SQS"
+match = { terraform = "aws_sqs_queue" }
+confidence = "exact"
+examples = { positive = ["aws_sqs_queue"], negative = ["aws_sqs_queue_unrelated"] }
+
+[[rule]]
+id = "builtin:azurerm_redis_cache"
+kind = "data_store"
+boundary_kind = "cache"
+canonical = "redis"
+label = "Azure Cache for Redis"
+match = { terraform = "azurerm_redis_cache" }
+confidence = "exact"
+examples = { positive = ["azurerm_redis_cache"], negative = ["azurerm_redis_cache_unrelated"] }
+
+[[rule]]
+id = "builtin:azurerm_storage_account"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "azure-blob"
+label = "Azure Blob Storage"
+match = { terraform = "azurerm_storage_account" }
+confidence = "exact"
+examples = { positive = ["azurerm_storage_account"], negative = ["azurerm_storage_account_unrelated"] }
+
+[[rule]]
+id = "builtin:google_sql_database_instance"
+kind = "data_store"
+boundary_kind = "sql"
+canonical = "postgres"
+label = "Google Cloud SQL"
+match = { terraform = "google_sql_database_instance" }
+confidence = "exact"
+examples = { positive = ["google_sql_database_instance"], negative = ["google_sql_database_instance_unrelated"] }
+
+[[rule]]
+id = "builtin:google_storage_bucket"
+kind = "data_store"
+boundary_kind = "filesystem"
+canonical = "gcs"
+label = "Google Cloud Storage"
+match = { terraform = "google_storage_bucket" }
+confidence = "exact"
+examples = { positive = ["google_storage_bucket"], negative = ["google_storage_bucket_unrelated"] }

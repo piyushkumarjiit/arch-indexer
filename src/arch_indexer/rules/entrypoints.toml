@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Built-in fact/relation-based entrypoint rules for arch-indexer (spec §6.1).
+
+[[rule]]
+id = "builtin:route-literal-compare"
+kind = "entrypoint"
+entry_kind = "http"
+match = { fact = "compare", rule = "route-literal-compare" }
+label = "Server-scoped route literal"
+confidence = "heuristic"
+
+[[rule]]
+id = "builtin:action-executor"
+kind = "entrypoint"
+entry_kind = "job"
+match = { inherits = "ActionExecutor", method = "execute" }
+label = "Job action"
+confidence = "exact"

@@ -646,11 +646,17 @@
     const edges = graph.edges || [];
     const dataStores = graph.data_stores || [];
     const externalSinks = graph.external_sinks || [];
+    const sidecars = graph.sidecars || [];
 
     const nodeMap = new Map();
     nodes.forEach((n) => nodeMap.set(n.id, n));
     dataStores.forEach((d) => nodeMap.set(d.id, { ...d, kind: "datastore" }));
     externalSinks.forEach((e) => nodeMap.set(e.id, { ...e, kind: "external_sink" }));
+    sidecars.forEach((s) => {
+      if (!nodeMap.has(s.id)) {
+        nodeMap.set(s.id, { ...s, kind: "sidecar" });
+      }
+    });
 
     const entryNode = nodeMap.get(entrypointId);
     if (!entryNode) {

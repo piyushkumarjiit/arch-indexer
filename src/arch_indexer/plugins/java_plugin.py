@@ -33,6 +33,8 @@ from arch_indexer.plugins.base import (
     LanguagePlugin,
     build_fqname_prefixes,
     build_name_table,
+    ecosystem_for_language,
+    relations_from_inherits_facts,
 )
 from arch_indexer.toolchain import (
     EXCLUDED_DIR_NAMES,
@@ -812,6 +814,7 @@ class JavaPlugin(LanguagePlugin):
                     "module": pkg_name or unit.name,
                     "tier": IndexingTier.TIER2.value,
                     "fallback_reason": "tool_unavailable",
+                    "ecosystem": ecosystem_for_language("java"),
                 }
             )
 
@@ -988,6 +991,7 @@ class JavaPlugin(LanguagePlugin):
             entrypoints=entrypoints,
             infra_artifacts=[],
             facts=facts,
+            symbol_relations=relations_from_inherits_facts(facts),
         )
 
     def _collect_non_spring_entrypoints(
@@ -1079,6 +1083,7 @@ class JavaPlugin(LanguagePlugin):
     ) -> None:
         """Extract imports, call references, Spring annotations and facts."""
         file_imports: dict[str, str] = {}
+        field_types: dict[str, str] = {}
         columns = LineColumns(source_bytes)
 
         walk_stack: list[tuple[Node, str, str, list[str], dict[str, Any]]] = [
@@ -1117,6 +1122,7 @@ class JavaPlugin(LanguagePlugin):
                                     "line": line,
                                     "raw_symbol": raw_sym,
                                     "language": "java",
+                                    "ref_kind": "import",
                                 }
                             )
 
@@ -1141,6 +1147,31 @@ class JavaPlugin(LanguagePlugin):
                     if _is_guard_annotation(ann):
                         child_auth.append(ann)
 
+            elif node.type == "field_declaration":
+                type_node = node.child_by_field_name("type")
+                declared = (
+                    _get_node_text(type_node, source_bytes).split("<", 1)[0].strip()
+                    if type_node is not None
+                    else ""
+                )
+                if declared:
+                    resolved_type = file_imports.get(declared)
+                    if resolved_type is None and pkg_name:
+                        cand = f"{pkg_name}.{declared}"
+                        if cand in known_fqnames or cand in known_prefixes:
+                            resolved_type = cand
+                    if resolved_type is None and declared in known_names:
+                        resolved_type = known_names[declared]
+                    if resolved_type is None:
+                        resolved_type = declared
+                    for decl in node.named_children:
+                        if decl.type == "variable_declarator":
+                            vname_node = decl.child_by_field_name("name")
+                            if vname_node is not None:
+                                vname = _get_node_text(vname_node, source_bytes).strip()
+                                if vname:
+                                    field_types[vname] = resolved_type
+
             # 3. Method Calls
             elif node.type == "method_invocation":
                 name_node = node.child_by_field_name("name")
@@ -1153,8 +1184,11 @@ class JavaPlugin(LanguagePlugin):
                     obj_node = node.child_by_field_name("object")
                     if obj_node:
                         obj_text = _get_node_text(obj_node, source_bytes).strip()
+                        obj_key = obj_text[5:] if obj_text.startswith("this.") else obj_text
                         if obj_text in file_imports:
                             target_fqname = f"{file_imports[obj_text]}.{m_name}"
+                        elif obj_key in field_types:
+                            target_fqname = f"{field_types[obj_key]}.{m_name}"
                         else:
                             target_fqname = f"{obj_text}.{m_name}"
                     elif current_class:

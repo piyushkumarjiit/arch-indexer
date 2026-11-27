@@ -728,7 +728,8 @@ def call():
     ]
 
 
-def test_flow_trace_errors_when_module_scope_entrypoint_has_no_symbol(tmp_path: Path, capsys):
+def test_flow_trace_resolves_module_scope_entrypoint_via_synthetic_symbols(tmp_path: Path, capsys):
+    """Slice 3 (§4.3): flow-trace resolves main/cli via synthetic_symbols."""
     repo = tmp_path / "repo"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "__init__.py").write_text("")
@@ -755,21 +756,31 @@ if __name__ == "__main__":
     _index(repo, cache, capsys)
 
     cli_id = _entrypoint_id(capsys, repo, cache, "cli")
-    code, out, err = _query(capsys, str(repo), "flow-trace", str(cli_id), "--cache-dir", str(cache))
-    assert code == EXIT_ERROR
-    assert out == ""
-    assert "no traceable symbol" in err
+    code, out, err = _query(
+        capsys, str(repo), "flow-trace", str(cli_id), "--json", "--cache-dir", str(cache)
+    )
+    assert code == EXIT_OK, err
+    assert json.loads(out)["root_symbol"]["fqname"].startswith("app.cli.")
 
     main_id = _entrypoint_id(capsys, repo, cache, "main")
     code, out, err = _query(
-        capsys, str(repo), "flow-trace", str(main_id), "--cache-dir", str(cache)
+        capsys, str(repo), "flow-trace", str(main_id), "--json", "--cache-dir", str(cache)
     )
-    assert code == EXIT_ERROR
-    assert out == ""
-    assert "no traceable symbol" in err
+    assert code == EXIT_OK, err
+    payload = json.loads(out)
+    assert payload["root_symbol"]["fqname"] == "app.cli.__main__"
+
+    # Synthetic symbols remain hidden from query def / query file-symbols.
+    fs_code, fs_out, _ = _query(
+        capsys, str(repo), "file-symbols", "app/cli.py", "--cache-dir", str(cache)
+    )
+    assert fs_code == EXIT_OK
+    assert "__main__" not in fs_out
+    assert "<module>" not in fs_out
 
 
-def test_flow_trace_errors_instead_of_rooting_at_a_later_symbol(tmp_path: Path, capsys):
+def test_flow_trace_roots_at_synthetic_block_instead_of_a_later_symbol(tmp_path: Path, capsys):
+    """Slice 3 (§4.3): main entrypoint resolves its __main__ block, never a later function."""
     repo = tmp_path / "repo"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "__init__.py").write_text("")
@@ -795,11 +806,12 @@ def later():
 
     main_id = _entrypoint_id(capsys, repo, cache, "main")
     code, out, err = _query(
-        capsys, str(repo), "flow-trace", str(main_id), "--cache-dir", str(cache)
+        capsys, str(repo), "flow-trace", str(main_id), "--json", "--cache-dir", str(cache)
     )
-    assert code == EXIT_ERROR
-    assert out == ""
-    assert "no traceable symbol" in err
+    assert code == EXIT_OK, err
+    payload = json.loads(out)
+    assert payload["root_symbol"]["fqname"] == "app.script.__main__"
+    assert "later" not in json.dumps(payload)
 
 
 def test_flow_trace_errors_for_module_level_typescript_api_call(tmp_path: Path, capsys):

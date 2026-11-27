@@ -29,6 +29,8 @@ from arch_indexer.plugins.base import (
     IndexUnit,
     LanguagePlugin,
     build_name_table,
+    ecosystem_for_language,
+    relations_from_inherits_facts,
 )
 from arch_indexer.toolchain import EXCLUDED_DIR_NAMES, check_tool_status, get_repo_files
 
@@ -445,6 +447,7 @@ class TypeScriptPlugin(LanguagePlugin):
                     "module": module_name,
                     "tier": IndexingTier.TIER2.value,
                     "fallback_reason": "tool_unavailable",
+                    "ecosystem": ecosystem_for_language("typescript"),
                 }
             )
 
@@ -701,6 +704,7 @@ class TypeScriptPlugin(LanguagePlugin):
             entrypoints=entrypoints,
             infra_artifacts=[],
             facts=facts,
+            symbol_relations=relations_from_inherits_facts(facts),
         )
 
     def _analyze_file(
@@ -720,8 +724,10 @@ class TypeScriptPlugin(LanguagePlugin):
     ) -> None:
         """Extract imports, call references, Express entrypoints, and fetch/axios callers."""
         file_imports: dict[str, str] = {}
+        external_type_imports: dict[str, str] = {}
         bound_names: set[str] = set()
         express_receivers: set[str] = set()
+        this_fields: dict[str, str] = {}
         curr_dir = os.path.dirname(rel_path)
 
         stack: list[Node] = [root]
@@ -796,6 +802,7 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "line": line,
                                         "raw_symbol": fq,
                                         "language": "typescript",
+                                        "ref_kind": "import",
                                     }
                                 )
 
@@ -817,21 +824,47 @@ class TypeScriptPlugin(LanguagePlugin):
                                         "line": line,
                                         "raw_symbol": import_path,
                                         "language": "typescript",
+                                        "ref_kind": "import",
                                     }
                                 )
 
                         if namespace_alias and target_matched:
                             file_imports[namespace_alias] = mod_key
                     else:
-                        # Third-party external import
+                        # Third-party external import (kept separate so bare calls stay
+                        # local while class fields resolve `this.x`).
+                        spec_nodes, namespace_alias = _import_specifiers(node, source_bytes)
+                        for sp in spec_nodes:
+                            name_node = sp.child_by_field_name("name")
+                            alias_node = sp.child_by_field_name("alias")
+                            sym_name = _get_node_text(name_node or sp, source_bytes)
+                            local_name = (
+                                _get_node_text(alias_node, source_bytes) if alias_node else sym_name
+                            )
+                            if local_name:
+                                external_type_imports[local_name] = f"{import_path}.{sym_name}"
+                        if namespace_alias:
+                            external_type_imports[namespace_alias] = import_path
                         unresolved_refs.append(
                             {
                                 "file_path": rel_path,
                                 "line": line,
                                 "raw_symbol": import_path,
                                 "language": "typescript",
+                                "ref_kind": "import",
                             }
                         )
+
+            elif node.type == "public_field_definition":
+                fname_node = node.child_by_field_name("name")
+                ftype_node = node.child_by_field_name("type")
+                if fname_node is not None and ftype_node is not None:
+                    fname = _get_node_text(fname_node, source_bytes).strip()
+                    ftext = _get_node_text(ftype_node, source_bytes).lstrip(":").strip()
+                    fbase = ftext.split("<", 1)[0].split("|", 1)[0].strip()
+                    resolved_field = file_imports.get(fbase) or external_type_imports.get(fbase)
+                    if fname and resolved_field:
+                        this_fields[fname] = resolved_field
 
             elif node.type == "variable_declarator":
                 # CommonJS bindings shadow repo-level names just like ES imports.
@@ -861,6 +894,21 @@ class TypeScriptPlugin(LanguagePlugin):
                             target_fqname = local_fqname
                         elif fn_text.split(".", 1)[0] not in bound_names and fn_text in known_names:
                             target_fqname = known_names[fn_text]
+                        elif "." in fn_text:
+                            head, rest = fn_text.split(".", 1)
+                            hl = head.lower()
+                            for alias in sorted(file_imports, key=len, reverse=True):
+                                if alias.lower() == hl:
+                                    cand = f"{file_imports[alias]}.{rest}"
+                                    if cand in known_fqnames:
+                                        target_fqname = cand
+                                        break
+
+                    if target_fqname == fn_text and fn_text.startswith("this."):
+                        parts = fn_text.split(".", 2)
+                        if len(parts) >= 2 and parts[1] in this_fields:
+                            rest = f".{parts[2]}" if len(parts) > 2 else ""
+                            target_fqname = this_fields[parts[1]] + rest
 
                     references.append(
                         {
