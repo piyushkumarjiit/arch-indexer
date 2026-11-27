@@ -93,7 +93,7 @@ def _is_under_dir(rel_path: str, root_dir: str) -> bool:
 
 
 def _matches_glob(rel_path: str, pattern: str) -> bool:
-    pat = pattern.replace("\\", "/").strip().lstrip("./")
+    pat = pattern.replace("\\", "/").strip().removeprefix("./")
     if not pat:
         return False
     if pat.endswith("/**"):

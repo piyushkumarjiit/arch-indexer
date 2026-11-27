@@ -345,3 +345,55 @@ def test_large_maven_reactor_subdivides_into_bounded_subsystems(tmp_path: Path) 
     assert len(by_id["part:shared"]["group_ids"]) == 9
     assigned = [gid for p in parts for gid in p["group_ids"]]
     assert len(assigned) == len(modules) == len(set(assigned))
+
+
+def test_parts_override_glob_keeps_leading_dot_directories(tmp_path: Path) -> None:
+    repo = tmp_path / "dotdirs"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / "github").mkdir(parents=True)
+    (repo / ".arch-indexer.toml").write_text(
+        '[parts."ci"]\npaths = [".github/**"]\n',
+        encoding="utf-8",
+    )
+
+    file_rows = [
+        {
+            "path": ".github/workflows/ci.yml",
+            "language": "yaml",
+            "line_count": 5,
+            "module": ".github",
+            "tier": "tree-sitter",
+        },
+        {
+            "path": "github/lib.py",
+            "language": "python",
+            "line_count": 5,
+            "module": "github",
+            "tier": "tree-sitter",
+        },
+    ]
+    modules = [
+        {
+            "id": "mod:dotgithub",
+            "name": ".github",
+            "language": "yaml",
+            "path": ".github",
+            "file_count": 1,
+            "tier": "tree-sitter",
+        },
+        {
+            "id": "mod:github",
+            "name": "github",
+            "language": "python",
+            "path": "github",
+            "file_count": 1,
+            "tier": "tree-sitter",
+        },
+    ]
+
+    parts = derive_parts(file_rows, modules, [], [], repo)
+    by_id = {p["id"]: p for p in parts}
+    assert "part:ci" in by_id
+    assert by_id["part:ci"]["group_ids"] == ["mod:dotgithub"]
+    assigned = [gid for p in parts for gid in p["group_ids"]]
+    assert sorted(assigned) == sorted(m["id"] for m in modules)
