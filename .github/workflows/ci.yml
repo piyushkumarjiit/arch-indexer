@@ -30,3 +30,53 @@ jobs:
 
       - name: Run make check
         run: make check
+
+  viewer:
+    name: viewer (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viewer-app/package-lock.json
+
+      - name: Install, test, and build viewer-app
+        working-directory: viewer-app
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Verify committed viewer dist is up to date
+        run: |
+          git diff --exit-code src/arch_indexer/viewer/dist/
+          test -z "$(git status --porcelain src/arch_indexer/viewer/dist/)"
+
+  browser:
+    name: browser (Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package with dev and browser extras
+        run: pip install -e ".[dev,browser]"
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run browser end-to-end test
+        run: |
+          set -o pipefail
+          pytest -v -rs -m browser tests/e2e_viewer/test_file_url.py | tee /tmp/pytest-browser.log
+          grep -q " passed" /tmp/pytest-browser.log
+          ! grep -q " skipped" /tmp/pytest-browser.log
