@@ -642,6 +642,7 @@ def run_index(
     auto_relocate_citations: bool = False,
     include_tests: bool = False,
     module_depth: int | None = None,
+    viewer: str = "v2",
     cache_dir: str | Path | None = None,
     maven_args: Sequence[str] | None = None,
     maven_online: bool = False,
@@ -992,17 +993,6 @@ def run_index(
                     }
                 )
         store.replace_resources(flat_resources)
-        export_graph_artifacts(
-            target_repo,
-            graph,
-            docs_dir,
-            store=store,
-            include_tests=include_tests,
-        )
-
-        # Print the summary line and per-unit tiers to stdout. Scope the counts exactly as
-        # master-index.json/graph.json do so the log and the artifacts always agree.
-        print(store.format_summary(include_tests=include_tests))
 
         # Spec 5.1: snapshot the freshly indexed tables and diff them against state.json.
         previous_state = read_json(cache_paths.state_json)
@@ -1013,6 +1003,24 @@ def run_index(
             previous_files=previous.files if previous is not None else None,
         )
         full_delta = compute_delta(previous, current)
+        delta = _scoped_delta(full_delta, include_tests)
+
+        export_graph_artifacts(
+            target_repo,
+            graph,
+            docs_dir,
+            store=store,
+            include_tests=include_tests,
+            viewer=viewer,
+            delta={
+                "changed_files": delta.modified_files,
+                "new_files": delta.added_files,
+            },
+        )
+
+        # Print the summary line and per-unit tiers to stdout. Scope the counts exactly as
+        # master-index.json/graph.json do so the log and the artifacts always agree.
+        print(store.format_summary(include_tests=include_tests))
 
         # Spec 5.3: deleted files are purged from every table (already done before build_graph,
         # kept here idempotently).
@@ -1020,8 +1028,6 @@ def run_index(
         master_index = build_master_index(
             store, target_repo, include_tests=include_tests, module_depth=module_depth
         )
-
-    delta = _scoped_delta(full_delta, include_tests)
 
     # Test files stay in state.json (they are indexed for references), but they must not
     # route requirements into worker packets unless tests are explicitly in scope (gap S5).

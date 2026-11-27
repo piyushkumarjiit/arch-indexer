@@ -5,6 +5,7 @@ import {
   loadSearchIndex,
   readOptionalOverlays,
 } from "../data/chunks";
+import { buildSymbolGraph } from "../views/viewGraphs";
 import type {
   BreadcrumbItem,
   ChunkFlow,
@@ -47,6 +48,7 @@ export interface ViewerStoreState {
   activeFlowId: string | null;
   flowStepIndex: number;
   activeFlow: ChunkFlow | null;
+  flowFollowStep: boolean;
 
   searchOpen: boolean;
   recentBoardOpen: boolean;
@@ -76,6 +78,7 @@ export interface ViewerStoreState {
   startFlow: (flowId: string, partIdHint?: string) => Promise<void>;
   nextFlowStep: () => void;
   prevFlowStep: () => void;
+  toggleFlowFollowStep: () => void;
   exitFlow: () => void;
 
   navigateToNodeId: (nodeId: string) => Promise<void>;
@@ -93,6 +96,78 @@ function updateUrlHashForNode(nodeId: string | null): void {
       }
     } catch {
       // Ignore history restrictions in sandboxed environments
+    }
+  }
+}
+
+async function followFlowStepToSymbol(
+  get: () => ViewerStoreState,
+  set: (partial: Partial<ViewerStoreState>) => void,
+  flow: ChunkFlow,
+  stepIndex: number,
+  partIdHint?: string,
+): Promise<void> {
+  const state = get();
+  const { overview } = state;
+  if (!overview || flow.steps.length === 0) return;
+  const clamped = Math.max(0, Math.min(flow.steps.length - 1, stepIndex));
+  const stepNodeId = flow.steps[clamped]?.node_id;
+  if (!stepNodeId) return;
+
+  // If already in Symbol view and the step node is already rendered there, just keep it selected.
+  if (state.level === "symbol" && state.partId && state.symbolId) {
+    const symGraph = buildSymbolGraph(state.partId, state.symbolId, {
+      overview,
+      chunks: state.chunks,
+      layers: state.layers,
+      exactOnly: state.exactOnly,
+      runtime: state.runtime,
+      dataflow: state.dataflow,
+      activeFlow: flow,
+      flowStepIndex: clamped,
+    });
+    if (symGraph.nodes.some((n) => n.id === stepNodeId)) {
+      set({ selectedNodeId: stepNodeId, selectedEdgeId: null, inspectorOpen: true });
+      return;
+    }
+  }
+
+  // Pick a chunk symbol to root the Symbol view (if step is a boundary, use prior non-boundary step).
+  let anchorId = stepNodeId;
+  const isBoundary =
+    anchorId.startsWith("ds:") ||
+    anchorId.startsWith("ext:") ||
+    anchorId.startsWith("svc:") ||
+    anchorId.startsWith("res:");
+  if (isBoundary) {
+    for (let i = clamped - 1; i >= 0; i--) {
+      const cand = flow.steps[i]?.node_id;
+      if (cand && !cand.startsWith("ds:") && !cand.startsWith("ext:") && !cand.startsWith("svc:") && !cand.startsWith("res:")) {
+        anchorId = cand;
+        break;
+      }
+    }
+  }
+
+  const flowPartId =
+    partIdHint ?? overview.flow_index.find((f) => f.id === flow.id)?.part_id ?? state.partId;
+  const searchHit = state.searchIndex?.find((t) => t[0] === anchorId)?.[3];
+  const candidateParts = [
+    ...(searchHit ? [searchHit] : []),
+    ...(flowPartId ? [flowPartId] : []),
+    ...Object.keys(state.chunks),
+    ...overview.parts.map((p) => p.id),
+  ].filter((id, idx, arr) => Boolean(id) && arr.indexOf(id) === idx);
+
+  for (const pid of candidateParts) {
+    const chunk = await get().ensurePartLoaded(pid);
+    if (!chunk) continue;
+    const symNode = chunk.nodes.find((n) => n.id === anchorId);
+    if (symNode) {
+      const grpId = symNode.module_id || overview.groups.find((g) => g.part_id === pid)?.id || "";
+      await get().drillToSymbol(pid, grpId, symNode.file, symNode.id);
+      set({ selectedNodeId: stepNodeId, selectedEdgeId: null, inspectorOpen: true });
+      return;
     }
   }
 }
@@ -130,6 +205,7 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
   activeFlowId: null,
   flowStepIndex: 0,
   activeFlow: null,
+  flowFollowStep: true,
 
   searchOpen: false,
   recentBoardOpen: false,
@@ -432,39 +508,58 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
     const flow = chunk?.flows.find((f) => f.id === flowId) ?? null;
     if (!flow) return;
     const entryNodeId = flow.steps[0]?.node_id ?? flow.entry_id;
-    const entryNode = chunk?.nodes.find((n) => n.id === entryNodeId);
-    if (entryNode && get().level === "overview") {
-      await get().drillToPart(targetPartId);
-    }
     set({
       activeFlowId: flow.id,
       flowStepIndex: 0,
       activeFlow: flow,
       selectedNodeId: entryNodeId,
+      selectedEdgeId: null,
       inspectorOpen: true,
     });
+    if (get().flowFollowStep) {
+      await followFlowStepToSymbol(get, set, flow, 0, targetPartId);
+    }
   },
 
   nextFlowStep: () => {
-    const { activeFlow, flowStepIndex } = get();
+    const { activeFlow, flowStepIndex, flowFollowStep } = get();
     if (!activeFlow || activeFlow.steps.length === 0) return;
     const nextIdx = Math.min(activeFlow.steps.length - 1, flowStepIndex + 1);
     const stepNodeId = activeFlow.steps[nextIdx]?.node_id ?? null;
     set({
       flowStepIndex: nextIdx,
       selectedNodeId: stepNodeId,
+      selectedEdgeId: null,
+      inspectorOpen: true,
     });
+    if (flowFollowStep) {
+      void followFlowStepToSymbol(get, set, activeFlow, nextIdx);
+    }
   },
 
   prevFlowStep: () => {
-    const { activeFlow, flowStepIndex } = get();
+    const { activeFlow, flowStepIndex, flowFollowStep } = get();
     if (!activeFlow || activeFlow.steps.length === 0) return;
     const prevIdx = Math.max(0, flowStepIndex - 1);
     const stepNodeId = activeFlow.steps[prevIdx]?.node_id ?? null;
     set({
       flowStepIndex: prevIdx,
       selectedNodeId: stepNodeId,
+      selectedEdgeId: null,
+      inspectorOpen: true,
     });
+    if (flowFollowStep) {
+      void followFlowStepToSymbol(get, set, activeFlow, prevIdx);
+    }
+  },
+
+  toggleFlowFollowStep: () => {
+    const nextVal = !get().flowFollowStep;
+    set({ flowFollowStep: nextVal });
+    const { activeFlow, flowStepIndex } = get();
+    if (nextVal && activeFlow) {
+      void followFlowStepToSymbol(get, set, activeFlow, flowStepIndex);
+    }
   },
 
   exitFlow: () => set({ activeFlowId: null, flowStepIndex: 0, activeFlow: null }),

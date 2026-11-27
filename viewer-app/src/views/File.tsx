@@ -16,6 +16,7 @@ export function FileView() {
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
   const selectedNodeId = useViewerStore((s) => s.selectedNodeId);
+  const selectedEdgeId = useViewerStore((s) => s.selectedEdgeId);
   const selectNode = useViewerStore((s) => s.selectNode);
   const selectEdge = useViewerStore((s) => s.selectEdge);
   const drillToSymbol = useViewerStore((s) => s.drillToSymbol);
@@ -62,7 +63,9 @@ export function FileView() {
         viewKey={`file:${filePath}`}
         nodes={graph.nodes}
         edges={graph.edges}
+        layers={layers}
         selectedNodeId={selectedNodeId}
+        selectedEdgeId={selectedEdgeId}
         onSelectNode={(id) => selectNode(id)}
         onSelectEdge={(id) => selectEdge(id)}
         onDrillNode={(node) => {

@@ -241,6 +241,12 @@ def build_parser() -> argparse.ArgumentParser:
             "adaptively by size (overrides [modules] depth in .arch-indexer.toml)"
         ),
     )
+    index_parser.add_argument(
+        "--viewer",
+        choices=["v2", "v1"],
+        default="v2",
+        help="Viewer HTML generator to use (default: v2)",
+    )
     index_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
     # 3. query
@@ -493,6 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 auto_relocate_citations=args.auto_relocate_citations,
                 include_tests=args.include_tests,
                 module_depth=args.module_depth,
+                viewer=args.viewer,
                 cache_dir=args.cache_dir,
                 maven_args=args.maven_args,
                 maven_online=args.maven_online,

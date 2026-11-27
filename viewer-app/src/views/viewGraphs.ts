@@ -1,5 +1,6 @@
 import {
   capNodesForView,
+  filterKindsByLayers,
   isBoundaryVisibleInLayers,
   isEdgeVisibleInLayers,
   MAX_FILE_SYMBOLS,
@@ -46,17 +47,29 @@ function mergeEdgeIntoMap(
   map: Map<string, ViewEdgeData>,
   edge: ViewEdgeData,
 ): void {
+  const incomingCounts: Record<string, number> = edge.kindCounts
+    ? { ...edge.kindCounts }
+    : Object.fromEntries(
+        edge.kinds.map((k) => [k, edge.kinds.length === 1 ? edge.count : 1]),
+      );
+
   const existing = map.get(edge.id);
   if (!existing) {
     map.set(edge.id, {
       ...edge,
       kinds: [...edge.kinds].sort(),
+      kindCounts: incomingCounts,
       evidence: edge.evidence ? [...edge.evidence] : [],
     });
     return;
   }
   const kindSet = new Set([...existing.kinds, ...edge.kinds]);
   existing.kinds = Array.from(kindSet).sort();
+  const mergedCounts: Record<string, number> = { ...(existing.kindCounts ?? {}) };
+  for (const [k, v] of Object.entries(incomingCounts)) {
+    mergedCounts[k] = (mergedCounts[k] ?? 0) + v;
+  }
+  existing.kindCounts = mergedCounts;
   existing.count += edge.count;
   if (existing.evidence && edge.evidence) {
     for (const ev of edge.evidence) {
@@ -157,27 +170,31 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
     nodeIds.add(part.id);
   }
 
-  // Filter overview edges by active layers first
+  // Filter overview edges by active layers first, projecting mod:* endpoints to part_id
+  const groupToPart = new Map(overview.groups.map((g) => [g.id, g.part_id]));
   const visibleEdges: ViewEdgeData[] = [];
   const connectedBoundaryIds = new Set<string>();
   const edgeMap = new Map<string, ViewEdgeData>();
 
   for (const oe of overview.edges as OverviewEdge[]) {
-    const kinds = Object.keys(oe.kinds).sort();
-    const count = Object.values(oe.kinds).reduce((a, b) => a + b, 0);
+    const src = groupToPart.get(oe.source) ?? oe.source;
+    const tgt = groupToPart.get(oe.target) ?? oe.target;
+    if (src === tgt) continue;
+    const { kinds, kindCounts, count } = filterKindsByLayers(oe.kinds, layers);
+    if (kinds.length === 0 || count <= 0) continue;
     const edge: ViewEdgeData = {
-      id: `${oe.source}->${oe.target}`,
-      source: oe.source,
-      target: oe.target,
+      id: `${src}->${tgt}`,
+      source: src,
+      target: tgt,
       kinds,
+      kindCounts,
       label: count > 1 ? `${kinds.join(", ")} (${count})` : kinds.join(", "),
       count,
       evidence: oe.evidence_sample,
     };
-    if (!isEdgeVisibleInLayers(edge, layers)) continue;
     mergeEdgeIntoMap(edgeMap, edge);
-    connectedBoundaryIds.add(oe.source);
-    connectedBoundaryIds.add(oe.target);
+    connectedBoundaryIds.add(src);
+    connectedBoundaryIds.add(tgt);
   }
 
   if (dataflow && layers.data) {
@@ -319,17 +336,8 @@ export function buildPartGraph(
 
   const edgeMap = new Map<string, ViewEdgeData>();
   for (const oe of overview.edges) {
-    const kinds = Object.keys(oe.kinds).sort();
-    const count = Object.values(oe.kinds).reduce((a, b) => a + b, 0);
-    const candidate: ViewEdgeData = {
-      id: `${oe.source}->${oe.target}`,
-      source: oe.source,
-      target: oe.target,
-      kinds,
-      count,
-      evidence: oe.evidence_sample,
-    };
-    if (!isEdgeVisibleInLayers(candidate, layers)) continue;
+    const { kinds, kindCounts, count } = filterKindsByLayers(oe.kinds, layers);
+    if (kinds.length === 0 || count <= 0) continue;
 
     const src = resolveEntity(oe.source);
     const tgt = resolveEntity(oe.target);
@@ -344,10 +352,13 @@ export function buildPartGraph(
 
     if (nodeIds.has(src) && nodeIds.has(tgt)) {
       mergeEdgeIntoMap(edgeMap, {
-        ...candidate,
         id: `${src}->${tgt}`,
         source: src,
         target: tgt,
+        kinds,
+        kindCounts,
+        count,
+        evidence: oe.evidence_sample,
         label: count > 1 ? `${kinds.join(", ")} (${count})` : kinds.join(", "),
       });
     }
@@ -423,13 +434,14 @@ export function buildGroupGraph(
       nodes.push({
         id,
         label: dir.split("/").pop() || dir,
-        subtitle: `${dirFiles.length} files · ${symCount} symbols`,
+        subtitle: `${dir} · ${dirFiles.length} files · ${symCount} symbols`,
         kind: "dir_chip",
         badge: `${dirFiles.length} files`,
         drillable: true,
         partId,
         groupId,
         filePath: dir,
+        meta: { fullDir: dir },
       });
       nodeIds.add(id);
       for (const f of dirFiles) {

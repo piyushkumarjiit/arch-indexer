@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from arch_indexer.bundle import export_bundle
 from arch_indexer.config import DEFAULT_DOCS_DIR
 from arch_indexer.dependencies import build_dependencies, discover_manifests
 from arch_indexer.graph_rules import (
@@ -41,7 +42,7 @@ from arch_indexer.rule_engine import (
 from arch_indexer.source_scope import filter_rows
 from arch_indexer.store import IndexStore
 from arch_indexer.toolchain import get_repo_files
-from arch_indexer.viewer import render_viewer
+from arch_indexer.viewer import has_viewer_v2_dist, render_viewer, render_viewer_v2
 
 SCHEMA_VERSION = "1.3"
 DEFAULT_DISPATCH_FANOUT_CAP = 5
@@ -2260,15 +2261,29 @@ def export_graph_artifacts(
     *,
     store: IndexStore | None = None,
     include_tests: bool = False,
+    viewer: str = "v2",
+    delta: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
-    """Write ``docs/graph.json``, ``docs/flow-viewer.html``, and ``docs/arch/dependencies.json``."""
+    """Write ``docs/graph.json``, ``docs/flow-viewer.html``, ``docs/arch/`` bundle & deps."""
     repo = Path(repo_path)
     target = docs_path(repo_path, docs_dir)
     target.mkdir(parents=True, exist_ok=True)
     graph_file = target / "graph.json"
     viewer_file = target / "flow-viewer.html"
     graph_file.write_text(graph_to_json(graph), encoding="utf-8")
-    viewer_file.write_text(render_viewer(graph), encoding="utf-8")
+
+    bundle_result = export_bundle(
+        repo,
+        target,
+        graph,
+        store=store,
+        delta=delta,
+        include_tests=include_tests,
+    )
+    if viewer != "v1" and has_viewer_v2_dist():
+        viewer_file.write_text(render_viewer_v2(bundle_result["overview"]), encoding="utf-8")
+    else:
+        viewer_file.write_text(render_viewer(graph), encoding="utf-8")
 
     arch_dir = target / "arch"
     arch_dir.mkdir(parents=True, exist_ok=True)
@@ -2323,7 +2338,13 @@ def export_graph_artifacts(
         json.dumps(deps_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    return {"graph": graph_file, "viewer": viewer_file, "dependencies": deps_file}
+    return {
+        "graph": graph_file,
+        "viewer": viewer_file,
+        "dependencies": deps_file,
+        "overview": bundle_result["overview_path"],
+        "arch_dir": arch_dir,
+    }
 
 
 def load_graph(path: str | Path) -> dict[str, Any]:

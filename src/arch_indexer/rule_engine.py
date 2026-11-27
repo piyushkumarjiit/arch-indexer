@@ -104,12 +104,21 @@ class GraphOptions:
 
 
 @dataclass(frozen=True)
+class ViewerOptions:
+    """Configurable viewer options from `.arch-indexer.toml` ``[viewer]``."""
+
+    editor_url: str | None = None
+
+
+@dataclass(frozen=True)
 class RepoRuleConfig:
     """Overrides loaded from a repository `.arch-indexer.toml`."""
 
     boundary_rules: tuple[BoundaryRule, ...] = ()
     entrypoint_rules: tuple[EntrypointRule, ...] = ()
     graph_options: GraphOptions = field(default_factory=GraphOptions)
+    part_overrides: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    viewer_options: ViewerOptions = field(default_factory=ViewerOptions)
 
 
 def _slugify(text: str) -> str:
@@ -385,10 +394,45 @@ def load_rule_overrides(repo_path: Path | str) -> RepoRuleConfig:
                 )
             dispatch_fanout_cap = cap
 
+    raw_parts = data.get("parts")
+    part_overrides: list[tuple[str, tuple[str, ...]]] = []
+    if raw_parts is not None:
+        if not isinstance(raw_parts, dict):
+            raise ValueError(f"{REPO_CONFIG_NAME}: [parts] must be a table")
+        for pname, pcfg in sorted(raw_parts.items()):
+            if not isinstance(pname, str) or not pname.strip() or not isinstance(pcfg, dict):
+                raise ValueError(f"{REPO_CONFIG_NAME}: [parts.{pname!r}] must map to a table")
+            raw_paths = pcfg.get("paths")
+            if (
+                not isinstance(raw_paths, list)
+                or not raw_paths
+                or not all(isinstance(p, str) and p.strip() for p in raw_paths)
+            ):
+                raise ValueError(
+                    f"{REPO_CONFIG_NAME}: [parts.{pname!r}].paths"
+                    " must be a non-empty list of strings"
+                )
+            part_overrides.append((pname.strip(), tuple(p.strip() for p in raw_paths)))
+
+    editor_url: str | None = None
+    raw_viewer = data.get("viewer")
+    if raw_viewer is not None:
+        if not isinstance(raw_viewer, dict):
+            raise ValueError(f"{REPO_CONFIG_NAME}: [viewer] must be a table")
+        if "editor_url" in raw_viewer:
+            eurl = raw_viewer["editor_url"]
+            if not isinstance(eurl, str) or not eurl.strip():
+                raise ValueError(
+                    f"{REPO_CONFIG_NAME}: viewer.editor_url must be a non-empty string"
+                )
+            editor_url = eurl.strip()
+
     return RepoRuleConfig(
         boundary_rules=tuple(boundary_rules),
         entrypoint_rules=tuple(entrypoint_rules),
         graph_options=GraphOptions(dispatch_fanout_cap=dispatch_fanout_cap),
+        part_overrides=tuple(part_overrides),
+        viewer_options=ViewerOptions(editor_url=editor_url),
     )
 
 

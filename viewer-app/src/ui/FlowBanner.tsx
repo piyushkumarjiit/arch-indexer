@@ -12,6 +12,8 @@ export function FlowBanner({
   flow,
   stepIndex,
   flowTitle,
+  followStep = true,
+  onToggleFollowStep,
   onPrev,
   onNext,
   onExit,
@@ -19,6 +21,8 @@ export function FlowBanner({
   flow: ChunkFlow | null;
   stepIndex: number;
   flowTitle?: string;
+  followStep?: boolean;
+  onToggleFollowStep?: () => void;
   onPrev: () => void;
   onNext: () => void;
   onExit: () => void;
@@ -54,6 +58,20 @@ export function FlowBanner({
         )}
       </div>
       <div className="arch-flow-actions">
+        {onToggleFollowStep && (
+          <label
+            className="arch-flow-follow"
+            title="Auto-drill to Symbol view as you step through the flow"
+          >
+            <input
+              type="checkbox"
+              data-testid="flow-follow-toggle"
+              checked={followStep}
+              onChange={() => onToggleFollowStep()}
+            />
+            <span>Follow step</span>
+          </label>
+        )}
         <button
           type="button"
           className="arch-btn"

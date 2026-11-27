@@ -93,10 +93,31 @@ def load_toolchain_manifest() -> dict[str, Any]:
         return tomllib.load(f)
 
 
+_BUNDLE_FILES = frozenset(
+    {
+        "overview.json",
+        "dependencies.json",
+        "descriptions.json",
+        "descriptions.js",
+        "runtime-overlay.v1.json",
+        "runtime-overlay.v1.js",
+        "dataflow.v1.json",
+        "dataflow.v1.js",
+    }
+)
+
+
 def is_path_excluded(path_str: str) -> bool:
-    """Check if relative path touches any excluded directory name."""
+    """Check if relative path touches any excluded directory or generated ``arch/`` bundle."""
     parts = Path(path_str).parts
-    return any(p in EXCLUDED_DIR_NAMES for p in parts)
+    if any(p in EXCLUDED_DIR_NAMES for p in parts):
+        return True
+    if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "arch":
+        return True
+    for idx in range(len(parts) - 1):
+        if parts[idx] == "arch" and parts[idx + 1] in ("chunks", "vendor"):
+            return True
+    return len(parts) >= 2 and parts[-2] == "arch" and parts[-1] in _BUNDLE_FILES
 
 
 def get_repo_files(repo_path: Path | str) -> list[str]:

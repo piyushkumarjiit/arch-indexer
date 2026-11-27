@@ -75,6 +75,7 @@ export function App() {
   const exactOnly = useViewerStore((s) => s.exactOnly);
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
+  const flowFollowStep = useViewerStore((s) => s.flowFollowStep);
   const searchOpen = useViewerStore((s) => s.searchOpen);
   const recentBoardOpen = useViewerStore((s) => s.recentBoardOpen);
   const chunkError = useViewerStore((s) => s.chunkError);
@@ -96,6 +97,7 @@ export function App() {
   const startFlow = useViewerStore((s) => s.startFlow);
   const nextFlowStep = useViewerStore((s) => s.nextFlowStep);
   const prevFlowStep = useViewerStore((s) => s.prevFlowStep);
+  const toggleFlowFollowStep = useViewerStore((s) => s.toggleFlowFollowStep);
   const exitFlow = useViewerStore((s) => s.exitFlow);
   const navigateToNodeId = useViewerStore((s) => s.navigateToNodeId);
 
@@ -225,6 +227,8 @@ export function App() {
           void drillToPart(selectedNode.partId);
         } else if (level === "part" && selectedNode.groupId && selectedNode.partId) {
           void drillToGroup(selectedNode.partId, selectedNode.groupId);
+        } else if (level === "part" && selectedNode.partId && selectedNode.partId !== partId) {
+          void drillToPart(selectedNode.partId);
         } else if (level === "group" && partId && groupId) {
           if (selectedNode.kind === "dir_chip" && selectedNode.filePath) {
             void drillToGroup(partId, groupId, selectedNode.filePath);
@@ -232,6 +236,8 @@ export function App() {
             void drillToFile(partId, groupId, selectedNode.filePath);
           }
         } else if (level === "file" && partId && selectedNode.symbolId && selectedNode.filePath) {
+          void drillToSymbol(partId, selectedNode.groupId ?? groupId ?? "", selectedNode.filePath, selectedNode.symbolId);
+        } else if (level === "symbol" && partId && selectedNode.symbolId && selectedNode.filePath) {
           void drillToSymbol(partId, selectedNode.groupId ?? groupId ?? "", selectedNode.filePath, selectedNode.symbolId);
         }
       }
@@ -422,6 +428,8 @@ export function App() {
           flow={activeFlow}
           stepIndex={flowStepIndex}
           flowTitle={flowTitle}
+          followStep={flowFollowStep}
+          onToggleFollowStep={toggleFlowFollowStep}
           onPrev={prevFlowStep}
           onNext={nextFlowStep}
           onExit={exitFlow}
@@ -432,6 +440,7 @@ export function App() {
           overview={overview}
           chunks={chunks}
           selectedNode={selectedNode}
+          selectedNodeId={selectedNodeId}
           selectedEdge={selectedEdge}
           visibleEdges={currentGraph.edges}
           descriptions={descriptions}
@@ -439,6 +448,25 @@ export function App() {
           dataflow={dataflow}
           onClose={closeInspector}
           onSelectNode={(id) => void navigateToNodeId(id)}
+          onDrillNode={(node) => {
+            if (level === "overview" && node.partId) {
+              void drillToPart(node.partId);
+            } else if (level === "part" && node.groupId && node.partId) {
+              void drillToGroup(node.partId, node.groupId);
+            } else if (level === "part" && node.partId && node.partId !== partId) {
+              void drillToPart(node.partId);
+            } else if (level === "group" && partId && groupId) {
+              if (node.kind === "dir_chip" && node.filePath) {
+                void drillToGroup(partId, groupId, node.filePath);
+              } else if (node.filePath) {
+                void drillToFile(partId, groupId, node.filePath);
+              }
+            } else if ((level === "file" || level === "symbol") && partId && node.symbolId && node.filePath) {
+              void drillToSymbol(partId, node.groupId ?? groupId ?? "", node.filePath, node.symbolId);
+            } else {
+              void navigateToNodeId(node.id);
+            }
+          }}
           onStartFlow={(fid, pid) => void startFlow(fid, pid)}
         />
       </main>
