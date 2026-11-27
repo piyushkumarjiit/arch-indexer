@@ -107,11 +107,11 @@ def test_rag_file_yields_vector_store_and_ollama(tmp_path: Path) -> None:
     assert ("sym:rag.service.ask", "ext:ollama", "http_request") in kinds
 
 
-def test_graph_schema_version_is_1_2(tmp_path: Path) -> None:
+def test_graph_schema_version_is_1_3(tmp_path: Path) -> None:
     with IndexStore(tmp_path / "s.db") as store:
         store.insert_files([_file("app/a.py")])
         graph = build_graph(store, tmp_path)
-    assert graph["schema_version"] == "1.2"
+    assert graph["schema_version"] == "1.3"
 
 
 def test_boundary_classification_is_memoized_per_run(tmp_path: Path, monkeypatch) -> None:
@@ -155,9 +155,9 @@ def test_boundary_classification_is_memoized_per_run(tmp_path: Path, monkeypatch
         calls: list[str] = []
         real = graph_module.classify_token_rule
 
-        def counting(token: str):
+        def counting(token: str, **kwargs):
             calls.append(token)
-            return real(token)
+            return real(token, **kwargs)
 
         monkeypatch.setattr(graph_module, "classify_token_rule", counting)
         graph = build_graph(store, tmp_path)

@@ -15,7 +15,7 @@ from arch_indexer.source_scope import in_scope
 UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_VERSION: str = "2.0"
+SCHEMA_VERSION: str = "2.1"
 
 
 def _repo_namespaces(modules: Iterable[str], fqnames: Iterable[str]) -> set[str]:
@@ -106,6 +106,7 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
             "tier",
             "fallback_reason",
             "unit_id",
+            "ecosystem",
         ),
         required_columns=frozenset({"path", "language", "sha256", "line_count", "module", "tier"}),
         upsert_mode="replace",
@@ -180,10 +181,45 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
     "unresolved_refs": TableSpec(
         name="unresolved_refs",
         file_column="file_path",
-        columns=("file_path", "line", "raw_symbol", "language"),
+        columns=("file_path", "line", "raw_symbol", "language", "ref_kind"),
         required_columns=frozenset({"file_path", "line", "raw_symbol", "language"}),
         upsert_mode="insert",
-        sort_key=lambda u: (u["file_path"], u["line"], u["raw_symbol"]),
+        sort_key=lambda u: (
+            u["file_path"],
+            u["line"],
+            u["raw_symbol"],
+            u.get("ref_kind") or "",
+        ),
+    ),
+    "symbol_relations": TableSpec(
+        name="symbol_relations",
+        file_column="file_path",
+        columns=("source_fqname", "target_fqname", "kind", "file_path", "line", "tier"),
+        required_columns=frozenset(
+            {"source_fqname", "target_fqname", "kind", "file_path", "line", "tier"}
+        ),
+        upsert_mode="replace",
+        sort_key=lambda r: (
+            r["file_path"],
+            r["line"],
+            r["source_fqname"],
+            r["target_fqname"],
+            r["kind"],
+        ),
+    ),
+    "resources": TableSpec(
+        name="resources",
+        file_column="file_path",
+        columns=("id", "kind", "value", "role", "symbol_fqname", "file_path", "line", "rule_id"),
+        required_columns=frozenset({"id", "kind", "value", "role", "file_path", "line"}),
+        upsert_mode="insert",
+        sort_key=lambda r: (
+            r["id"],
+            r["role"],
+            r["file_path"],
+            r["line"],
+            r.get("symbol_fqname") or "",
+        ),
     ),
     "facts": TableSpec(
         name="facts",
@@ -262,7 +298,8 @@ CREATE TABLE IF NOT EXISTS files (
     module TEXT NOT NULL,
     tier TEXT NOT NULL,
     fallback_reason TEXT,
-    unit_id TEXT
+    unit_id TEXT,
+    ecosystem TEXT
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -319,7 +356,29 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     file_path TEXT NOT NULL,
     line INTEGER NOT NULL,
     raw_symbol TEXT NOT NULL,
-    language TEXT NOT NULL
+    language TEXT NOT NULL,
+    ref_kind TEXT
+);
+
+CREATE TABLE IF NOT EXISTS symbol_relations (
+    source_fqname TEXT NOT NULL,
+    target_fqname TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    tier TEXT NOT NULL,
+    UNIQUE(source_fqname, target_fqname, kind)
+);
+
+CREATE TABLE IF NOT EXISTS resources (
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    role TEXT NOT NULL,
+    symbol_fqname TEXT,
+    file_path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    rule_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -370,6 +429,10 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file
 CREATE INDEX IF NOT EXISTS idx_facts_file_path ON facts(file_path);
 CREATE INDEX IF NOT EXISTS idx_facts_kind_name ON facts(kind, name_fqname);
 CREATE INDEX IF NOT EXISTS idx_synthetic_symbols_file_path ON synthetic_symbols(file_path);
+CREATE INDEX IF NOT EXISTS idx_symbol_relations_target ON symbol_relations(target_fqname);
+CREATE INDEX IF NOT EXISTS idx_symbol_relations_file_path ON symbol_relations(file_path);
+CREATE INDEX IF NOT EXISTS idx_resources_id ON resources(id);
+CREATE INDEX IF NOT EXISTS idx_resources_file_path ON resources(file_path);
 """
 
 
@@ -439,6 +502,7 @@ class IndexStore:
         self.needs_full_rebuild = False
         with self.conn:
             self.conn.executescript(SCHEMA_SQL)
+            self._ensure_v2_columns()
             if self.conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_MAJOR:
                 self.conn.execute(f"PRAGMA user_version = {SCHEMA_MAJOR}")
             self.conn.executemany(
@@ -449,6 +513,20 @@ class IndexStore:
                     ("created_at_commit", ""),
                 ],
             )
+
+    def _ensure_v2_columns(self) -> None:
+        """Add additive MINOR v2 columns when opening an older v2 index.db."""
+        additions = {
+            "files": [("ecosystem", "TEXT")],
+            "unresolved_refs": [("ref_kind", "TEXT")],
+        }
+        for table, cols in additions.items():
+            present = {
+                row[1] for row in self.conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            for col_name, col_type in cols:
+                if col_name not in present:
+                    self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_type}')
 
     def get_meta(self, key: str) -> str | None:
         """Read a metadata value from the ``meta`` table."""
@@ -563,6 +641,62 @@ class IndexStore:
     def insert_facts(self, facts: Iterable[dict[str, Any]]) -> None:
         """Insert extracted facts in deterministic row order."""
         self.upsert_rows("facts", facts)
+
+    def insert_symbol_relations(self, relations: Iterable[dict[str, Any]]) -> None:
+        """Insert symbol inheritance/implementation/override relations in deterministic order."""
+        self.upsert_rows("symbol_relations", relations)
+
+    def get_symbol_relation_records(self) -> list[dict[str, Any]]:
+        """Return every symbol relation row in deterministic order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT source_fqname, target_fqname, kind, file_path, line, tier
+            FROM symbol_relations
+            ORDER BY source_fqname, kind, target_fqname, file_path, line
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def insert_resources(self, resources: Iterable[dict[str, Any]]) -> None:
+        """Insert shared resource records in deterministic row order."""
+        self.upsert_rows("resources", resources)
+
+    def get_resource_records(self) -> list[dict[str, Any]]:
+        """Return every shared resource record in deterministic order."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, kind, value, role, symbol_fqname, file_path, line, rule_id
+            FROM resources
+            ORDER BY id, role, file_path, line, symbol_fqname
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def replace_resources(self, resources: Iterable[dict[str, Any]]) -> None:
+        """Replace the whole resources table, leaving it untouched when nothing changed."""
+        rows = sorted(
+            (
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "value": row["value"],
+                    "role": row["role"],
+                    "symbol_fqname": row.get("symbol_fqname"),
+                    "file_path": row["file_path"],
+                    "line": row["line"],
+                    "rule_id": row.get("rule_id"),
+                }
+                for row in resources
+            ),
+            key=TABLE_REGISTRY["resources"].sort_key,
+        )
+        if rows == self.get_resource_records():
+            return
+        with self.conn:
+            self.conn.execute("DELETE FROM resources")
+            self._upsert_rows("resources", rows)
 
     def insert_synthetic_symbols(self, symbols: Iterable[dict[str, Any]]) -> None:
         """Insert synthetic ``<module>``/block symbols in deterministic row order."""

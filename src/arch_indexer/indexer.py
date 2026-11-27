@@ -37,6 +37,12 @@ from arch_indexer.plugins.infra_scanner import InfraScanner
 from arch_indexer.plugins.java_plugin import JavaPlugin
 from arch_indexer.plugins.python_plugin import PythonPlugin
 from arch_indexer.plugins.typescript_plugin import TypeScriptPlugin
+from arch_indexer.rule_engine import (
+    evaluate_entrypoint_rules,
+    load_builtin_entrypoint_rules,
+    load_rule_overrides,
+    merge_entrypoint_rules,
+)
 from arch_indexer.source_scope import in_scope
 from arch_indexer.storage.state import (
     Delta,
@@ -255,6 +261,8 @@ def _hydrated_file_record(record: dict[str, Any]) -> dict[str, Any]:
         "module": record["module"],
         "tier": record["tier"],
         "fallback_reason": record.get("fallback_reason"),
+        "unit_id": record.get("unit_id"),
+        "ecosystem": record.get("ecosystem"),
     }
 
 
@@ -837,6 +845,7 @@ def run_index(
                         infra_artifacts=res.infra_artifacts,
                         unresolved_refs=res.unresolved_refs,
                         facts=res.facts,
+                        symbol_relations=res.symbol_relations,
                     )
                 store.insert_unit_record(
                     unit_id=plan.unit.unit_id,
@@ -885,6 +894,7 @@ def run_index(
                 infra_artifacts=res.infra_artifacts,
                 unresolved_refs=res.unresolved_refs,
                 facts=res.facts,
+                symbol_relations=res.symbol_relations,
             )
             unit_tier = IndexingTier.TIER2.value if _all_files_fell_back(res) else res.tier.value
             store.insert_unit_record(
@@ -899,15 +909,96 @@ def run_index(
                 indexed_at_commit=head_commit,
             )
 
-        store.replace_synthetic_symbols(
-            build_synthetic_symbols(store.get_file_records(), store.get_entrypoint_records())
+        repo_config = load_rule_overrides(target_repo)
+        all_entry_rules = merge_entrypoint_rules(
+            load_builtin_entrypoint_rules(), repo_config.entrypoint_rules
         )
+        file_recs = store.get_file_records()
+        existing_eps = store.get_entrypoint_records()
+        symbol_recs = store.get_symbol_records()
+        rel_recs = store.get_symbol_relation_records()
+        fact_recs = [
+            dict(r)
+            for r in store.conn.execute(
+                "SELECT kind, file_path, line, col, end_line, enclosing_fqname, "
+                "name_text, name_fqname, receiver_text, args_json, extra_json "
+                "FROM facts ORDER BY file_path, line, col, kind"
+            ).fetchall()
+        ]
+        # Exclude api_call frontend_callers from rule-based HTTP entry discovery;
+        # real wrappers are already identified in graph.py.
+        new_entries = evaluate_entrypoint_rules(
+            all_entry_rules,
+            files=[{**f, "file_path": f["path"]} for f in file_recs],
+            symbols=symbol_recs,
+            symbol_relations=rel_recs,
+            facts=fact_recs,
+            existing_entrypoints=existing_eps,
+        )
+        if new_entries:
+            store.insert_unit_data(
+                entrypoints=[
+                    {
+                        "kind": ep["kind"],
+                        "name": ep["name"],
+                        "method": ep.get("method"),
+                        "route_or_trigger": ep["route_or_trigger"],
+                        "file_path": ep["file_path"],
+                        "line": ep["line"],
+                        "col": ep.get("col"),
+                        "block_end_line": ep.get("block_end_line"),
+                        "symbol_fqname": ep.get("symbol_fqname"),
+                        "auth_symbols_json": ep.get("auth_symbols_json", "[]"),
+                        "confidence": ep.get("confidence", "exact"),
+                        "rule_id": ep.get("rule_id"),
+                    }
+                    for ep in new_entries
+                ]
+            )
+            existing_eps = store.get_entrypoint_records()
+
+        store.replace_synthetic_symbols(build_synthetic_symbols(file_recs, existing_eps))
 
         # Spec 6.1/6.3/7.1: deterministic graph.json plus the self-contained viewer.
         graph = build_graph(
             store, target_repo, include_tests=include_tests, module_depth=module_depth
         )
-        export_graph_artifacts(target_repo, graph, docs_dir)
+        flat_resources: list[dict[str, Any]] = []
+        for res in graph.get("resources", []):
+            for ev in res.get("writers", ()):
+                flat_resources.append(
+                    {
+                        "id": res["id"],
+                        "kind": res["kind"],
+                        "value": res["value"],
+                        "role": "writer",
+                        "symbol_fqname": ev.get("symbol"),
+                        "file_path": ev["path"],
+                        "line": ev["line"],
+                        "rule_id": None,
+                    }
+                )
+            for ev in res.get("readers", ()):
+                flat_resources.append(
+                    {
+                        "id": res["id"],
+                        "kind": res["kind"],
+                        "value": res["value"],
+                        "role": "reader",
+                        "symbol_fqname": ev.get("symbol"),
+                        "file_path": ev["path"],
+                        "line": ev["line"],
+                        "rule_id": None,
+                    }
+                )
+        store.replace_resources(flat_resources)
+        export_graph_artifacts(
+            target_repo,
+            graph,
+            docs_dir,
+            store=store,
+            include_tests=include_tests,
+        )
 
         # Print the summary line and per-unit tiers to stdout. Scope the counts exactly as
         # master-index.json/graph.json do so the log and the artifacts always agree.

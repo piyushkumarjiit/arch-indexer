@@ -8,3 +8,12 @@
   arguments: (arguments) @args) @call
 
 (decorator (_) @decorator) @decorator_node
+
+(binary_expression
+  left: (_) @lhs
+  operator: _ @op
+  right: (_) @literal) @compare
+
+(call_expression
+  function: (member_expression object: (_) @lhs property: (property_identifier) @op)
+  arguments: (arguments (_) @literal .)) @compare

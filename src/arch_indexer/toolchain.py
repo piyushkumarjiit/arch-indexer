@@ -154,9 +154,56 @@ def get_repo_files(repo_path: Path | str) -> list[str]:
     return sorted(files)
 
 
+_CONFIG_PATTERNS = (
+    "application*.yml",
+    "application*.yaml",
+    "application*.properties",
+    ".env.example",
+    "*.env.sample",
+)
+_K8S_MANIFEST_KIND_RE = re.compile(r"(?m)^\s*kind:\s*(Deployment|StatefulSet|DaemonSet|Service)\b")
+
+
+def is_k8s_manifest_content(content: str) -> bool:
+    """Return True if YAML text looks like a Deployment/StatefulSet/DaemonSet/Service manifest."""
+    return "apiVersion:" in content and _K8S_MANIFEST_KIND_RE.search(content) is not None
+
+
+def is_config_binding_file(rel_path: str) -> bool:
+    """Return True if ``rel_path`` is a supported Spring/env config file."""
+    basename = os.path.basename(rel_path)
+    return any(fnmatch.fnmatch(basename, pat) for pat in _CONFIG_PATTERNS)
+
+
+def is_infra_file(rel_path: str, *, full_path: Path | None = None) -> bool:
+    """Return True if a repository-relative path matches infrastructure artifact patterns."""
+    basename = os.path.basename(rel_path)
+    if (
+        fnmatch.fnmatch(basename, "Dockerfile*")
+        or fnmatch.fnmatch(basename, "*.dockerfile")
+        or fnmatch.fnmatch(basename, "*compose*.yml")
+        or fnmatch.fnmatch(basename, "*compose*.yaml")
+        or rel_path.endswith((".sh", ".tf", ".hcl"))
+        or fnmatch.fnmatch(rel_path, ".github/workflows/*.yml")
+        or fnmatch.fnmatch(rel_path, ".github/workflows/*.yaml")
+        or is_sql_migration_file(rel_path)
+        or is_config_binding_file(rel_path)
+    ):
+        return True
+    if full_path is not None and rel_path.lower().endswith((".yml", ".yaml")):
+        try:
+            with full_path.open("r", encoding="utf-8", errors="replace") as handle:
+                head = handle.read(8192)
+            return is_k8s_manifest_content(head)
+        except OSError:
+            return False
+    return False
+
+
 def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
     """Scan target repository and group matched files by language/domain per spec section 3.1."""
-    files = get_repo_files(repo_path)
+    repo = Path(repo_path)
+    files = get_repo_files(repo)
     matched: dict[str, list[str]] = {
         "python": [],
         "typescript": [],
@@ -186,17 +233,8 @@ def detect_repo_files(repo_path: Path | str) -> dict[str, list[str]]:
         if rel.endswith(".java") or basename == "pom.xml":
             matched["java"].append(rel)
 
-        # Infra: Dockerfile*, *compose*.y*ml, *.sh, *.tf, *.hcl, .github/workflows/*.y*ml,
-        # SQL migrations (*.sql and migration-directory descriptors)
-        if (
-            fnmatch.fnmatch(basename, "Dockerfile*")
-            or fnmatch.fnmatch(basename, "*compose*.yml")
-            or fnmatch.fnmatch(basename, "*compose*.yaml")
-            or rel.endswith((".sh", ".tf", ".hcl"))
-            or fnmatch.fnmatch(rel, ".github/workflows/*.yml")
-            or fnmatch.fnmatch(rel, ".github/workflows/*.yaml")
-            or is_sql_migration_file(rel)
-        ):
+        # Infra: unified via is_infra_file so scanner and repo detection stay in sync.
+        if is_infra_file(rel, full_path=repo / rel):
             matched["infra"].append(rel)
 
     return matched

@@ -11,7 +11,12 @@ from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 from arch_indexer.config import RepoCachePaths
-from arch_indexer.plugins.base import IndexingTier, IndexResult, IndexUnit
+from arch_indexer.plugins.base import (
+    IndexingTier,
+    IndexResult,
+    IndexUnit,
+    ecosystem_for_language,
+)
 from arch_indexer.scip_pb2 import (
     UTF8,
     UTF16,
@@ -1249,16 +1254,21 @@ def _parse_scip_payload(
     symbols: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
     unresolved_refs: list[dict[str, Any]] = []
+    symbol_relations: list[dict[str, Any]] = []
     metadata_project_root: Path | None = None
 
     document_count = 0
     metadata_encoding = 0
     defined_by_doc: dict[str, set[str]] = {}
+    ext_sym_info_by_str: dict[str, SymbolInformation] = {}
     for field_num, msg in iter_scip_file(scip_path):
         if field_num == 1:
             metadata_encoding = msg.text_document_encoding
             if msg.project_root:
                 metadata_project_root = _parse_project_root(msg.project_root)
+        elif field_num == 3:
+            if msg.symbol:
+                ext_sym_info_by_str[msg.symbol] = msg
         elif field_num == 2:
             document_count += 1
             doc_symbols = defined_by_doc.setdefault(msg.relative_path, set())
@@ -1334,6 +1344,8 @@ def _parse_scip_payload(
 
     seen_refs: set[tuple[str, int, int, str, str]] = set()
     seen_unresolved: set[tuple[str, int, str]] = set()
+    seen_relations: set[tuple[str, str, str]] = set()
+    doc_sym_info_by_str: dict[str, SymbolInformation] = {}
 
     for field_num, doc in iter_scip_file(scip_path):
         if field_num != 2:
@@ -1374,6 +1386,7 @@ def _parse_scip_payload(
                 "module": module,
                 "tier": IndexingTier.TIER1.value,
                 "fallback_reason": None,
+                "ecosystem": ecosystem_for_language(unit.language),
             }
         )
 
@@ -1397,6 +1410,8 @@ def _parse_scip_payload(
         )
         definition_starts = _definition_start_positions(doc)
         sym_info_by_str: dict[str, SymbolInformation] = {s.symbol: s for s in doc.symbols}
+        doc_sym_info_by_str.update(sym_info_by_str)
+        def_line_by_sym: dict[str, int] = {}
 
         for occ in doc.occurrences:
             sym_str = occ.symbol
@@ -1467,6 +1482,7 @@ def _parse_scip_payload(
             info = sym_info_by_str.get(sym_str)
 
             if is_definition:
+                def_line_by_sym.setdefault(sym_str, start_line)
                 display_name = info.display_name if (info and info.display_name) else simple_name
                 if display_name == "<init>":
                     display_name = simple_name
@@ -1619,6 +1635,7 @@ def _parse_scip_payload(
                                 "line": start_line,
                                 "raw_symbol": raw_symbol,
                                 "language": unit.language,
+                                "ref_kind": ref_kind,
                             }
                         )
 
@@ -1635,6 +1652,55 @@ def _parse_scip_payload(
                             "line": import_line,
                             "raw_symbol": module_specifier,
                             "language": unit.language,
+                            "ref_kind": "import",
+                        }
+                    )
+
+        for sym_str, info in sorted(sym_info_by_str.items()):
+            if not info.relationships:
+                continue
+            _, from_fq_raw, from_inferred, from_suffix = parse_scip_symbol(sym_str)
+            from_kind = SCIP_KIND_MAP.get(info.kind, from_inferred) if info.kind else from_inferred
+            if from_kind == "module":
+                continue
+            from_fqname = _module_fqname(from_fq_raw, from_suffix)
+            sym_line = def_line_by_sym.get(sym_str)
+            for rel in info.relationships:
+                if not rel.is_implementation or not rel.symbol:
+                    continue
+                target_info = (
+                    sym_info_by_str.get(rel.symbol)
+                    or doc_sym_info_by_str.get(rel.symbol)
+                    or ext_sym_info_by_str.get(rel.symbol)
+                )
+                _, to_fq_raw, to_inferred, to_suffix = parse_scip_symbol(rel.symbol)
+                to_kind = (
+                    SCIP_KIND_MAP.get(target_info.kind, to_inferred)
+                    if (target_info and target_info.kind)
+                    else to_inferred
+                )
+                if (
+                    from_kind in ("method", "function")
+                    or to_kind in ("method", "function")
+                    or to_suffix == "()."
+                ):
+                    rel_kind = "overrides"
+                elif to_kind == "interface":
+                    rel_kind = "implements"
+                else:
+                    rel_kind = "extends"
+                to_fqname = _module_fqname(to_fq_raw, to_suffix)
+                rel_key = (from_fqname, rel_kind, to_fqname)
+                if rel_key not in seen_relations:
+                    seen_relations.add(rel_key)
+                    symbol_relations.append(
+                        {
+                            "source_fqname": from_fqname,
+                            "target_fqname": to_fqname,
+                            "kind": rel_kind,
+                            "file_path": rel_path,
+                            "line": int(sym_line or 1),
+                            "tier": IndexingTier.TIER1.value,
                         }
                     )
 
@@ -1649,6 +1715,9 @@ def _parse_scip_payload(
             ref["symbol_fqname"] = _align_fqname(ref["symbol_fqname"], ordered_renames)
         for unresolved in unresolved_refs:
             unresolved["raw_symbol"] = _align_fqname(unresolved["raw_symbol"], ordered_renames)
+        for srel in symbol_relations:
+            srel["source_fqname"] = _align_fqname(srel["source_fqname"], ordered_renames)
+            srel["target_fqname"] = _align_fqname(srel["target_fqname"], ordered_renames)
 
     if repo_fqnames or repo_modules:
 
@@ -1681,6 +1750,19 @@ def _parse_scip_payload(
             unresolved_refs.extend(
                 ref for ref in tier2_result.unresolved_refs if ref["file_path"] in uncovered_paths
             )
+        if tier2_result.symbol_relations:
+            scip_from_pairs = {
+                (r["source_fqname"], r["target_fqname"])
+                for r in symbol_relations
+                if r["kind"] in ("implements", "extends")
+            }
+            for t2rel in tier2_result.symbol_relations:
+                pair = (t2rel["source_fqname"], t2rel["target_fqname"])
+                if t2rel.get("file_path") in uncovered_paths or pair not in scip_from_pairs:
+                    rel_key = (t2rel["source_fqname"], t2rel["kind"], t2rel["target_fqname"])
+                    if rel_key not in seen_relations:
+                        seen_relations.add(rel_key)
+                        symbol_relations.append(dict(t2rel))
 
     aligned_entrypoints: list[dict[str, Any]] = []
     entrypoints = tier2_result.entrypoints if tier2_result else []
@@ -1738,4 +1820,5 @@ def _parse_scip_payload(
         entrypoints=aligned_entrypoints,
         infra_artifacts=[],
         facts=list(tier2_result.facts) if tier2_result else [],
+        symbol_relations=symbol_relations,
     )

@@ -58,6 +58,56 @@ class IndexResult:
     entrypoints: list[dict[str, Any]] = field(default_factory=list)
     infra_artifacts: list[dict[str, Any]] = field(default_factory=list)
     facts: list[dict[str, Any]] = field(default_factory=list)
+    symbol_relations: list[dict[str, Any]] = field(default_factory=list)
+
+
+_LANGUAGE_ECOSYSTEM = {
+    "python": "pypi",
+    "typescript": "npm",
+    "javascript": "npm",
+    "java": "maven",
+    "go": "go",
+}
+
+
+def ecosystem_for_language(language: str | None) -> str | None:
+    """Return canonical package ecosystem name for a source language, else None."""
+    if not language:
+        return None
+    return _LANGUAGE_ECOSYSTEM.get(language.lower())
+
+
+def relations_from_inherits_facts(facts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build ``symbol_relations`` rows from Tier-2 ``inherits`` facts."""
+    import json
+
+    relations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for fact in facts:
+        if fact.get("kind") != "inherits":
+            continue
+        raw = fact.get("args_json")
+        payload = json.loads(raw) if isinstance(raw, str) and raw else {}
+        from_fq = payload.get("child_fqname") or fact.get("enclosing_fqname")
+        to_fq = payload.get("base_fqname") or fact.get("name_fqname") or fact.get("name_text")
+        rel = payload.get("relation") or fact.get("receiver_text") or "extends"
+        if not from_fq or not to_fq or rel not in ("implements", "extends", "overrides"):
+            continue
+        key = (from_fq, rel, to_fq)
+        if key in seen:
+            continue
+        seen.add(key)
+        relations.append(
+            {
+                "source_fqname": from_fq,
+                "target_fqname": to_fq,
+                "kind": rel,
+                "file_path": fact.get("file_path") or "",
+                "line": int(fact.get("line") or 1),
+                "tier": "tree-sitter",
+            }
+        )
+    return relations
 
 
 DEFAULT_FALLBACK_MESSAGE_CHARS = 800
