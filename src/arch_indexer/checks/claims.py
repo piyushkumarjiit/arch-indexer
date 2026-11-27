@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
-"""Cross-model claim planning and verification gate (spec §4.5, §5.3, D8)."""
+"""Cross-model claim planning and verification gate (spec §8.5)."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ VALID_VERDICTS = frozenset({"supported", "partial", "contradicted", "bad-citatio
 
 
 class JudgeWriterConflictError(ValueError):
-    """Raised when ``judge_model == writer_model`` (spec §5.3)."""
+    """Raised when ``judge_model == writer_model`` (spec §8.5)."""
 
 
 @dataclass(frozen=True)
@@ -376,7 +376,7 @@ def gate_claims(
     judge_model: str | None = None,
     planned_keys: Sequence[str] | None = None,
 ) -> GateResult:
-    """Evaluate judge verdicts against §4.5/D8 thresholds.
+    """Evaluate judge verdicts against the §8.5 thresholds.
 
     Refuses ``judge_model == writer_model`` with ``JudgeWriterConflictError``.
     Raises ``ValueError`` when fewer distinct judges voted than ``judges``, and,

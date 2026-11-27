@@ -1055,7 +1055,7 @@ def check_descriptions(
     cache_dir: str | Path | None = None,
     write_js: bool = True,
 ) -> list[DescriptionError]:
-    """Validate ``descriptions.json`` (§3.5, §4.5, §5.3) and write ``descriptions.js`` on pass."""
+    """Validate ``descriptions.json`` (spec §8.4) and write ``descriptions.js`` on pass."""
     repo_path = Path(repo).resolve()
     if not repo_path.is_dir():
         return [
