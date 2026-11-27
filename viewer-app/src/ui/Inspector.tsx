@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { layerForEdgeKind } from "../data/layers";
 import type {
   ChunkNode,
   DataflowData,
@@ -25,11 +26,75 @@ function buildEditorHref(ev: Evidence, template?: string): string | null {
     .replace("{line}", String(ev.line));
 }
 
+function resolveFallbackNode(
+  nodeId: string | null,
+  overview: OverviewData | null,
+  chunks: Record<string, PartChunk>,
+): ViewNodeData | null {
+  if (!nodeId || !overview) return null;
+  const part = overview.parts.find((p) => p.id === nodeId);
+  if (part) {
+    return {
+      id: part.id,
+      label: part.name,
+      kind: part.kind,
+      partId: part.id,
+      drillable: true,
+      evidence: part.evidence,
+    };
+  }
+  const grp = overview.groups.find((g) => g.id === nodeId);
+  if (grp) {
+    return {
+      id: grp.id,
+      label: grp.name,
+      kind: "group",
+      tier: grp.tier,
+      partId: grp.part_id,
+      groupId: grp.id,
+      drillable: true,
+    };
+  }
+  const boundary = overview.boundaries.find((b) => b.id === nodeId);
+  if (boundary) {
+    return {
+      id: boundary.id,
+      label: boundary.label,
+      kind: boundary.boundary,
+      badge: boundary.kind,
+      confidence: boundary.confidence,
+      drillable: false,
+      evidence: boundary.evidence,
+    };
+  }
+  for (const [pid, chunk] of Object.entries(chunks)) {
+    const cn = chunk.nodes.find((n) => n.id === nodeId);
+    if (cn) {
+      return {
+        id: cn.id,
+        label: cn.label,
+        kind: cn.kind,
+        badge: cn.tier,
+        tier: cn.tier,
+        confidence: cn.confidence,
+        drillable: true,
+        partId: pid,
+        groupId: cn.module_id,
+        filePath: cn.file,
+        symbolId: cn.id,
+        evidence: cn.evidence,
+      };
+    }
+  }
+  return null;
+}
+
 export function Inspector({
   open,
   overview,
   chunks,
   selectedNode,
+  selectedNodeId,
   selectedEdge,
   visibleEdges,
   descriptions,
@@ -37,12 +102,14 @@ export function Inspector({
   dataflow,
   onClose,
   onSelectNode,
+  onDrillNode,
   onStartFlow,
 }: {
   open: boolean;
   overview: OverviewData | null;
   chunks: Record<string, PartChunk>;
   selectedNode: ViewNodeData | null;
+  selectedNodeId?: string | null;
   selectedEdge: ViewEdgeData | null;
   visibleEdges: ViewEdgeData[];
   descriptions: DescriptionsData | null;
@@ -50,9 +117,34 @@ export function Inspector({
   dataflow: DataflowData | null;
   onClose: () => void;
   onSelectNode: (nodeId: string) => void;
+  onDrillNode?: (node: ViewNodeData) => void;
   onStartFlow: (flowId: string, partId?: string) => void;
 }) {
   const [copiedCitation, setCopiedCitation] = useState<string | null>(null);
+  const [foldedFilter, setFoldedFilter] = useState("");
+
+  const resolvedNode = useMemo(
+    () => selectedNode ?? resolveFallbackNode(selectedNodeId ?? null, overview, chunks),
+    [selectedNode, selectedNodeId, overview, chunks],
+  );
+
+  const foldedItems = useMemo(() => {
+    const ids = resolvedNode?.foldedIds ?? [];
+    if (ids.length === 0) return [];
+    const labelById = new Map<string, string>();
+    if (overview) {
+      for (const p of overview.parts) labelById.set(p.id, p.name);
+      for (const g of overview.groups) labelById.set(g.id, g.name);
+      for (const b of overview.boundaries) labelById.set(b.id, b.label);
+    }
+    for (const c of Object.values(chunks)) {
+      for (const n of c.nodes) labelById.set(n.id, n.label);
+    }
+    const q = foldedFilter.trim().toLowerCase();
+    return ids
+      .map((id) => ({ id, label: labelById.get(id) ?? id }))
+      .filter((item) => !q || item.label.toLowerCase().includes(q) || item.id.toLowerCase().includes(q));
+  }, [resolvedNode?.foldedIds, overview, chunks, foldedFilter]);
 
   if (!open) return null;
 
@@ -68,9 +160,15 @@ export function Inspector({
     }
   };
 
-  if (selectedEdge && !selectedNode) {
+  if (selectedEdge && !resolvedNode) {
+    const kindEntries = Object.entries(
+      selectedEdge.kindCounts && Object.keys(selectedEdge.kindCounts).length > 0
+        ? selectedEdge.kindCounts
+        : Object.fromEntries(selectedEdge.kinds.map((k) => [k, selectedEdge.kinds.length === 1 ? selectedEdge.count : 1])),
+    ).sort((a, b) => a[0].localeCompare(b[0]));
+
     return (
-      <aside className="arch-inspector" aria-label="Edge inspector">
+      <aside className="arch-inspector" aria-label="Edge inspector" data-testid="edge-inspector">
         <div className="arch-inspector-header">
           <strong>Edge Inspector</strong>
           <button type="button" className="arch-icon-btn" onClick={onClose} aria-label="Close inspector">
@@ -85,11 +183,18 @@ export function Inspector({
             </div>
           </div>
           <div className="arch-detail-block">
-            <div className="arch-detail-label">Kinds & Confidence</div>
+            <div className="arch-detail-label">
+              Kinds &amp; Layer Breakdown ({selectedEdge.count} total)
+            </div>
             <div className="arch-tag-row">
-              {selectedEdge.kinds.map((k) => (
-                <span key={k} className="arch-badge">{k}</span>
-              ))}
+              {kindEntries.map(([kind, cnt]) => {
+                const layer = layerForEdgeKind(kind);
+                return (
+                  <span key={kind} className={`arch-badge arch-badge--layer-${layer}`}>
+                    {kind}: {cnt}
+                  </span>
+                );
+              })}
               {selectedEdge.confidence && (
                 <span className={`arch-badge arch-badge--${selectedEdge.confidence}`}>
                   {selectedEdge.confidence === "heuristic" ? "approx (heuristic)" : selectedEdge.confidence}
@@ -129,34 +234,32 @@ export function Inspector({
     );
   }
 
-  if (!selectedNode) return null;
+  if (!resolvedNode) return null;
 
-  const desc = descriptions?.entries?.[selectedNode.id] ?? null;
-  const runtimeMetric = runtime?.node_metrics?.[selectedNode.id] ?? selectedNode.metrics ?? null;
+  const desc = descriptions?.entries?.[resolvedNode.id] ?? null;
+  const runtimeMetric = runtime?.node_metrics?.[resolvedNode.id] ?? resolvedNode.metrics ?? null;
 
-  // Locate chunk node for docstring if available
   let chunkNode: ChunkNode | undefined;
   for (const c of Object.values(chunks)) {
-    const found = c.nodes.find((n) => n.id === selectedNode.id);
+    const found = c.nodes.find((n) => n.id === resolvedNode.id);
     if (found) {
       chunkNode = found;
       break;
     }
   }
 
-  const incoming = visibleEdges.filter((e) => e.target === selectedNode.id);
-  const outgoing = visibleEdges.filter((e) => e.source === selectedNode.id);
+  const incoming = visibleEdges.filter((e) => e.target === resolvedNode.id);
+  const outgoing = visibleEdges.filter((e) => e.source === resolvedNode.id);
 
-  // Flows passing through this node
   const flowsThrough: Array<{ id: string; partId?: string; label: string; endReason: string }> = [];
   if (overview) {
     const addedFlowIds = new Set<string>();
     for (const chunk of Object.values(chunks)) {
       for (const fl of chunk.flows) {
         if (
-          fl.entry_id === selectedNode.id ||
-          fl.ends_at === selectedNode.id ||
-          fl.steps.some((s) => s.node_id === selectedNode.id)
+          fl.entry_id === resolvedNode.id ||
+          fl.ends_at === resolvedNode.id ||
+          fl.steps.some((s) => s.node_id === resolvedNode.id)
         ) {
           addedFlowIds.add(fl.id);
           flowsThrough.push({
@@ -170,7 +273,7 @@ export function Inspector({
     }
     for (const fi of overview.flow_index as FlowIndexEntry[]) {
       if (addedFlowIds.has(fi.id)) continue;
-      if (fi.entry_id === selectedNode.id || fi.ends_at === selectedNode.id || fi.part_id === selectedNode.id) {
+      if (fi.entry_id === resolvedNode.id || fi.ends_at === resolvedNode.id || fi.part_id === resolvedNode.id) {
         flowsThrough.push({
           id: fi.id,
           partId: fi.part_id,
@@ -184,51 +287,97 @@ export function Inspector({
   const relatedDataflow =
     dataflow?.edges?.filter(
       (d) =>
-        d.entry_id === selectedNode.id ||
-        d.source_fqname === selectedNode.id ||
-        d.sink_boundary_id === selectedNode.id,
+        d.entry_id === resolvedNode.id ||
+        d.source_fqname === resolvedNode.id ||
+        d.sink_boundary_id === resolvedNode.id,
     ) ?? [];
 
   const fileChange = getFileChangeStatus(
-    selectedNode.filePath ?? selectedNode.evidence?.[0]?.file,
+    resolvedNode.filePath ?? resolvedNode.evidence?.[0]?.file,
     overview?.delta,
   );
-  const part = selectedNode.partId
-    ? overview?.parts.find((p) => p.id === selectedNode.partId)
+  const part = resolvedNode.partId
+    ? overview?.parts.find((p) => p.id === resolvedNode.partId)
     : undefined;
-  const group = selectedNode.groupId
-    ? overview?.groups.find((g) => g.id === selectedNode.groupId)
+  const group = resolvedNode.groupId
+    ? overview?.groups.find((g) => g.id === resolvedNode.groupId)
     : undefined;
 
   return (
     <aside className="arch-inspector" aria-label="Node inspector" data-testid="inspector">
       <div className="arch-inspector-header">
         <strong>Inspector</strong>
-        <button type="button" className="arch-icon-btn" onClick={onClose} aria-label="Close inspector">
-          &times;
-        </button>
+        <div className="arch-inspector-header-actions">
+          {resolvedNode.drillable && onDrillNode && (
+            <button
+              type="button"
+              className="arch-mini-btn arch-btn--primary"
+              data-testid="inspector-drill-btn"
+              onClick={() => onDrillNode(resolvedNode)}
+            >
+              Drill in &rarr;
+            </button>
+          )}
+          <button type="button" className="arch-icon-btn" onClick={onClose} aria-label="Close inspector">
+            &times;
+          </button>
+        </div>
       </div>
       <div className="arch-inspector-body">
         <div className="arch-detail-block">
-          <div className="arch-inspector-title">{selectedNode.label}</div>
-          <div className="arch-detail-mono">{selectedNode.id}</div>
+          <div className="arch-inspector-title">{resolvedNode.label}</div>
+          <div className="arch-detail-mono">{resolvedNode.id}</div>
           <div className="arch-tag-row">
-            <span className="arch-badge">{selectedNode.kind}</span>
-            {selectedNode.tier && (
-              <span className={`arch-badge arch-badge--tier-${selectedNode.tier}`}>
-                {selectedNode.tier}
+            <span className="arch-badge">{resolvedNode.kind}</span>
+            {resolvedNode.tier && (
+              <span className={`arch-badge arch-badge--tier-${resolvedNode.tier}`}>
+                {resolvedNode.tier}
               </span>
             )}
-            {selectedNode.confidence && (
-              <span className={`arch-badge arch-badge--${selectedNode.confidence}`}>
-                {selectedNode.confidence === "heuristic"
+            {resolvedNode.confidence && (
+              <span className={`arch-badge arch-badge--${resolvedNode.confidence}`}>
+                {resolvedNode.confidence === "heuristic"
                   ? "approx (heuristic)"
-                  : selectedNode.confidence}
+                  : resolvedNode.confidence}
               </span>
             )}
-            <ChangeBadge status={selectedNode.changeStatus ?? fileChange} />
+            <ChangeBadge status={resolvedNode.changeStatus ?? fileChange} />
           </div>
         </div>
+
+        {resolvedNode.kind === "fold" && resolvedNode.foldedIds && resolvedNode.foldedIds.length > 0 && (
+          <div className="arch-detail-block" data-testid="folded-items-section">
+            <div className="arch-detail-label">
+              Folded Items ({resolvedNode.foldedIds.length})
+            </div>
+            {resolvedNode.foldedIds.length > 6 && (
+              <input
+                type="text"
+                className="arch-folded-filter"
+                placeholder="Filter folded items..."
+                value={foldedFilter}
+                onChange={(e) => setFoldedFilter(e.target.value)}
+              />
+            )}
+            <div className="arch-folded-list">
+              {foldedItems.length === 0 ? (
+                <span className="arch-detail-muted">No folded items match</span>
+              ) : (
+                foldedItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="arch-link-item"
+                    onClick={() => onSelectNode(item.id)}
+                  >
+                    <span className="arch-link-item__label">{item.label}</span>
+                    <span className="arch-badge">Jump</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
 
         {(part || group) && (
           <div className="arch-detail-block">
@@ -264,7 +413,7 @@ export function Inspector({
           <div className="arch-detail-block">
             <div className="arch-detail-label">Runtime ({runtimeMetric.match_tier})</div>
             <div className="arch-detail-text">
-              {runtimeMetric.span_count} spans · {runtimeMetric.error_count} errors · p95{" "}
+              {runtimeMetric.span_count} spans &middot; {runtimeMetric.error_count} errors &middot; p95{" "}
               {runtimeMetric.p95_ms} ms
             </div>
           </div>
@@ -346,13 +495,13 @@ export function Inspector({
 
         <div className="arch-detail-block">
           <div className="arch-detail-label">
-            Evidence ({selectedNode.evidence?.length ?? 0})
+            Evidence ({resolvedNode.evidence?.length ?? 0})
           </div>
           <div className="arch-evidence-list">
-            {!selectedNode.evidence || selectedNode.evidence.length === 0 ? (
+            {!resolvedNode.evidence || resolvedNode.evidence.length === 0 ? (
               <span className="arch-detail-muted">No direct evidence</span>
             ) : (
-              selectedNode.evidence.map((ev, idx) => {
+              resolvedNode.evidence.map((ev, idx) => {
                 const cite = formatEvidenceCitation(ev);
                 const href = buildEditorHref(ev, overview?.editor_url);
                 return (

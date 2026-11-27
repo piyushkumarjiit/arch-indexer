@@ -34,7 +34,16 @@ arch-indexer = "arch_indexer.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-arch_indexer = ["toolchain.toml", "skeletons/*.md", "viewer/assets/*", "facts/queries/*.scm", "rules/*.toml"]
+arch_indexer = [
+    "toolchain.toml",
+    "skeletons/*.md",
+    "viewer/assets/*",
+    "viewer/dist/*",
+    "viewer/dist/vendor/*",
+    "viewer/dist/licenses/*",
+    "facts/queries/*.scm",
+    "rules/*.toml",
+]
 
 [tool.ruff]
 line-length = 100
@@ -46,3 +55,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "browser: requires headless Chromium / Playwright",
+]

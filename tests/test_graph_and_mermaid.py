@@ -166,7 +166,7 @@ def test_graph_and_viewer_are_byte_identical_across_runs(tmp_path):
     assert (repo / "docs" / "flow-viewer.html").read_bytes() == viewer_first
 
     viewer = viewer_first.decode("utf-8")
-    assert '<script id="arch-graph-data" type="application/json">' in viewer
+    assert '<script id="arch-overview-data" type="application/json">' in viewer
     assert not re.search(r"(?:src|href)=[\"']?https?://", viewer)
 
 

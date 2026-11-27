@@ -17,6 +17,7 @@ export function GroupView() {
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
   const selectedNodeId = useViewerStore((s) => s.selectedNodeId);
+  const selectedEdgeId = useViewerStore((s) => s.selectedEdgeId);
   const selectNode = useViewerStore((s) => s.selectNode);
   const selectEdge = useViewerStore((s) => s.selectEdge);
   const drillToGroup = useViewerStore((s) => s.drillToGroup);
@@ -71,7 +72,9 @@ export function GroupView() {
         viewKey={`group:${groupId}:${dirFilter ?? "all"}`}
         nodes={graph.nodes}
         edges={graph.edges}
+        layers={layers}
         selectedNodeId={selectedNodeId}
+        selectedEdgeId={selectedEdgeId}
         onSelectNode={(id) => selectNode(id)}
         onSelectEdge={(id) => selectEdge(id)}
         onDrillNode={(node) => {

@@ -15,6 +15,56 @@ const CONTROL_EDGE_KINDS = new Set(["calls", "registers", "boots", "implements"]
 const DATA_EDGE_KINDS = new Set(["reads", "writes", "publishes", "dataflow"]);
 const INTEGRATION_EDGE_KINDS = new Set(["http_request"]);
 
+export function layerForEdgeKind(kind: string): LayerName {
+  if (CONTROL_EDGE_KINDS.has(kind)) return "control";
+  if (DATA_EDGE_KINDS.has(kind)) return "data";
+  if (INTEGRATION_EDGE_KINDS.has(kind)) return "integration";
+  if (kind === "runtime") return "runtime";
+  return "control";
+}
+
+export function filterKindsByLayers(
+  kindsMap: Record<string, number>,
+  layers: LayerFilter,
+): { kinds: string[]; kindCounts: Record<string, number>; count: number } {
+  const kindCounts: Record<string, number> = {};
+  const kinds: string[] = [];
+  let count = 0;
+  for (const kind of Object.keys(kindsMap).sort()) {
+    const layer = layerForEdgeKind(kind);
+    if (!layers[layer]) continue;
+    const c = kindsMap[kind] ?? 0;
+    if (c <= 0) continue;
+    kinds.push(kind);
+    kindCounts[kind] = c;
+    count += c;
+  }
+  return { kinds, kindCounts, count };
+}
+
+export function edgeStrokeColor(
+  edge: Pick<ViewEdgeData, "kinds" | "source" | "target" | "highlighted" | "runtimeOnly">,
+  layers: LayerFilter,
+): string {
+  if (edge.highlighted) return "#06b6d4";
+  if (edge.runtimeOnly) return "#f43f5e";
+  const active = Array.from(new Set(edge.kinds.map(layerForEdgeKind))).filter((l) => layers[l]);
+  if (active.length > 1) return "#94a3b8";
+  if (active.length === 1) {
+    switch (active[0]) {
+      case "control":
+        return "#38bdf8";
+      case "data":
+        return "#10b981";
+      case "integration":
+        return "#f59e0b";
+      case "runtime":
+        return "#f43f5e";
+    }
+  }
+  return "#64748b";
+}
+
 export function edgeLayersForEdge(edge: {
   kinds?: string[];
   kind?: string;
@@ -27,10 +77,7 @@ export function edgeLayersForEdge(edge: {
   const layers = new Set<LayerName>();
 
   for (const kind of kinds) {
-    if (CONTROL_EDGE_KINDS.has(kind)) layers.add("control");
-    if (DATA_EDGE_KINDS.has(kind)) layers.add("data");
-    if (INTEGRATION_EDGE_KINDS.has(kind)) layers.add("integration");
-    if (kind === "runtime") layers.add("runtime");
+    layers.add(layerForEdgeKind(kind));
   }
 
   const endpoints = [edge.source ?? "", edge.target ?? ""];

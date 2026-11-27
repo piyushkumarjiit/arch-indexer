@@ -359,6 +359,7 @@ export interface ViewEdgeData {
   source: string;
   target: string;
   kinds: string[];
+  kindCounts?: Record<string, number>;
   label?: string;
   count: number;
   confidence?: Confidence;
