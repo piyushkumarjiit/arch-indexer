@@ -1,4 +1,4 @@
-"""Language-agnostic Tier 2 fact extractor (spec 3.1 ``facts``, slices 2–3).
+"""Language-agnostic Tier 2 fact extractor (spec §4.5 ``facts``, slices 2–3).
 
 ``extract_facts`` runs the per-language tree-sitter query in ``queries/<language>.scm`` and
 walks declarations/imports to emit ``facts`` rows:
@@ -15,7 +15,7 @@ walks declarations/imports to emit ``facts`` rows:
 * ``inherits`` - base classes/interfaces declared on in-repo types.
 
 Only real syntax nodes are matched, so a call spelled inside a comment or a string
-literal never yields a fact. Columns are 0-based code-point indexes (spec 3.0).
+literal never yields a fact. Columns are 0-based code-point indexes.
 """
 
 from __future__ import annotations

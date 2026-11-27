@@ -113,8 +113,7 @@ def test_inline_sql_string_literals_share_table_resource_end_to_end(tmp_path: Pa
     (repo / "cleanup").mkdir(parents=True)
     (repo / "reader").mkdir(parents=True)
     (repo / "cleanup" / "purge.py").write_text(
-        "def purge_orders(conn):\n"
-        '    conn.execute("DELETE FROM orders")\n',
+        'def purge_orders(conn):\n    conn.execute("DELETE FROM orders")\n',
         encoding="utf-8",
     )
     (repo / "reader" / "report.py").write_text(

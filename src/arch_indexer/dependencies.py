@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
-"""Build ``docs/arch/dependencies.json`` (schema_version ``1.0``, spec §3.4)."""
+"""Build ``docs/arch/dependencies.json`` (schema_version ``1.0``, spec §6.4)."""
 
 from __future__ import annotations
 
@@ -163,7 +163,7 @@ def build_dependencies(
     file_ecosystem: dict[str, str] | None = None,
     internal_modules: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble deterministic ``dependencies.json`` payload (spec §3.4)."""
+    """Assemble deterministic ``dependencies.json`` payload (spec §6.4)."""
     eco_map = file_ecosystem or {}
     internal = internal_modules or set()
     grouped: dict[tuple[str, str], dict[tuple[str, int], None]] = {}

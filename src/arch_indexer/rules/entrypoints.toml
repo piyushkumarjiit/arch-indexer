@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
-# Built-in fact/relation-based entrypoint rules for arch-indexer (spec §4.3, §5.1).
+# Built-in fact/relation-based entrypoint rules for arch-indexer (spec §6.1).
 
 [[rule]]
 id = "builtin:route-literal-compare"

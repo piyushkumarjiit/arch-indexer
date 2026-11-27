@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
-"""Shared-resource discovery across files, modules, and entry roots (spec §4.3)."""
+"""Shared-resource discovery across files, modules, and entry roots (spec §6.1)."""
 
 from __future__ import annotations
 

@@ -38,7 +38,7 @@ arch-indexer/
 │   │   ├── python_plugin.py         # Tier 1: scip-python | Tier 2: tree-sitter-python
 │   │   ├── typescript_plugin.py     # Tier 1: scip-typescript | Tier 2: tree-sitter-typescript
 │   │   ├── java_plugin.py           # Tier 1: scip-java | Tier 2: tree-sitter-java
-│   │   └── infra_scanner.py         # Dockerfile, compose, *.sh, *.tf/*.hcl, CI workflows, SQL migrations
+│   │   └── infra_scanner.py         # Dockerfile, Compose, K8s, *.sh, *.tf/*.hcl, CI, config bindings, SQL
 │   ├── store.py                     # SQLite schema, table registry & incremental record persistence
 │   ├── units_hash.py                # Per-unit manifest/file hashing for incremental planning
 │   ├── indexer.py                   # Two-tier indexing orchestration, incremental plans & fallback recording
@@ -46,6 +46,11 @@ arch-indexer/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
 │   ├── graph_rules.py               # Deterministic data-store/sink classification rules
+│   ├── rule_engine.py               # TOML boundary/entrypoint rules, repo overrides & evaluators
+│   ├── rules/                       # Built-in boundary & entrypoint rules (package data)
+│   ├── dependencies.py              # docs/arch/dependencies.json package dependency catalog
+│   ├── resources.py                 # Shared res:<kind>:<value> writer/reader discovery
+│   ├── route_link.py                # Frontend-to-backend route matching
 │   ├── packages.py                  # Canonical package roots for anchored boundary rules
 │   ├── facts/                       # Tier 2 call/decorator/register extractor & tree-sitter queries
 │   ├── synthetic.py                 # Synthetic <module>/block symbols for unowned top-level code
@@ -132,7 +137,7 @@ Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`) are n
 - **Python**: `*.py`, `pyproject.toml`, `requirements*.txt`, `setup.py`
 - **TypeScript / JavaScript**: `tsconfig*.json`, `package.json`, `*.ts`, `*.tsx`
 - **Java / Maven**: `pom.xml`, `*.java`
-- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`, and SQL schema migrations: any `*.sql` file, plus `*.xml`/`*.yaml`/`*.yml`/`*.json` descriptors under a `flyway`/`liquibase` directory or under a `db`/`database`/`sql`/`schema` directory that also carries a `migration(s)`/`changelog(s)` segment (project manifests such as `pom.xml`, `package.json` and `tsconfig*.json` never count)
+- **Infra** (always active, pure Python): `Dockerfile*`, `*compose*.y*ml`, `*.sh`, `*.tf`, `*.hcl`, `.github/workflows/*.y*ml`, Kubernetes manifests (YAML with `apiVersion` and a `Deployment`/`StatefulSet`/`DaemonSet`/`Service` kind), Spring/env config bindings (`application*.yml`/`*.yaml`/`*.properties`, `.env.example`, `*.env.sample`), and SQL schema migrations: any `*.sql` file, plus `*.xml`/`*.yaml`/`*.yml`/`*.json` descriptors under a `flyway`/`liquibase` directory or under a `db`/`database`/`sql`/`schema` directory that also carries a `migration(s)`/`changelog(s)` segment (project manifests such as `pom.xml`, `package.json` and `tsconfig*.json` never count)
 
 ### 3.2 Pinned Tool Manifest (`toolchain.toml`)
 All external tools and parsers are pinned to exact versions:
@@ -180,9 +185,9 @@ Every indexed file row in `index.db` records:
 - `tier`: `"scip"` or `"tree-sitter"`
 - `fallback_reason`: `null` or short deterministic code (`"maven_unresolved_artifact"`, `"maven_clean_plugin_offline"`, `"missing_node_modules"`, `"oom_limit"`, `"timeout"`, `"tool_unavailable"`, `"build_failure"`, `"partial_scip_coverage"`)
 
-When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`.
+When a Tier 1 run covers only part of a unit, files for which SCIP emitted no document are indexed by Tier 2 in the same run and recorded with `tier="tree-sitter"` and `fallback_reason="partial_scip_coverage"`. Tier 1 SCIP `is_implementation` occurrences and the Tier 2 `inherits` facts are stored as `symbol_relations` rows (§4.5) for repository-store detection and polymorphic dispatch (§6.1).
 
-Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. Tier 1 TypeScript also records an import statement that resolves outside the repository as an unresolved ref at the import line, with the module specifier as `raw_symbol`: scip-typescript emits no occurrence for a package absent from `node_modules`, so the import statement is the only evidence that the code depends on it. An import statement SCIP did resolve, including a bare specifier resolved through `tsconfig` `baseUrl`/`paths` to a repository file, is never recorded as external. The `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working. The printed summary reports the same in-scope counts as `master-index.json` (test files, their symbols, references, entrypoints, infra artifacts and unresolved refs excluded unless `--include-tests` was passed) and labels how many test files were excluded, so the CI log cannot disagree with the artifacts.
+Unresolved external symbols/imports are stored in an `unresolved_refs` table (`file_path`, `line`, `raw_symbol`, `language`, `ref_kind`) and surfaced in `master-index.json` and `graph.json` rather than aborting indexing. Tier 1 TypeScript also records an import statement that resolves outside the repository as an unresolved ref at the import line, with the module specifier as `raw_symbol`: scip-typescript emits no occurrence for a package absent from `node_modules`, so the import statement is the only evidence that the code depends on it. An import statement SCIP did resolve, including a bare specifier resolved through `tsconfig` `baseUrl`/`paths` to a repository file, is never recorded as external. The `index` summary and `master-index.json` summary split that total into `unresolved_external_refs` (third-party/JDK symbols, expected) and `unresolved_in_repo_refs` (a symbol or package the repository owns, which is an index defect). `total_unresolved_refs` stays the machine-readable total, so existing consumers keep working. The printed summary reports the same in-scope counts as `master-index.json` (test files, their symbols, references, entrypoints, infra artifacts and unresolved refs excluded unless `--include-tests` was passed) and labels how many test files were excluded, so the CI log cannot disagree with the artifacts.
 Each indexing unit is also recorded in the `units` table (§4.5), whose `message` column holds the captured Tier 1 failure output (for Maven, its `[ERROR]` lines when present), whitespace-collapsed and truncated, so a silent all-Tier-2 fallback can be diagnosed. A unit row's `tier` is `tree-sitter` when every one of its files fell back, and its `fallback_reason` joins several distinct per-file reasons with commas. `index` prints its summary line followed by one tier line per unit and writes a loud warning when 100% of a unit's files fell back; `arch-indexer query <repo> units [--json]` exposes the same rows.
 
 ### 4.4 Memory & Timeout Controls (7 GB Host)
@@ -195,16 +200,18 @@ All external indexer subprocesses receive strict, configurable caps:
 ### 4.5 SQLite Schema (`index.db`)
 Core tables:
 - `meta(key PK, value)` (`schema_version`, `arch_indexer_version`, `created_at_commit`)
-- `files(path PK, language, sha256, line_count, module, tier, fallback_reason, unit_id)`
+- `files(path PK, language, sha256, line_count, module, tier, fallback_reason, unit_id, ecosystem)` (`ecosystem` is the package ecosystem used to scope boundary rules and the dependency catalog)
 - `symbols(id PK, fqname, name, kind, file_path, start_line, end_line, body_sha256, visibility, decorators_json, start_col, end_col, docstring)`
   - `visibility` and `decorators_json` are `NULL` when the tier that produced the row does not report them: SCIP carries neither, so a Tier 1 symbol with no matching Tier 2 symbol stores `NULL` rather than a guessed default. A JSON array such as `[]` means the tier recorded that the symbol has no decorators. `start_col`, `end_col` and `docstring` come from the Tier 2 parse; a SCIP row keeps the Tier 2 docstring and only takes span columns when the Tier 2 span lines agree.
 - `references(id PK, symbol_fqname, file_path, line, col, ref_kind)` (`call`, `import`, `type`, `read`, `write`)
 - `entrypoints(id PK, kind, name, method, route_or_trigger, file_path, line, symbol_fqname, auth_symbols_json, col, block_end_line, confidence, rule_id)`
-  - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), Java process entrypoints (`main` in a `@SpringBootApplication` class, `CommandLineRunner`/`ApplicationRunner`) and gRPC service implementations (`*Grpc.*ImplBase`/`AsyncService` subclasses or `@GrpcService` classes, where only `@Override` handlers taking a `StreamObserver` count), workers/queues (Celery, BullMQ, Kafka/RabbitMQ/JMS listeners), Spring application events (`@EventListener`/`@TransactionalEventListener`), scheduled jobs, and frontend API callers (`fetch`, `axios`). `col` distinguishes handlers packed onto one line, `block_end_line` bounds a `__main__` block, and `confidence` records the recognition confidence (defaulting to `exact` when unset).
-- `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose services/volumes, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` record at each `CREATE TABLE` line, and `migration_descriptor` records for Liquibase-style changelogs).
-- `unresolved_refs(id PK, file_path, line, raw_symbol, language)`
+  - Detects HTTP routes (FastAPI/Flask/Django, Express/NestJS/Next.js, Spring `@RequestMapping`/`@GetMapping`/JAX-RS), CLI commands (`click`, `argparse`, `typer`, `main`), Java process entrypoints (`main` in a `@SpringBootApplication` class, `CommandLineRunner`/`ApplicationRunner`) and gRPC service implementations (`*Grpc.*ImplBase`/`AsyncService` subclasses or `@GrpcService` classes, where only `@Override` handlers taking a `StreamObserver` count), workers/queues (Celery, BullMQ, Kafka/RabbitMQ/JMS listeners), Spring application events (`@EventListener`/`@TransactionalEventListener`), scheduled jobs, and frontend API callers (`fetch`, `axios`). Data-driven entrypoint rules add HTTP entries discovered from server-scoped route literals and `job` entries from `ActionExecutor.execute` implementations, recording the matched `rule_id` (`builtin:...` or `repo:...`). `col` distinguishes handlers packed onto one line, `block_end_line` bounds a `__main__` block, and `confidence` records the recognition confidence (defaulting to `exact` when unset).
+- `infra_artifacts(id PK, kind, file_path, line, summary_json)` (Docker services/ports/base images, Compose and Kubernetes workload services, Compose volumes/ports, Spring/env config bindings with secret-like values masked, Terraform resources, shell entry scripts, SQL migrations: one `sql_migration`/`schema_migration` record per file plus one `table` and `extension` record at each declaration line, and `migration_descriptor` records for Liquibase-style changelogs).
+- `unresolved_refs(id PK, file_path, line, raw_symbol, language, ref_kind)`
 - `units(unit_id PK, language, tier, files_count, fallback_reason, message, manifest_sha256, files_sha256, indexed_at_commit)` (per-unit tier, captured fallback message and incremental state; §4.6)
-- `facts(id PK, kind, file_path, line, col, end_line, enclosing_fqname, name_text, name_fqname, receiver_text, args_json, extra_json)` (`call`, `decorator` and `register` facts from the shared Tier 2 extractor; arguments are classified as `literal`, `ref`, `inline_callable` or `other`).
+- `facts(id PK, kind, file_path, line, col, end_line, enclosing_fqname, name_text, name_fqname, receiver_text, args_json, extra_json)` (`call`, `decorator`, `register`, `compare`, `import`, `literal_const` and `inherits` facts from the shared Tier 2 extractor; arguments are classified as `literal`, `ref`, `inline_callable` or `other`).
+- `symbol_relations(source_fqname, target_fqname, kind, file_path, line, tier)` (`implements`, `extends` and `overrides` relations from Tier 1 SCIP `is_implementation` occurrences or the Tier 2 inheritance facts).
+- `resources(id, kind, value, role, symbol_fqname, file_path, line, rule_id)` (writer/reader evidence for one shared `res:<kind>:<value>` artifact, rebuilt after every graph build).
 - `synthetic_symbols(fqname, kind, file_path, start_line, start_col, end_line, end_col)` (`module` and `block` symbols for top-level and `__main__` code; `graph` uses them, while `query`, `planner` and the delta snapshot keep reading `symbols` only).
 
 ### 4.6 Incremental & Parallel Unit Indexing
@@ -215,7 +222,7 @@ Core tables:
 - **Re-index only what changed.** A changed unit gets a full re-index when its build manifest changed (dependency or toolchain changes can alter resolution), when its stored tier is Tier 1 (SCIP coverage is unit-wide), or when `--offline --strict-tier1` must re-check a unit that previously fell back with `tool_unavailable`. Otherwise only the changed files are re-parsed with Tier 2 while unchanged files keep their existing rows. Infra units are per-file, so their manifest hash alone never forces a whole-unit re-index (an `arch-indexer` version change still does).
 - **Dependent units.** Re-indexing a unit also re-indexes previously indexed files in other units whose references point at a removed symbol, including a symbol of a file that left the index, or whose `unresolved_refs` match a newly added symbol; a changed or removed Python file that can mount routers re-indexes the HTTP entrypoints it can affect. This keeps an incremental `graph.json` byte-identical to a `--force-full` run on the same tree.
 - **Deletions and moves.** A removed unit, a removed file and a file that moved to another unit are purged from every registered table before the new rows are inserted (§5.3).
-- **Schema rebuild.** `meta.schema_version` (also mirrored in `PRAGMA user_version`) carries the schema major; a database without `meta` or with a different major is rebuilt from scratch, which re-indexes every unit and drops stale rows. That is not a delta first run: the delta is still computed against `state.json` (§5.2).
+- **Schema rebuild.** `meta.schema_version` (also mirrored in `PRAGMA user_version`) carries the schema major; a database without `meta` or with a different major is rebuilt from scratch, which re-indexes every unit and drops stale rows. That is not a delta first run: the delta is still computed against `state.json` (§5.2). A database with the same major but an older minor is upgraded in place: the newer nullable columns (`files.ecosystem`, `unresolved_refs.ref_kind`) are added and the new tables are created without re-indexing.
 - **Bounded parallelism.** `index --max-parallel-units N` runs up to `N` planned full units' Tier 1 indexing concurrently (default `1`; non-positive values are rejected). Each plugin keeps its tree-sitter parser per thread, and the resulting SQLite rows are written serially in deterministic unit order, so parallel and serial runs produce identical rows and `graph.json`.
 
 ---
@@ -241,7 +248,7 @@ Unless `index --include-tests` was passed, test files (section 6.1) are excluded
 
 ### 5.3 Deleted-File Handling
 - Any path present in `state.json` but absent on disk is:
-  1. Purged from `index.db` (`files`, `symbols`, `references`, `entrypoints`, `infra_artifacts`, `unresolved_refs`, `facts`, `synthetic_symbols`, plus the owning `units` row when the whole unit is gone) and omitted from `graph.json`.
+  1. Purged from `index.db` (`files`, `symbols`, `references`, `entrypoints`, `infra_artifacts`, `unresolved_refs`, `facts`, `synthetic_symbols`, `symbol_relations`, `resources`, plus the owning `units` row when the whole unit is gone) and omitted from `graph.json`.
   2. Listed under `deleted_files` (with its previously indexed symbols under `deleted_symbols`) in `index-delta.json`, unless it is a test file and `--include-tests` was not passed (section 6.1).
   3. Mapped via the citation index to every doc section that cited the deleted file or its symbols, adding those sections to `impacted-sections.json`.
 - Any unupdated doc still citing a deleted file fails `arch-indexer check-citations`.
@@ -271,7 +278,7 @@ It exits **`0`** (`NO_CHANGES`) when no section remains impacted, **`2`** (`DELT
 Generated deterministically by `arch-indexer index` (zero LLM involvement):
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "repo_name": "string",
   "generated_at_commit": "git-sha-or-null",
   "include_tests": false,
@@ -306,7 +313,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "nodes": [
     {
       "id": "ep:POST:/api/orders",
-      "kind": "entrypoint | service | frontend_caller | module_symbol",
+      "kind": "entrypoint | service | frontend_caller | module_symbol | sidecar",
       "label": "POST /api/orders",
       "module_id": "mod:orders",
       "file": "src/orders/routes.py",
@@ -321,7 +328,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
     {
       "source": "ep:POST:/api/orders",
       "target": "sym:OrderService.create",
-      "kind": "calls | http_request | reads | writes | publishes | depends_on | registers | boots",
+      "kind": "calls | http_request | reads | writes | publishes | depends_on | registers | boots | implements",
       "file": "src/orders/routes.py",
       "line": 49,
       "tier": "scip",
@@ -334,10 +341,22 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   "external_sinks": [
     { "id": "ext:stripe", "kind": "http_api | webhook | smtp | llm_api", "rule_id": "builtin:stripe", "label": "Stripe API", "evidence": ["src/billing/client.py:28"] }
   ],
+  "resources": [
+    { "id": "res:path:faiss_index", "kind": "path", "value": "faiss_index", "writers": [{ "path": "src/indexer.py", "line": 42, "symbol": "src.indexer.build" }], "readers": [{ "path": "src/api.py", "line": 17, "symbol": "src.api.ask" }] }
+  ],
+  "sidecars": [
+    { "id": "svc:embed", "name": "embed", "image": "ghcr.io/acme/embed:latest", "source": { "path": "compose.yaml", "line": 4 }, "bound_by": [{ "path": "src/main/resources/application.yml", "line": 3 }] }
+  ],
   "unresolved_refs_count": 14
 }
 ```
-`nodes` holds entrypoints, frontend callers, services and synthetic `module_symbol` nodes; `files` lists every in-scope file with its module, language, tier, line count, infra flag and symbols, while modules, data stores and external sinks are separate top-level arrays. `service` nodes come from call, register and boundary edges, and `calls` edges only connect callable symbols (`function`, `method`, `class`, `interface`), so a call to a field, parameter or local variable creates no edge and no service node. A `registers` edge records a callback passed as an argument (a direct in-repo function or method is `exact`; callback-named methods of a passed class are `heuristic` in Python and TypeScript), and a `boots` edge records an application start (`SpringApplication.run`, `uvicorn.run`, `NestFactory.create`) launching scheduled, event, queue or runner entries under its package or `scanBasePackages` (`heuristic`). Every node and edge carries a deterministic `confidence` (`exact`, `heuristic` or `runtime`). Synthetic `<module>`/block symbols give top-level and `__main__` code a caller without entering `symbols`; a `<module>` symbol acts as a caller only in files that own a `main` or `cli` entry. A module's `tier` is its **majority** tier (ties resolve to `scip`), with `tier_mix` carrying the per-tier file counts, so one Tier 2 file cannot mislabel a mostly Tier 1 module. `tier_summary` is built from exactly the file set that produced `modules` and `nodes` (test files excluded unless `include_tests` is set): `total_files` equals the sum of module `file_count`s, and `excluded_test_files` reports the test rows that stay in `index.db` but are out of the architecture. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, SQLite, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`, LLM clients such as OpenAI, Anthropic, Ollama, LangChain/LangChain4j, Google GenAI and Hugging Face, and vector stores such as FAISS, Chroma, Qdrant, Pinecone, Weaviate, LanceDB and pgvector) plus infra artifacts, so each SQL table found in a migration contributes evidence to the single `sql`/`sql-schema` data store. Package rules compare the canonical package root of an import or callee (`src/arch_indexer/packages.py`), longest key first, so a rule only matches a boundary-delimited root segment or prefix and never a substring inside another symbol name. Boundary entries carry `rule_id` (`builtin:<key>`, the lexicographically smallest when several rules matched); a boundary found only through infra artifacts omits it. `llm_api` boundaries produce `http_request` edges, and `vector_store` boundaries produce `reads` or `writes` depending on whether the matched token names a store-write call. The exact rules live in `src/arch_indexer/graph_rules.py` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+`nodes` holds entrypoints, frontend callers, services, synthetic `module_symbol` nodes and infra `sidecar` nodes; `files` lists every in-scope file with its module, language, tier, line count, infra flag and symbols, while modules, data stores, external sinks, shared resources and sidecars are separate top-level arrays. `service` nodes come from call, register and boundary edges, and `calls` edges only connect callable symbols (`function`, `method`, `class`, `interface`), so a call to a field, parameter or local variable creates no edge and no service node. A `registers` edge records a callback passed as an argument (a direct in-repo function or method is `exact`; callback-named methods of a passed class are `heuristic` in Python and TypeScript), and a `boots` edge records an application start (`SpringApplication.run`, `uvicorn.run`, `NestFactory.create`) launching scheduled, event, queue or runner entries under its package or `scanBasePackages` (`heuristic`). Every node and edge carries a deterministic `confidence` (`exact`, `heuristic` or `runtime`). Synthetic `<module>`/block symbols give top-level and `__main__` code a caller without entering `symbols`; a `<module>` symbol acts as a caller only in files that own a `main` or `cli` entry. A module's `tier` is its **majority** tier (ties resolve to `scip`), with `tier_mix` carrying the per-tier file counts, so one Tier 2 file cannot mislabel a mostly Tier 1 module. `tier_summary` is built from exactly the file set that produced `modules` and `nodes` (test files excluded unless `include_tests` is set): `total_files` equals the sum of module `file_count`s, and `excluded_test_files` reports the test rows that stay in `index.db` but are out of the architecture. Data stores and external sinks are detected deterministically from known ORM/DB/client symbols (SQLAlchemy, Prisma, TypeORM, JPA/Hibernate, JDBC, Redis, Kafka, RabbitMQ, S3, SQLite, `requests`/`httpx`/`fetch`/`axios`/`RestTemplate`/`WebClient`, LLM clients such as OpenAI, Anthropic, Ollama, LangChain/LangChain4j, Google GenAI and Hugging Face, and vector stores such as FAISS, Chroma, Qdrant, Pinecone, Weaviate, LanceDB and pgvector) plus infra artifacts, so each SQL table found in a migration contributes evidence to the single `sql`/`sql-schema` data store. An in-repo repository type that extends or implements an external data-store base (for example a JPA repository interface) is attached to that store, so calls to its methods produce store edges instead of reads of the framework base; a pgvector extension table or `vector` column marks the matching entity as `vector_store`. Package rules compare the canonical package root of an import or callee (`src/arch_indexer/packages.py`), longest key first, so a rule only matches a boundary-delimited root segment or prefix and never a substring inside another symbol name. Boundary entries carry `rule_id` (`builtin:<key>`, the lexicographically smallest when several rules matched); a boundary found only through infra artifacts omits it. `llm_api` boundaries produce `http_request` edges, and `vector_store` boundaries produce `reads` or `writes` depending on whether the matched token names a store-write call. The exact rules live in `src/arch_indexer/rules/*.toml` (the client-symbol patterns in `src/arch_indexer/known_symbols.py` serve `query flow-trace`).
+
+**Cross-component edges.** `implements` edges connect an in-repo class or interface to the in-repo base it implements, and a `calls` edge to an in-repo interface method also expands through its `implements`/`overrides` relations to the implementing methods; an expansion with more targets than `[graph] dispatch_fanout_cap` (default `5`) is dropped and counted rather than truncated. A frontend API caller is linked to the backend HTTP entrypoint whose normalised route matches it (scheme, query string and `:id`/`{id}`/`<id>`/`${id}` parameters normalised), with a learned caller base prefix, a method check and a confidence of `exact` only for an identical route literal; a remaining tie emits no edge. In-repo HTTP client wrappers (functions that forward a URL parameter to `fetch`/`axios` or a known HTTP client, propagated up to three hops) seed synthetic frontend callers, and string constants or prefix-helper functions resolve their URL arguments.
+
+**Shared resources and sidecars.** `resources` lists a `res:<kind>:<value>` artifact only when it has at least one writer and one reader across two distinct modules or entry roots, with writer/reader evidence (`path`, `line`, optional `symbol`) on both sides. Compose/Kubernetes services whose image is not itself a data store and that are not the repository's own root build become `sidecar` nodes (`svc:*`) with `http_request` edges from the code that binds them; the `sidecars` array keeps each service's `image`, source site and the config sites that bind it. Outbound HTTP calls whose file or symbol binds a non-local host become `ext:host:<host>` sinks, and the generic `ext:http` sink is dropped when every candidate was retargeted. Secret-like configuration values are never persisted.
+
+**Rule overrides.** Boundary and entrypoint classification is data-driven. Built-in rules live in `src/arch_indexer/rules/boundaries.toml` and `src/arch_indexer/rules/entrypoints.toml` (package data); `index` merges `.arch-indexer.toml` overrides by `id` (a repository rule replaces a built-in with the same id, otherwise it is appended). The repository file accepts `[[rule]]` entries, a `[boundaries."<package>"]` shorthand and a `[graph] dispatch_fanout_cap` integer; `.arch-indexer.proposals.toml` is never loaded automatically. A malformed rule file or invalid rule value fails `index` with exit `1` before the graph is exported.
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before `index.db` is touched.
 
@@ -368,6 +387,9 @@ Generated as a **single self-contained HTML file** with inline CSS and vanilla J
   - **Trace flow**: select any Entrypoint to highlight and isolate the transitive subgraph from that Entrypoint to all reachable Data Stores and External Sinks, showing the step-by-step call chain with `file:line` and auth guards. When no data store or sink is reachable the trace is partial rather than empty: it follows the deepest reachable call path (ties resolve to the smaller node id), caps it at 12 hops, and the final step states why it stopped (`no outgoing calls`, `depth cap reached`, or no store or sink detected after the last node).
   - **Inspector panel**: clicking any node or edge displays its `file:line`, symbol, indexing tier, and incoming/outgoing edges; an edge also reports its `confidence`, and `registers` and `boots` edge kinds get a short reason label.
 
+### 6.4 Dependency Catalog (`docs/arch/dependencies.json`)
+`index` also writes a deterministic package dependency catalog next to the graph (`docs/arch/dependencies.json`, schema version `1.0`). It groups the union of import facts, unresolved references and build-manifest declarations (`pyproject.toml`, `requirements*.txt`, `package.json`, `pom.xml`) by `(ecosystem, package)` after canonicalising to the package root, and drops in-repo modules. Each package entry records its ecosystem (`pypi`, `npm`, `maven`, `go` or `unknown`), at most 20 `sites` (`path`, `line`) plus the untruncated `site_count`, the matched boundary `classification` (`rule_id`, `boundary`, `kind`, `label`, or `null`) and the rule `source` (`builtin`, `repo` or `none`). Packages are sorted by ecosystem and package and the file carries no timestamps, so repeated runs over an unchanged tree are byte-identical.
+
 ---
 
 ## 7. CLI Surface & Exit Codes
@@ -379,7 +401,7 @@ arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>] [--fetch-runtime
 arch-indexer toolchain prime --repo <path> [--cache-dir <dir>] [--fetch-runtime] [--maven-arg=<arg>]...
 arch-indexer toolchain status --repo <path>
 
-# 2. Deterministic indexing, delta detection, graph & viewer export
+# 2. Deterministic indexing, delta detection, graph, viewer & dependency export
 arch-indexer index <repo> \
   [--offline] [--fetch-runtime] [--strict-tier1] [--strict-tier1-any] [--force-full] \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
@@ -401,6 +423,8 @@ arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--include-test
 `index --strict-tier1-any` evaluates every unit before touching the store and exits `4` when any unit whose language has a Tier 1 indexer falls back, online or offline; `--offline --strict-tier1` remains the narrower tool/runtime-unavailable check.
 
 `refs` and `flow-trace` respect the same test scope as `entrypoints`: unless `--include-tests` is passed, a reference or call edge located in a test file is neither returned nor counted, and a test-file entrypoint cannot start a trace.
+
+`flow-trace` starts at the entrypoint's `symbols` definition, or at its `synthetic_symbols` block when a `main` or CLI entry has no enclosing indexed symbol, and expands the same cross-component edges as `graph.json`: an in-repo interface call through its `implements`/`overrides` relations (bounded by the dispatch fan-out cap), `registers` callbacks, `boots` triggers and frontend-to-backend `http_request` links. Synthetic rows never appear in `query def` or `query file-symbols`.
 
 `entrypoints --module` and `module-summary` accept three spellings of a module: the canonical id `mod:<key>` and the bare key `<key>` that `docs/graph.json` and `master-index.json` emit (`work-plan.json` lists the bare key in `assigned_modules`), and the dotted package namespace (`pkg.mod`) for a specific package slice.
 
@@ -550,7 +574,7 @@ The thin skill instructs Firstmate to run the following 4 steps:
         - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates. The citation gate tolerates empty required sections, because a document started from the skeleton is mostly empty; the next `index` run re-impacts them with `empty_section` (§5.5).
         - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
-     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json` and `docs/flow-viewer.html` artifacts written by `arch-indexer index`).
+     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json`, `docs/flow-viewer.html` and `docs/arch/dependencies.json` artifacts written by `arch-indexer index`).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
 
 4. **Step 4 — Summary Report**

@@ -685,9 +685,8 @@ def _dispatch_edges(
                         "line": rel.get("line") or symbols_by_fqname[from_fq]["start_line"],
                     }
                 )
-        elif rkind == "overrides":
-            if from_fq in symbols_by_fqname and to_fq in symbols_by_fqname:
-                overrides_by_method.setdefault(to_fq, set()).add(from_fq)
+        elif rkind == "overrides" and from_fq in symbols_by_fqname and to_fq in symbols_by_fqname:
+            overrides_by_method.setdefault(to_fq, set()).add(from_fq)
 
     # Collect transitive implementers bounded cycle-safely.
     def all_implementers(base_fq: str) -> list[str]:
