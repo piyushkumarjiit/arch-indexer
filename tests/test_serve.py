@@ -151,3 +151,135 @@ def test_serve_live_jaeger_polling_serves_in_memory_without_mutating_docs(
         jaeger_srv.shutdown()
         jaeger_srv.server_close()
         j_thread.join(timeout=2)
+
+
+def test_serve_live_jaeger_failure_returns_unavailable_not_stale_static(tmp_path: Path) -> None:
+    repo, cache = _make_indexed_repo(tmp_path)
+    arch_dir = repo / "docs" / "arch"
+    (arch_dir / "runtime-overlay.v1.json").write_text(
+        '{"node_metrics": {}, "edge_metrics": {}, "stale": true}\n', encoding="utf-8"
+    )
+    (arch_dir / "runtime-overlay.v1.js").write_text(
+        'window.__ARCH_RUNTIME__ = {"stale": true};\n', encoding="utf-8"
+    )
+
+    class FailingJaeger(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    jaeger_srv = ThreadingHTTPServer(("127.0.0.1", 0), FailingJaeger)
+    jaeger_port = jaeger_srv.server_address[1]
+    j_thread = threading.Thread(target=jaeger_srv.serve_forever, daemon=True)
+    j_thread.start()
+
+    server = None
+    s_thread = None
+    try:
+        server, _state = create_server(
+            repo,
+            port=0,
+            jaeger_url=f"http://127.0.0.1:{jaeger_port}",
+            service="rag-api",
+            cache_dir=str(cache),
+        )
+        serve_port = server.server_address[1]
+        s_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        s_thread.start()
+
+        for overlay_path in ("arch/runtime-overlay.v1.json", "arch/runtime-overlay.v1.js"):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{serve_port}/{overlay_path}", timeout=5)
+                raise AssertionError(f"Expected 503 for {overlay_path}")
+            except urllib.error.HTTPError as err:
+                assert err.code == 503
+                assert err.headers.get("Cache-Control") == "no-store"
+                assert err.read() == b"Live runtime overlay unavailable\n"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if s_thread is not None:
+            s_thread.join(timeout=2)
+        jaeger_srv.shutdown()
+        jaeger_srv.server_close()
+        j_thread.join(timeout=2)
+
+
+def test_serve_live_jaeger_stale_overlay_is_marked_after_refresh_failure(
+    tmp_path: Path,
+) -> None:
+    repo, cache = _make_indexed_repo(tmp_path)
+    payload = (FIXTURES_DIR / "rag_ask_route.json").read_bytes()
+    mode = {"fail": False}
+
+    class SwitchableJaeger(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if mode["fail"]:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    jaeger_srv = ThreadingHTTPServer(("127.0.0.1", 0), SwitchableJaeger)
+    jaeger_port = jaeger_srv.server_address[1]
+    j_thread = threading.Thread(target=jaeger_srv.serve_forever, daemon=True)
+    j_thread.start()
+
+    server = None
+    s_thread = None
+    try:
+        server, state = create_server(
+            repo,
+            port=0,
+            jaeger_url=f"http://127.0.0.1:{jaeger_port}",
+            service="rag-api",
+            cache_dir=str(cache),
+        )
+        serve_port = server.server_address[1]
+        s_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        s_thread.start()
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{serve_port}/arch/runtime-overlay.v1.json", timeout=5
+        ) as resp:
+            assert resp.headers.get("X-Arch-Overlay-Status") == "fresh"
+            fresh_overlay = json.loads(resp.read().decode("utf-8"))
+
+        mode["fail"] = True
+        assert state.refresh_from_jaeger() is None
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{serve_port}/arch/runtime-overlay.v1.json", timeout=5
+        ) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("X-Arch-Overlay-Status") == "stale"
+            assert json.loads(resp.read().decode("utf-8")) == fresh_overlay
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{serve_port}/arch/runtime-overlay.v1.js", timeout=5
+        ) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("X-Arch-Overlay-Status") == "stale"
+            assert resp.read().decode("utf-8").startswith("window.__ARCH_RUNTIME__ = {")
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if s_thread is not None:
+            s_thread.join(timeout=2)
+        jaeger_srv.shutdown()
+        jaeger_srv.server_close()
+        j_thread.join(timeout=2)

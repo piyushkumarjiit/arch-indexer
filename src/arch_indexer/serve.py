@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import sys
 import threading
 import urllib.parse
 from http import HTTPStatus
@@ -21,6 +22,8 @@ from arch_indexer.viewer.renderer import safe_json_embed
 DEFAULT_SERVE_HOST = "127.0.0.1"
 DEFAULT_SERVE_PORT = 8765
 DEFAULT_POLL_INTERVAL_S = 15
+
+_LIVE_OVERLAY_PATHS = frozenset({"arch/runtime-overlay.v1.json", "arch/runtime-overlay.v1.js"})
 
 _MIME_OVERRIDES: dict[str, str] = {
     ".html": "text/html; charset=utf-8",
@@ -95,14 +98,15 @@ class LiveOverlayState:
                 self._overlay = overlay
                 self._last_error = None
             return overlay
-        except Exception as exc:  # pragma: no cover - guarded fallback
+        except Exception as exc:
+            sys.stderr.write(f"Warning: live runtime overlay refresh failed: {exc}\n")
             with self._lock:
                 self._last_error = str(exc)
             return None
 
-    def get_overlay(self) -> dict[str, Any] | None:
+    def get_overlay_snapshot(self) -> tuple[dict[str, Any] | None, str | None]:
         with self._lock:
-            return self._overlay
+            return self._overlay, self._last_error
 
 
 def _make_handler(
@@ -119,12 +123,15 @@ def _make_handler(
             *,
             send_body: bool = True,
             no_store: bool = False,
+            headers: dict[str, str] | None = None,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             if no_store:
                 self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if send_body:
                 self.wfile.write(body)
@@ -133,35 +140,36 @@ def _make_handler(
             raw_path = urllib.parse.urlsplit(self.path).path
             rel_path = "flow-viewer.html" if raw_path in ("", "/") else raw_path.lstrip("/")
 
-            if live_state is not None and live_state.jaeger_url:
+            if live_state is not None and live_state.jaeger_url and rel_path in _LIVE_OVERLAY_PATHS:
+                overlay, error = live_state.get_overlay_snapshot()
+                if overlay is None:
+                    self._send_bytes(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "text/plain; charset=utf-8",
+                        b"Live runtime overlay unavailable\n",
+                        send_body=send_body,
+                        no_store=True,
+                    )
+                    return
                 if rel_path == "arch/runtime-overlay.v1.json":
-                    overlay = live_state.get_overlay()
-                    if overlay is not None:
-                        data = (
-                            json.dumps(overlay, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-                        ).encode("utf-8")
-                        self._send_bytes(
-                            HTTPStatus.OK,
-                            "application/json; charset=utf-8",
-                            data,
-                            send_body=send_body,
-                            no_store=True,
-                        )
-                        return
-                elif rel_path == "arch/runtime-overlay.v1.js":
-                    overlay = live_state.get_overlay()
-                    if overlay is not None:
-                        js_data = (
-                            f"window.__ARCH_RUNTIME__ = {safe_json_embed(overlay, compact=True)};\n"
-                        ).encode()
-                        self._send_bytes(
-                            HTTPStatus.OK,
-                            "application/javascript; charset=utf-8",
-                            js_data,
-                            send_body=send_body,
-                            no_store=True,
-                        )
-                        return
+                    data = (
+                        json.dumps(overlay, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                    ).encode("utf-8")
+                    content_type = "application/json; charset=utf-8"
+                else:
+                    data = (
+                        f"window.__ARCH_RUNTIME__ = {safe_json_embed(overlay, compact=True)};\n"
+                    ).encode()
+                    content_type = "application/javascript; charset=utf-8"
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    content_type,
+                    data,
+                    send_body=send_body,
+                    no_store=True,
+                    headers={"X-Arch-Overlay-Status": "stale" if error is not None else "fresh"},
+                )
+                return
 
             try:
                 target = (resolved_root / rel_path).resolve()
