@@ -7,6 +7,7 @@ from pathlib import Path
 
 from arch_indexer.cli import EXIT_DELTA_DETECTED, EXIT_ERROR, EXIT_OK, main
 from arch_indexer.config import RepoCachePaths
+from arch_indexer.mermaid_gen import diagram_ids, load_parts_for_docs
 from arch_indexer.planner import build_master_index, normalize_section_id, run_plan
 from arch_indexer.storage.state import write_json
 from arch_indexer.store import IndexStore
@@ -126,6 +127,130 @@ def _setup_synthetic_cache(
         )
 
     return cache_paths
+
+
+def test_plan_by_modules_uses_parts_diagram_axis(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+    modules = [
+        {"name": "billing", "line_count": 10, "symbol_count": 1, "files": ["src/billing.py"]},
+        {"name": "orders", "line_count": 10, "symbol_count": 1, "files": ["src/orders.py"]},
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec3",
+            "heading": "3. Control & Data Flows",
+            "modules": ["billing", "orders"],
+            "diagram_ids": [],
+            "cited_files": [],
+            "reasons": ["modified_file"],
+        }
+    ]
+    graph_nodes = [
+        {
+            "id": "ep:pay",
+            "kind": "entrypoint",
+            "module_id": "mod:billing",
+            "name": "pay",
+            "metadata": {"route": "/billing/pay"},
+        },
+        {
+            "id": "ep:order",
+            "kind": "entrypoint",
+            "module_id": "mod:orders",
+            "name": "order",
+            "metadata": {"route": "/orders/create"},
+        },
+    ]
+    _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, graph_nodes=graph_nodes
+    )
+    arch = repo / "docs" / "arch"
+    arch.mkdir(parents=True)
+    write_json(
+        arch / "overview.json",
+        {
+            "parts": [
+                {"id": "part:checkout", "group_ids": ["mod:billing"]},
+                {"id": "part:shipping", "group_ids": ["mod:orders"]},
+            ],
+            "groups": [
+                {"id": "mod:billing", "name": "billing"},
+                {"id": "mod:orders", "name": "orders"},
+            ],
+            "flow_index": [],
+        },
+    )
+
+    assert run_plan(repo, by="modules", cache_dir=cache) == EXIT_OK
+
+    cache_paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache)
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packet = next(p for p in plan["packets"] if "design-sec3" in p["section_ids"])
+    graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+    accepted = set(diagram_ids(graph, parts=load_parts_for_docs(repo, "docs")))
+    ids = set(packet["pre_rendered_diagram_ids"])
+
+    assert ids == {"flow-checkout", "flow-shipping"}
+    assert ids <= accepted
+    assert not ids & {"flow-billing", "flow-orders"}
+
+
+def test_plan_by_parts_uses_legacy_diagram_axis_for_one_part(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+    modules = [
+        {"name": "billing", "line_count": 10, "symbol_count": 1, "files": ["src/billing.py"]}
+    ]
+    sections = [
+        {
+            "doc": "docs/DESIGN.md",
+            "section_id": "design-sec3",
+            "heading": "3. Control & Data Flows",
+            "modules": ["billing"],
+            "diagram_ids": [],
+            "cited_files": [],
+            "reasons": ["modified_file"],
+        }
+    ]
+    graph_nodes = [
+        {
+            "id": "ep:pay",
+            "kind": "entrypoint",
+            "module_id": "mod:billing",
+            "name": "pay",
+            "metadata": {"route": "/billing/pay"},
+        }
+    ]
+    _setup_synthetic_cache(
+        repo, cache, modules=modules, impacted_sections=sections, graph_nodes=graph_nodes
+    )
+    arch = repo / "docs" / "arch"
+    arch.mkdir(parents=True)
+    write_json(
+        arch / "overview.json",
+        {
+            "parts": [{"id": "part:checkout", "group_ids": ["mod:billing"]}],
+            "groups": [{"id": "mod:billing", "name": "billing"}],
+            "flow_index": [],
+        },
+    )
+
+    assert run_plan(repo, by="parts", cache_dir=cache) == EXIT_OK
+
+    cache_paths = RepoCachePaths.from_repo(repo, cache_dir_override=cache)
+    plan = json.loads(cache_paths.work_plan_json.read_text(encoding="utf-8"))
+    packet = next(p for p in plan["packets"] if "design-sec3" in p["section_ids"])
+    graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+    accepted = set(diagram_ids(graph))
+    ids = set(packet["pre_rendered_diagram_ids"])
+
+    assert ids == {"flow-billing"}
+    assert ids <= accepted
+    assert "flow-checkout" not in ids
 
 
 def test_missing_input_failures(tmp_path: Path):
@@ -673,12 +798,16 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
     assert billing_pkt["line_count"] == by_name["billing"]["line_count"]
     assert billing_pkt["symbol_count"] == by_name["billing"]["symbol_count"]
     assert billing_pkt["delta_slice"]["modified_files"] == ["src/billing/invoices.py"]
-    assert "flow-billing" in billing_pkt["pre_rendered_diagram_ids"]
+    graph = json.loads((repo / "docs" / "graph.json").read_text(encoding="utf-8"))
+    accepted = set(diagram_ids(graph, parts=load_parts_for_docs(repo, "docs")))
+    assert set(billing_pkt["pre_rendered_diagram_ids"]) <= accepted
+    assert "flow-billing" not in billing_pkt["pre_rendered_diagram_ids"]
 
     orders_pkt = packets["design-sec2-mod-orders"]
     assert orders_pkt["assigned_modules"] == ["orders"]
     assert orders_pkt["line_count"] == by_name["orders"]["line_count"]
-    assert "flow-orders" in orders_pkt["pre_rendered_diagram_ids"]
+    assert set(orders_pkt["pre_rendered_diagram_ids"]) <= accepted
+    assert "flow-orders" not in orders_pkt["pre_rendered_diagram_ids"]
 
     # Missing sections from multiple submodules in payments collapse to one canonical packet
     assert "design-sec2-mod-payments" in packets

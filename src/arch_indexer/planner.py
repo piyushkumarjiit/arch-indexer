@@ -825,18 +825,22 @@ def run_plan(
     active_parts: list[dict[str, Any]] | None = (
         overview_parts if effective_by == "parts" and overview_parts else None
     )
+    diagram_parts: list[dict[str, Any]] | None = (
+        overview_parts if len(overview_parts) >= 2 else None
+    )
     verified_descriptions = (
-        _load_verified_descriptions(docs_root) if active_parts is not None else {}
+        _load_verified_descriptions(docs_root) if diagram_parts is not None else {}
     )
 
     mod_to_part_id: dict[str, str] = {}
-    if active_parts is not None and isinstance(overview, Mapping):
+    mapping_parts = diagram_parts if diagram_parts is not None else active_parts
+    if mapping_parts is not None and isinstance(overview, Mapping):
         grp_name_by_id = {
             str(g.get("id") or ""): str(g.get("name") or "")
             for g in (overview.get("groups") or ())
             if isinstance(g, Mapping)
         }
-        for part in active_parts:
+        for part in mapping_parts:
             pid = str(part.get("id") or "")
             for gid in part.get("group_ids") or ():
                 gid_str = str(gid)
@@ -1018,7 +1022,7 @@ def run_plan(
                             unhandled,
                             sec.diagram_ids,
                             graph,
-                            parts=active_parts,
+                            parts=diagram_parts,
                             assigned_parts=[pid],
                         )
                         pkt_descs = _packet_descriptions_subset(
@@ -1078,7 +1082,7 @@ def run_plan(
                         [m],
                         sec.diagram_ids,
                         graph,
-                        parts=active_parts,
+                        parts=diagram_parts,
                     )
                     draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
                     pkt = Packet(
@@ -1132,7 +1136,7 @@ def run_plan(
                     p_mods,
                     [],
                     graph,
-                    parts=active_parts,
+                    parts=diagram_parts,
                     assigned_parts=[pid],
                 )
                 pkt_descs = _packet_descriptions_subset(
@@ -1178,7 +1182,7 @@ def run_plan(
                     include_tests=include_tests,
                 )
                 d_diagrams = resolve_packet_diagram_ids(
-                    [sec.sec_id], slice_mods, sec.diagram_ids, graph, parts=active_parts
+                    [sec.sec_id], slice_mods, sec.diagram_ids, graph, parts=diagram_parts
                 )
                 pkt = Packet(
                     packet_id=pkt_id,
@@ -1217,7 +1221,7 @@ def run_plan(
                     module_paths,
                     graph,
                     include_tests=include_tests,
-                    parts=active_parts,
+                    parts=diagram_parts,
                     mod_to_part_id=mod_to_part_id,
                     overview=overview if isinstance(overview, Mapping) else None,
                     verified_descriptions=verified_descriptions,
@@ -1240,7 +1244,7 @@ def run_plan(
                 module_paths,
                 graph,
                 include_tests=include_tests,
-                parts=active_parts,
+                parts=diagram_parts,
                 mod_to_part_id=mod_to_part_id,
                 overview=overview if isinstance(overview, Mapping) else None,
                 verified_descriptions=verified_descriptions,
