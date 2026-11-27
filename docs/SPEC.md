@@ -51,6 +51,8 @@ arch-indexer/
 │   ├── graph_rules.py               # Deterministic data-store/sink classification rules
 │   ├── rule_engine.py               # TOML boundary/entrypoint rules, repo overrides & evaluators
 │   ├── rules/                       # Built-in boundary & entrypoint rules (package data)
+│   ├── rules/dataflow/              # Original taint sources/sanitizers/sinks per language (package data)
+│   ├── dataflow/                    # Opengrep & Joern adapters, taint rule pack, SARIF/CPG normalisation
 │   ├── dependencies.py              # docs/arch/dependencies.json package dependency catalog
 │   ├── resources.py                 # Shared res:<kind>:<value> writer/reader discovery
 │   ├── route_link.py                # Frontend-to-backend route matching
@@ -117,6 +119,7 @@ Default root: `${XDG_CACHE_HOME:-~/.cache}/arch-indexer` (overridable via `ARCH_
 ├── tools/                           # Pinned indexers & isolated node/jar installations
 │   ├── node/                        # Local npm prefix for scip-python & scip-typescript
 │   ├── java/                        # scip-java launcher/JAR cache
+│   ├── dataflow/                    # Optional Opengrep & Joern installs and Joern archives (--with)
 │   └── manifest.lock.json           # Installed versions & verified hashes
 └── repos/
     └── <sha256(realpath(repo))[:16]>/
@@ -151,7 +154,8 @@ Only human-facing docs and viewer outputs are written to `<target_repo>/docs/`:
 │   ├── descriptions.js              # Its JSONP twin: `null` until `describe check` passes, then the validated payload
 │   ├── runtime-overlay.v1.json      # Joined runtime metrics & sampled traces (§6.3); only `trace ingest` writes it
 │   ├── runtime-overlay.v1.js        # window.__ARCH_RUNTIME__ sidecar (null stub until the overlay JSON exists)
-│   ├── dataflow.v1.js               # null JSONP stub until dataflow.v1.json exists
+│   ├── dataflow.v1.json             # Deep dataflow edges written by `arch-indexer dataflow` (§7.1)
+│   ├── dataflow.v1.js               # Its JSONP twin; null stub until that command runs
 │   └── dependencies.json            # Deterministic package dependency catalog (§6.4)
 └── flow-viewer.html                 # Offline single-file interactive viewer (no server/network)
 ```
@@ -179,6 +183,8 @@ All external tools and parsers are pinned to exact versions:
 | `coursier` | `2.1.27` (launcher verified by SHA-256) | `<cache>/tools/java` | Bootstraps the `scip-java` launcher |
 | Eclipse Temurin JDK | `17.0.21.1+2` (linux x64 / aarch64, SHA-256 verified) | `<cache>/runtimes` | Portable Java runtime for `--fetch-runtime` when host `java` is missing or older than the minimum |
 | Apache Maven | `3.9.16` (binary tarball, SHA-256 verified) | `<cache>/runtimes` | Portable Maven for `--fetch-runtime` when host `mvn` is missing or below the repo's declared Maven requirement |
+| `opengrep` | `2.1.0` (linux x64/aarch64 and macOS x64/arm64, SHA-256 verified) | `<cache>/tools/dataflow` | Optional deep taint engine, subprocess only (LGPL-2.1) |
+| `joern` | `4.0.693` (linux x64/aarch64 and macOS x64/arm64 zip, SHA-256 verified; needs JDK >= 17) | `<cache>/tools/dataflow` | Opt-in CPG dataflow engine, subprocess only (Apache-2.0) |
 | `protobuf` | `5.29.3` | `arch-indexer` venv | Parse `index.scip` binary directly (no `scip` CLI needed) |
 | `tree-sitter` | `0.23.2` | `arch-indexer` venv | Tier 2 fallback parser runtime |
 | `tree-sitter-python` | `0.23.6` | `arch-indexer` venv | Tier 2 Python grammar |
@@ -187,6 +193,8 @@ All external tools and parsers are pinned to exact versions:
 
 ### 3.3 Installation & Network Boundary
 - `arch-indexer toolchain ensure --repo <path>` detects languages in `<path>` and installs only the missing pinned indexers into `<cache>/tools/`.
+- `arch-indexer toolchain ensure --with opengrep|joern` (repeatable) installs the requested optional dataflow engine(s) into `<cache>/tools/dataflow/`, verifying each download's SHA-256; `--repo` becomes optional when `--with` is passed. Joern additionally requires JDK >= 17, which `--fetch-runtime` can supply from the portable runtime. `toolchain status` reports both engines in a separate optional-engines section rather than as missing Tier 1 indexers.
+- `arch-indexer dataflow <path>` never downloads: it resolves an already installed engine and exits `4` when its engine (or, for Joern, a usable JDK) is absent (§7.2).
 - `arch-indexer toolchain prime --repo <path>` runs the repository's resolved host or portable Maven online with `-B -DskipTests clean install` (plus repeatable `--maven-arg=<arg>`), so a later `index --offline` can resolve sibling modules and `maven-clean-plugin`; it accepts `--fetch-runtime` and `--cache-dir`, requires a root `pom.xml` and usable Java/Maven, and exits `1` otherwise.
 - `arch-indexer index <path>` runs `toolchain ensure` automatically unless `--offline` is passed; `index --fetch-runtime` is forwarded to that automatic ensure. With `--offline`, missing tools do not trigger network access: if a required Tier 1 indexer or its runtime is missing, the plugin falls back to Tier 2 by default, or exits with code `4` when `--strict-tier1` is also passed. The only indexing-time network opt-in is `--maven-online`, which drops Maven's `-o` for that run.
 - **Host runtimes**: verifies `python3 >= 3.10`, `node >= 18` (for TS/Python SCIP), and host `java >= 17` + `mvn` (for Java SCIP). Host Maven is also validated against the repository: every `RequireMavenVersion` range in its `pom.xml` files is parsed (properties resolved). A host below that requirement counts as unusable and is reported by `toolchain status` (for example `repo requires [3.9.0,4.0.0)`); being below the pinned Maven version only adds a `toolchain status` note while the host stays usable. If host `java`/`mvn` is absent or unusable and no pinned portable runtime has been fetched, Java falls back cleanly to Tier 2 tree-sitter (see Disagreements). `--fetch-runtime` downloads the pinned Temurin JDK into `<cache>/runtimes/` for Java repos where host `java` is missing or too old, and the pinned Apache Maven when the repo contains a `pom.xml` and host `mvn` is missing or unusable (for example below the repo requirement), provided the pinned Maven satisfies the repo requirement when one is declared (otherwise Java stays on Tier 2); it verifies each archive's SHA-256, extracts it with path-traversal checks, records it in the manifest lock, and uses it (via `JAVA_HOME`/`PATH` for that subprocess only) for `scip-java`. The flag governs downloads only: a runtime that was already downloaded and checksum-verified is reused on later `ensure` runs without the flag, and `ensure` prints one line naming each portable runtime it used (`downloaded` or `reused`). A failed runtime download exits non-zero after the independent Node tools have been installed and recorded.
@@ -242,6 +250,7 @@ Core tables:
 - `symbol_relations(source_fqname, target_fqname, kind, file_path, line, tier)` (`implements`, `extends` and `overrides` relations from Tier 1 SCIP `is_implementation` occurrences or the Tier 2 inheritance facts).
 - `resources(id, kind, value, role, symbol_fqname, file_path, line, rule_id)` (writer/reader evidence for one shared `res:<kind>:<value>` artifact, rebuilt after every graph build).
 - `synthetic_symbols(fqname, kind, file_path, start_line, start_col, end_line, end_col)` (`module` and `block` symbols for top-level and `__main__` code; `graph` uses them, while `query`, `planner` and the delta snapshot keep reading `symbols` only).
+- `dataflow_edges(id PK, tool, tool_version, rule_id, entry_id, source_fqname, source_file, source_line, sink_fqname, sink_file, sink_line, sink_boundary_id, path_json, payload_hint, sarif_fingerprint)` (deep-dataflow paths normalised from Opengrep SARIF or Joern output; only `arch-indexer dataflow` writes the table, and `index` never deletes its rows).
 
 ### 4.6 Incremental & Parallel Unit Indexing
 `index.db` is updated in place instead of rebuilt on every run; only `--force-full` or an incompatible schema major clears it.
@@ -409,9 +418,9 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 ### 6.3 Static Offline HTML Viewer (`docs/flow-viewer.html`)
 `index` generates one **single self-contained HTML file** with inline CSS and JS (no external CDN, no web server, no network) from one of two renderers, selected by `--viewer` (default `v2`). Both open directly over `file://`.
 
-**v2 (default, `--viewer v2`).** `arch_indexer.viewer.render_viewer_v2` inlines the pre-built React Flow + ELKjs app from `viewer/dist/` (rebuilt with `make viewer`), embeds `docs/arch/overview.json`, and references the sibling `docs/arch/` bundle rather than inlining it: one JSONP detail chunk per part under `chunks/`, `chunks/search.js` loaded on first search, and the unmodified `vendor/elk-worker.min.js`. Every optional layer file is a written `null` JSONP stub until its producer exists (`descriptions.js`, `runtime-overlay.v1.js`, `dataflow.v1.js`), so the page opens from `file://` with zero console errors: `describe check` replaces the `descriptions.js` stub with the validated descriptions (§8.4) and `index` marks individual entries stale when a cited span changes, while `trace ingest` fills `runtime-overlay.v1.json` and its `.js` sidecar and `index` rewrites that `.js` stub only when the JSON is absent. A described node shows its summary (dimmed with a `stale` badge when stale), the inspector shows its summary and details, and the flow banner shows the flow title and the current step's narration. `index` writes the v1 viewer instead when the pre-built assets are missing.
+**v2 (default, `--viewer v2`).** `arch_indexer.viewer.render_viewer_v2` inlines the pre-built React Flow + ELKjs app from `viewer/dist/` (rebuilt with `make viewer`), embeds `docs/arch/overview.json`, and references the sibling `docs/arch/` bundle rather than inlining it: one JSONP detail chunk per part under `chunks/`, `chunks/search.js` loaded on first search, and the unmodified `vendor/elk-worker.min.js`. Every optional layer file is a written `null` JSONP stub until its producer exists (`descriptions.js`, `runtime-overlay.v1.js`, `dataflow.v1.js`), so the page opens from `file://` with zero console errors: `describe check` replaces the `descriptions.js` stub with the validated descriptions (§8.4) and `index` marks individual entries stale when a cited span changes, while `trace ingest` fills `runtime-overlay.v1.json` and its `.js` sidecar, `arch-indexer dataflow` fills `dataflow.v1.json` and its `.js` sidecar, and `index` rewrites a `.js` stub only when its JSON is absent. A described node shows its summary (dimmed with a `stale` badge when stale), the inspector shows its summary and details, and the flow banner shows the flow title and the current step's narration. `index` writes the v1 viewer instead when the pre-built assets are missing.
 - **Levels**: overview (parts, boundaries and the summary panel) -> part (three `Used by` / `Inside` / `Uses` bands derived from the real ELK partition bounds) -> group (directory chips once a group holds more than `24` files) -> file (`22` symbols by degree, then `+N more`) -> symbol (call tree to depth 3 plus the flows through it). A view draws at most `300` nodes; the rest fold into one `+N` node whose items the inspector lists as jump links.
-- **Layers and edges**: control (`calls`, `registers`, `boots`, `implements`), data (`reads`, `writes`, `publishes`, `dataflow`, plus `ds:`/`res:` boundaries) and integration (`http_request`, plus `ext:`/`svc:` boundaries) can each be switched off, and runtime joins once an overlay exists. One merged edge is drawn per node pair from the kinds its active layers leave visible, and the edge inspector reports the per-kind breakdown. A boundary hides when its own layer is off and nothing active connects it.
+- **Layers and edges**: control (`calls`, `registers`, `boots`, `implements`), data (`reads`, `writes`, `publishes`, `dataflow`, plus `ds:`/`res:` boundaries) and integration (`http_request`, plus `ext:`/`svc:` boundaries) can each be switched off, and runtime joins once an overlay exists. One merged edge is drawn per node pair from the kinds its active layers leave visible, and the edge inspector reports the per-kind breakdown. A boundary hides when its own layer is off and nothing active connects it. When `dataflow.v1.json` exists, the Data-Flow panel lists its paths and the inspector shows every step (`file:line`, enclosed fqname and `payload_hint`) as a citation that `[viewer] editor_url` can open.
 - **Inspector and navigation**: clicking a node or edge shows its `file:line`, kind, part/group, tier and `confidence`, its docstring, incoming and outgoing edges and the flows through it, with `evidence[]` copyable as `path:line` and linked to an editor when `.arch-indexer.toml` sets `[viewer] editor_url` (a template with `{abs_path}`, `{file}` and `{line}`; allowed URL schemes are `vscode:`, `vscode-insiders:`, `cursor:`, `idea:`, `jetbrains:`, `zed:`, `subl:`, `http:`, `https:`, and `file:`, validated at config load and before link rendering). Click selects, double-click or Enter drills down, Backspace or the breadcrumb goes up, `/` or Ctrl-K searches, and `#node=<id>` deep-links a node.
 - **Flow walkthrough**: a banner with "step k of n", prev/next on the arrow keys, a `Follow step` toggle (on by default) that moves the selection with the walkthrough, non-path nodes dimmed, and the final partial step labelled with its `end_reason`.
 - **Overlays**: `changed`/`new` badges from the bundle `delta`, and the Tier-2 banner shown while `tier_summary.tier2_modules` is non-empty ("N modules indexed at Tier 2: edges may be incomplete"). The banner collapses to a pill but never disappears, and its module chips are capped at `12` plus `+N more`.
@@ -436,7 +445,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 ### 7.1 Commands
 ```bash
 # 1. Toolchain management (network-capable; installs the pinned indexers)
-arch-indexer toolchain ensure --repo <path> [--cache-dir <dir>] [--fetch-runtime]
+arch-indexer toolchain ensure [--repo <path>] [--cache-dir <dir>] [--fetch-runtime] [--with opengrep|joern]...
 arch-indexer toolchain prime --repo <path> [--cache-dir <dir>] [--fetch-runtime] [--maven-arg=<arg>]...
 arch-indexer toolchain status --repo <path>
 
@@ -469,6 +478,8 @@ arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--include-test
 
 `entrypoints --module` and `module-summary` accept three spellings of a module: the canonical id `mod:<key>` and the bare key `<key>` that `docs/graph.json` and `master-index.json` emit (`work-plan.json` lists the bare key in `assigned_modules`), and the dotted package namespace (`pkg.mod`) for a specific package slice.
 
+`dataflow` runs only after `index` and only over in-scope entrypoints (`query entrypoints` scope; test files are always excluded, with no `--include-tests` equivalent). It keeps flows that start at an entry handler and end at a data-store or external-sink boundary, persists them in `dataflow_edges`, and writes `docs/arch/dataflow.v1.json` plus its `dataflow.v1.js` JSONP twin; it never rewrites `graph.json`, `flow-viewer.html` or `chunks/*.js`, and `index` never runs it or deletes its rows. Opengrep is the default engine (`--no-interfile` limits it to intra-file taint); `--engine joern` is opt-in. Both engines are pinned in `toolchain.toml`, resolved from `<cache>/tools/dataflow/`, and run as isolated offline subprocesses, never linked or bundled. An unfiltered run that covers every entrypoint replaces every stored edge; when `--max-entries` (default `50`) trims it, only the retained entrypoints are refreshed in sorted entry-id order and the edges of entrypoints beyond the cap are kept. Repeatable `--entry` (also subject to the `--max-entries` cap) refreshes only the matching entrypoints and keeps every other entrypoint's stored edges. The sidecar's `tool`/`tool_version` are `mixed` when the stored rows disagree. A missing engine, or a Joern JDK below 17, exits `4` before any edge is written; a missing `index.db` exits `1`.
+
 `entrypoints` rows expose two line numbers. `line` is the discovery line (the decorator, route registration, CLI block or `__main__` guard), while `symbol_line` is the indexed definition line of `symbol_fqname` in the row's own `file_path` (falling back to `line` when the symbol is not defined there); citations use `symbol_line` (§8.2). Text output appends `symbol_line=<n>` when it differs from `line`.
 
 ```bash
@@ -487,24 +498,30 @@ arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs] [--diagrams <j
 arch-indexer check-citations <repo> [--docs-dir docs] [--file <path>] [--format json|text]
 arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 
-# 7. Plain-language descriptions (§8.4)
+# 7. Optional deep dataflow (offline; install the engine with `toolchain ensure --with`)
+arch-indexer dataflow <repo> \
+  [--engine opengrep|joern] [--entry <entrypoint-id>]... [--max-entries 50] \
+  [--timeout-sec 600] [--no-interfile] [--jvm-max-heap-mb <mb>] \
+  [--docs-dir docs] [--cache-dir <dir>]
+
+# 8. Plain-language descriptions (§8.4)
 arch-indexer describe plan <repo> [--top-flows 10] [--docs-dir docs] [--cache-dir <dir>] [--out <path>]
 arch-indexer describe check <repo> [--input <descriptions.json>] [--docs-dir docs] [--format json|text]
 
-# 8. Cross-model claim verification (§8.5)
+# 9. Cross-model claim verification (§8.5)
 arch-indexer verify-claims plan <repo> [--docs-dir docs] [--descriptions <path>] [--cache-dir <dir>] [--out <path>]
 arch-indexer verify-claims gate <repo> --verdicts <jsonl> [--verdicts <jsonl>]... \
   --writer-model <id> [--judge-model <id>] [--judges 1] [--max-partial 0.05] \
   [--plan <claims-plan.json>] [--descriptions <path>] [--docs-dir docs] \
   [--cache-dir <dir>] [--format json|text]
 
-# 9. Live-production runtime overlay (offline span files or read-only Jaeger GET;
+# 10. Live-production runtime overlay (offline span files or read-only Jaeger GET;
 #    writes docs/arch/runtime-overlay.v1.{json,js})
 arch-indexer trace ingest <repo> \
   (--otlp-file <path> | --collector-file <path> | --jaeger <url> --service <name>) \
   [--lookback 1h] [--limit 200] [--path-prefix-map SRC=DST]... [--docs-dir docs] [--cache-dir <dir>]
 
-# 10. Optional read-only localhost server for live overlay polling (Decision D5)
+# 11. Optional read-only localhost server for live overlay polling (Decision D5)
 arch-indexer serve <repo> [--docs-dir docs] [--host 127.0.0.1] [--port 8765] \
   [--jaeger <url> --service <name>] [--lookback 1h] [--limit 200] \
   [--poll-interval 15] [--path-prefix-map SRC=DST]... [--cache-dir <dir>]
@@ -526,7 +543,7 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path (outside the repository, the repository root, the docs directory or containing it), a `packet_id` declared by more than one draft, or unreadable repository. Also: `plan --by parts` or `describe plan` without `docs/arch/overview.json`, `describe check` without its input file, and a `verify-claims gate` whose judge model equals the writer model or whose verdicts/claims plan are missing or malformed. A missing in-repo drafts directory is created and zero drafts is a successful bootstrap (`assemble` exits `0`). |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including an `AUTO-DIAGRAM` block edited since the last index while the source tree is unchanged, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
 | `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, `describe check`, `verify-claims gate`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, a worker draft that violates the draft-file contract in §9.2, invalid or stale descriptions per §8.4, or a contradicted claim or over-threshold partial/bad-citation rate per §8.5), or `trace ingest` matched fewer than 10% of its spans (including none). |
-| `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested and a required Tier 1 indexer or its runtime is not available, or `--strict-tier1-any` requested and any unit whose language has a Tier 1 indexer fell back, online or offline. The stored `index.db` is left untouched. |
+| `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested and a required Tier 1 indexer or its runtime is not available, or `--strict-tier1-any` requested and any unit whose language has a Tier 1 indexer fell back, online or offline, or `arch-indexer dataflow` cannot resolve its requested engine or a Joern-capable JDK (nothing is written in that case). For the `index` cases, the stored `index.db` is left untouched. |
 
 `index` stdout always agrees with its exit code. Only the exit-`0` path prints `No changes: documentation is up to date`. When the source tree is unchanged but sections remain impacted (exit `2`), it prints `No source changes: <N> documentation section(s) still impacted`, where `<N>` counts impacted plus missing sections, then `Impacted sections: <n>` and/or `Missing sections: <n>` for the non-zero counts; it never prints the up-to-date message.
 
@@ -669,6 +686,10 @@ Built against small, committed fixture repositories under `tests/fixtures/` (Pyt
 - **`test_secret_masking.py`**: secret detection and masking in description packets (no credential reaches a packet or `descriptions.json`).
 - **`test_claims_gate.py`**: cross-model claim planning, judge/writer conflict refusal, judge quorum and per-claim coverage, `--max-partial` threshold, and CLI exit codes.
 - **`test_mermaid_parts.py`**: parts-first Mermaid generation and `check-mermaid` AUTO-DIAGRAM verification in parts mode.
+- **`test_dataflow_runner.py` / `test_sarif_normalise.py` / `test_rulegen.py`**:
+  - Dataflow persistence scope (a full run replaces, an `--entry` or trimmed run merges), the `mixed` sidecar header, SARIF/Joern normalisation and entry matching, and deterministic rule-pack generation aligned with the boundary rules.
+- **`test_dataflow_optional.py`**: dataflow stays optional — `index` outputs stay byte-identical with or without rows, a missing engine exits `4`, and `toolchain ensure --with` verifies SHAs while plain `ensure` installs no engines.
+- **`test_dataflow_cli.py`** (marked `engine`): end-to-end Opengrep runs over committed fixtures, skipped when the engine is not installed in the cache.
 - **`viewer-app/test/`** (Vitest, `jsdom`):
   - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). `descriptions.test.tsx` covers node summaries, the stale badge, and flow-banner narration. Run with `make viewer` (`npm ci && npm run build && npm test`) or the CI `viewer` job, which runs `npm ci`, `npm test` and `npm run build` (including `tsc --noEmit`) and fails when the committed `viewer/dist/` is stale; `make check` stays Python-only.
 - **`tests/e2e_viewer/test_file_url.py`** (`browser` marker):
@@ -699,3 +720,7 @@ Execute sequentially against real repositories, gating each stage on passing `ch
 3. **Unconstrained code-generated Mermaid diagrams on ~1,000-file repos (Owner Goal 2)**:
    - *Position*: Keep Mermaid generation 100% deterministic in code as requested, **provided** strict node/edge aggregation budgets (`35` nodes, `60` edges) are enforced.
    - *Reason*: Rendering a raw unaggregated call graph for a 1,000-file multi-module Java + TS repo into Mermaid produces unreadable diagrams that fail to communicate architecture. Code-generated Mermaid should show bounded module-level and focused entrypoint-to-sink slices, deferring full-graph exploration to `docs/flow-viewer.html`.
+
+4. **Deep dataflow engines (D7)**:
+   - *Position*: Use **Opengrep as the default** deep-dataflow engine and **Joern as opt-in**, installed only on request (`toolchain ensure --with opengrep|joern`) and invoked strictly as subprocesses—never linked, vendored or bundled. Opengrep is LGPL-2.1; Joern is Apache-2.0 and needs JDK >= 17.
+   - *Reason*: The owner explicitly approved adding both engines and asked why an LGPL licence would be a barrier, because subprocess invocation keeps the licence boundary at the process boundary and adds no linked code to `arch-indexer`'s FSL-1.1-ALv2 distribution. Keeping both engines opt-in leaves the default install path unchanged, and Joern stays opt-in so its JDK 17 prerequisite never becomes part of that path.
