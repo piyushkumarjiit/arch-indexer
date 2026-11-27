@@ -20,7 +20,7 @@ Querying, graphing, assembly and validation run offline; indexing runs toolchain
 ## Install and usage
 
 ```bash
-pip install -e .   # add "[dev]" to also install pytest, pytest-xdist and ruff
+pip install -e .   # add "[dev]" for pytest, pytest-xdist and ruff; add "[browser]" for the Playwright Chromium test
 
 # Toolchain management
 arch-indexer toolchain status --repo /path/to/repo
@@ -87,7 +87,7 @@ paths = ["services/billing/**"]   # path globs; a module joins the part matching
 editor_url = "vscode://file/{abs_path}:{line}"   # {abs_path}, {file} and {line} are substituted
 ```
 
-Parts are derived deterministically from deployable roots (`service`, `ui`, `worker`, `scripts`, `library` and `infra`), and an explicit `[parts."<name>"]` table wins over that derivation so a repository can name its own; `[viewer] editor_url` is the template the viewer uses to link evidence rows to an editor (allowed schemes: `vscode:`, `vscode-insiders:`, `cursor:`, `idea:`, `jetbrains:`, `zed:`, `subl:`, `http:`, `https:`, `file:`; unsupported schemes are rejected on config load and never rendered as links).
+Parts are derived deterministically from deployable roots (`service`, `ui`, `worker`, `scripts`, `library` and `infra`), and an explicit `[parts."<name>"]` table wins over that derivation so a repository can name its own; `[viewer] editor_url` is the template the viewer uses to link evidence rows to an editor; its scheme must be one of the accepted schemes listed in [section 6.3 of the spec](docs/SPEC.md), and an unsupported scheme fails config load and never renders as a link.
 
 `plan` marks a packet `"over_budget": true` and warns on stderr when a module cannot be split further (see [section 9.2 of the spec](docs/SPEC.md)).
 

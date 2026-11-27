@@ -87,7 +87,7 @@ arch-indexer/
 ├── viewer-app/                      # v2 viewer frontend (Vite + React) that builds src/arch_indexer/viewer/dist/ via `make viewer`
 │   ├── fixtures/                    # Committed graph fixtures and their generator
 │   ├── src/                         # App shell: drill-down views, ELKjs layout worker, state store, UI panels
-│   └── test/                        # Vitest component tests (run only by `make viewer`)
+│   └── test/                        # Vitest component tests (run by `make viewer` and the CI viewer job)
 └── tests/
     ├── fixtures/                    # Minimal Python, TS, Java/Maven, Infra fixture repos
     ├── test_indexing.py
@@ -637,7 +637,9 @@ Built against small, committed fixture repositories under `tests/fixtures/` (Pyt
 - **`test_assembler.py`**:
   - `assemble` merges drafts, patches only impacted sections, globally renumbers footnotes, injects diagrams, deletes drafts, and enforces validation gates.
 - **`viewer-app/test/`** (Vitest, `jsdom`):
-  - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). Run with `make viewer` (`npm ci && npm run build && npm test`); `make check` and CI are Python-only, so these tests and the `tsc --noEmit` type-check the build runs do not run on a Python-only checkout.
+  - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). Run with `make viewer` (`npm ci && npm run build && npm test`) or the CI `viewer` job, which runs `npm ci`, `npm test` and `npm run build` (including `tsc --noEmit`) and fails when the committed `viewer/dist/` is stale; `make check` stays Python-only.
+- **`tests/e2e_viewer/test_file_url.py`** (`browser` marker):
+  - Headless Chromium drives the generated `docs/flow-viewer.html` over `file://` through the overview -> part -> group -> file -> symbol drill-down plus one played flow, and asserts zero console errors. It needs the `[browser]` extra (`pip install -e ".[dev,browser]"`) and `python -m playwright install --with-deps chromium`, and skips when Playwright/Chromium or the pre-built `viewer/dist/` is missing; the CI `browser` job runs it and fails on a skip.
 
 ### 10.2 Progressive End-to-End Validation Plan
 Execute sequentially against real repositories, gating each stage on passing `check-citations`, `check-mermaid`, RAM ceiling (< 4.5 GB peak RSS), and visual inspection of `docs/DESIGN.md`, `docs/USER_GUIDE.md`, and `docs/flow-viewer.html`:
