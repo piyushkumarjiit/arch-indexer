@@ -18,12 +18,38 @@ function formatEvidenceCitation(ev: Evidence): string {
   return `${ev.file}:${ev.line}`;
 }
 
-function buildEditorHref(ev: Evidence, template?: string): string | null {
+export const ALLOWED_EDITOR_URL_SCHEMES = new Set([
+  "vscode",
+  "vscode-insiders",
+  "cursor",
+  "idea",
+  "jetbrains",
+  "zed",
+  "subl",
+  "http",
+  "https",
+  "file",
+]);
+
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+const URL_SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.-]*):/;
+
+function hasAllowedEditorScheme(url: string): boolean {
+  if (CONTROL_CHAR_RE.test(url)) return false;
+  const match = URL_SCHEME_RE.exec(url);
+  if (!match) return false;
+  return ALLOWED_EDITOR_URL_SCHEMES.has(match[1].toLowerCase());
+}
+
+export function buildEditorHref(ev: Evidence, template?: string): string | null {
   if (!template) return null;
-  return template
-    .replace("{abs_path}", ev.file)
-    .replace("{file}", ev.file)
-    .replace("{line}", String(ev.line));
+  const trimmed = template.trim();
+  if (!trimmed || !hasAllowedEditorScheme(trimmed)) return null;
+  const href = trimmed.replaceAll(/\{(abs_path|file|line)\}/g, (token) =>
+    token === "{line}" ? String(ev.line) : ev.file,
+  );
+  if (!hasAllowedEditorScheme(href)) return null;
+  return href;
 }
 
 function resolveFallbackNode(

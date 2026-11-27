@@ -26,6 +26,9 @@ dev = [
     "pytest-xdist>=3.5.0",
     "ruff>=0.1.0",
 ]
+browser = [
+    "playwright==1.65.2",
+]
 
 [project.scripts]
 arch-indexer = "arch_indexer.cli:main"

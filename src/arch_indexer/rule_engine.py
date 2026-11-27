@@ -25,6 +25,20 @@ _VALID_BOUNDARY_KINDS = frozenset({"data_store", "external"})
 _VALID_RULE_KINDS = frozenset({"data_store", "external", "entrypoint", "callback_methods"})
 _VALID_CONFIDENCE = frozenset({"exact", "heuristic"})
 _VALID_ANCHORS = frozenset({"root", "segment"})
+ALLOWED_EDITOR_URL_SCHEMES = frozenset(
+    {
+        "vscode",
+        "vscode-insiders",
+        "cursor",
+        "idea",
+        "jetbrains",
+        "zed",
+        "subl",
+        "http",
+        "https",
+        "file",
+    }
+)
 _WRITE_VERBS = (
     "insert",
     "update",
@@ -124,6 +138,25 @@ class RepoRuleConfig:
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^a-z0-9._-]+", "_", text.strip().lower()).strip("._-")
     return cleaned or "custom"
+
+
+def _validate_editor_url(raw_url: str) -> str:
+    """Validate that ``viewer.editor_url`` uses an allowlisted URL scheme."""
+    url = raw_url.strip()
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        raise ValueError(
+            f"{REPO_CONFIG_NAME}: viewer.editor_url must not contain control characters"
+        )
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", url)
+    scheme = match.group(1).lower() if match else ""
+    if scheme not in ALLOWED_EDITOR_URL_SCHEMES:
+        allowed = ", ".join(f"{s}:" for s in sorted(ALLOWED_EDITOR_URL_SCHEMES))
+        found = f"{scheme}:" if scheme else "<missing>"
+        raise ValueError(
+            f"{REPO_CONFIG_NAME}: viewer.editor_url has unsupported URL scheme "
+            f"{found!r}; allowed schemes: {allowed}"
+        )
+    return url
 
 
 def _parse_examples(raw: Any, rule_id: str) -> dict[str, tuple[str, ...]]:
@@ -425,7 +458,7 @@ def load_rule_overrides(repo_path: Path | str) -> RepoRuleConfig:
                 raise ValueError(
                     f"{REPO_CONFIG_NAME}: viewer.editor_url must be a non-empty string"
                 )
-            editor_url = eurl.strip()
+            editor_url = _validate_editor_url(eurl)
 
     return RepoRuleConfig(
         boundary_rules=tuple(boundary_rules),
