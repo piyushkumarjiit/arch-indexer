@@ -309,7 +309,11 @@ export function GraphCanvas({
 
   return (
     <DrillHandlerContext.Provider value={onDrillNode}>
-      <div className="arch-canvas-wrap" data-testid={`view-${viewKey}`}>
+      <div
+        className="arch-canvas-wrap"
+        data-testid={`view-${viewKey}`}
+        data-layout-ready={layout ? "true" : "false"}
+      >
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}

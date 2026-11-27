@@ -45,6 +45,8 @@ arch-indexer/
 │   ├── storage/
 │   │   └── state.py                 # Snapshot hashes, symbol signatures, delta & section impact mapping
 │   ├── graph.py                     # Deterministic graph.json builder
+│   ├── parts.py                     # Deployable parts (part:<slug>) from modules, manifests, entries & infra
+│   ├── bundle.py                    # Summary-plus-detail bundle: overview.json, chunks/*.js, search & vendor
 │   ├── graph_rules.py               # Deterministic data-store/sink classification rules
 │   ├── rule_engine.py               # TOML boundary/entrypoint rules, repo overrides & evaluators
 │   ├── rules/                       # Built-in boundary & entrypoint rules (package data)
@@ -57,7 +59,7 @@ arch-indexer/
 │   ├── module_identity.py           # Module naming, budget-driven subpackage split & overrides
 │   ├── mermaid_gen.py               # Deterministic Mermaid diagram generator
 │   ├── viewer/
-│   │   ├── renderer.py              # Single-file static HTML viewer renderer
+│   │   ├── renderer.py              # Single-file v1 and v2 bundle HTML viewer renderer
 │   │   ├── assets/                  # Offline HTML/CSS/JS viewer assets (package data)
 │   │   │   ├── template.html
 │   │   │   ├── viewer.css
@@ -125,6 +127,17 @@ Only human-facing docs and viewer outputs are written to `<target_repo>/docs/`:
 ├── USER_GUIDE.md                    # Role-based User Guide
 ├── graph.json                       # Deterministic control/data flow graph
 ├── arch/
+│   ├── overview.json                # v2 summary payload embedded in flow-viewer.html (§6.3)
+│   ├── chunks/
+│   │   ├── <part-slug>.js           # JSONP detail chunk for one part (§6.3)
+│   │   ├── search.js                # JSONP search index, loaded on first search
+│   │   └── index.json               # part_id -> {file, sha256, bytes}
+│   ├── vendor/
+│   │   ├── elk-worker.min.js        # Unmodified ELKjs 0.12.2 worker, loaded by the viewer
+│   │   └── elkjs-EPL-2.0.txt        # Its licence text
+│   ├── descriptions.js              # null JSONP stub until descriptions.json exists
+│   ├── runtime-overlay.v1.js        # null JSONP stub until runtime-overlay.v1.json exists
+│   ├── dataflow.v1.js               # null JSONP stub until dataflow.v1.json exists
 │   └── dependencies.json            # Deterministic package dependency catalog (§6.4)
 └── flow-viewer.html                 # Offline single-file interactive viewer (no server/network)
 ```
@@ -358,7 +371,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 
 **Shared resources and sidecars.** `resources` lists a `res:<kind>:<value>` artifact only when it has at least one writer and one reader across two distinct modules or entry roots, with writer/reader evidence (`path`, `line`, optional `symbol`) on both sides. Compose/Kubernetes services whose image is not itself a data store and that are not the repository's own root build become `sidecar` nodes (`svc:*`) with `http_request` edges from the code that binds them; the `sidecars` array keeps each service's `image`, source site and the config sites that bind it. Outbound HTTP calls whose file or symbol binds a non-local host become `ext:host:<host>` sinks, and the generic `ext:http` sink is dropped when every candidate was retargeted. Secret-like configuration values are never persisted.
 
-**Rule overrides.** Boundary and entrypoint classification is data-driven. Built-in rules live in `src/arch_indexer/rules/boundaries.toml` and `src/arch_indexer/rules/entrypoints.toml` (package data); `index` merges `.arch-indexer.toml` overrides by `id` (a repository rule replaces a built-in with the same id, otherwise it is appended). The repository file accepts `[[rule]]` entries, a `[boundaries."<package>"]` shorthand and a `[graph] dispatch_fanout_cap` integer; `.arch-indexer.proposals.toml` is never loaded automatically. A malformed rule file or invalid rule value fails `index` with exit `1` before the graph is exported.
+**Rule overrides.** Boundary and entrypoint classification is data-driven. Built-in rules live in `src/arch_indexer/rules/boundaries.toml` and `src/arch_indexer/rules/entrypoints.toml` (package data); `index` merges `.arch-indexer.toml` overrides by `id` (a repository rule replaces a built-in with the same id, otherwise it is appended). The repository file accepts `[[rule]]` entries, a `[boundaries."<package>"]` shorthand, a `[graph] dispatch_fanout_cap` integer, a `[parts."<name>"] paths` glob list that claims modules for a named part (an explicit override wins over the derived parts, and a module joins the part matching most of its files), and a `[viewer] editor_url` template; `.arch-indexer.proposals.toml` is never loaded automatically. A malformed rule file or invalid rule value fails `index` with exit `1` before the graph is exported.
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before `index.db` is touched.
 
@@ -380,7 +393,16 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
   ```
 
 ### 6.3 Static Offline HTML Viewer (`docs/flow-viewer.html`)
-Generated as a **single self-contained HTML file** with inline CSS and vanilla JS/SVG layout (no external CDN, no web server, no network):
+`index` generates one **single self-contained HTML file** with inline CSS and JS (no external CDN, no web server, no network) from one of two renderers, selected by `--viewer` (default `v2`). Both open directly over `file://`.
+
+**v2 (default, `--viewer v2`).** `arch_indexer.viewer.render_viewer_v2` inlines the pre-built React Flow + ELKjs app from `viewer/dist/` (rebuilt with `make viewer`), embeds `docs/arch/overview.json`, and references the sibling `docs/arch/` bundle rather than inlining it: one JSONP detail chunk per part under `chunks/`, `chunks/search.js` loaded on first search, and the unmodified `vendor/elk-worker.min.js`. Every optional layer file is a written `null` JSONP stub until its producer exists (`descriptions.js`, `runtime-overlay.v1.js`, `dataflow.v1.js`), so the page opens from `file://` with zero console errors; `index` writes the v1 viewer instead when the pre-built assets are missing.
+- **Levels**: overview (parts, boundaries and the summary panel) -> part (three `Used by` / `Inside` / `Uses` bands derived from the real ELK partition bounds) -> group (directory chips once a group holds more than `24` files) -> file (`22` symbols by degree, then `+N more`) -> symbol (call tree to depth 3 plus the flows through it). A view draws at most `300` nodes; the rest fold into one `+N` node whose items the inspector lists as jump links.
+- **Layers and edges**: control (`calls`, `registers`, `boots`, `implements`), data (`reads`, `writes`, `publishes`, `dataflow`, plus `ds:`/`res:` boundaries) and integration (`http_request`, plus `ext:`/`svc:` boundaries) can each be switched off, and runtime joins once an overlay exists. One merged edge is drawn per node pair from the kinds its active layers leave visible, and the edge inspector reports the per-kind breakdown. A boundary hides when its own layer is off and nothing active connects it.
+- **Inspector and navigation**: clicking a node or edge shows its `file:line`, kind, part/group, tier and `confidence`, its docstring, incoming and outgoing edges and the flows through it, with `evidence[]` copyable as `path:line` and linked to an editor when `.arch-indexer.toml` sets `[viewer] editor_url` (a template with `{abs_path}`, `{file}` and `{line}`). Click selects, double-click or Enter drills down, Backspace or the breadcrumb goes up, `/` or Ctrl-K searches, and `#node=<id>` deep-links a node.
+- **Flow walkthrough**: a banner with "step k of n", prev/next on the arrow keys, a `Follow step` toggle (on by default) that moves the selection with the walkthrough, non-path nodes dimmed, and the final partial step labelled with its `end_reason`.
+- **Overlays**: `changed`/`new` badges from the bundle `delta`, and the Tier-2 banner shown while `tier_summary.tier2_modules` is non-empty ("N modules indexed at Tier 2: edges may be incomplete"). The banner collapses to a pill but never disappears, and its module chips are capped at `12` plus `+N more`.
+
+**v1 (`--viewer v1`).** `arch_indexer.viewer.render_viewer` keeps the previous vanilla JS/SVG viewer:
 - **Works directly over `file://`**: `arch-indexer` embeds the current `graph.json` payload inside a `<script id="arch-graph-data" type="application/json">` block *and* provides a "Load `graph.json`" file picker (`FileReader`) so users can also open any standalone `graph.json` without hitting browser `file://` CORS blocks.
 - **Capabilities**:
   - **Hierarchical drill-down**: navigate system -> module -> file group (directory) -> file -> symbol/endpoint via breadcrumbs, with aggregated edges and node counts at each level. Directory groups are scoped per module (`dir:<module-id>:<path>`), so several modules that share a source directory each keep their own files, drill-down children and inspector edges. The graph's `files[]` array registers every in-scope file, so a module made only of interface, empty or infrastructure files still drills through its directory to file leaves.
@@ -409,7 +431,7 @@ arch-indexer index <repo> \
   [--node-max-heap-mb 2048] [--jvm-max-heap-mb 2048] \
   [--unit-timeout-sec 300] [--chunk-files 250] [--max-parallel-units 1] \
   [--docs-dir docs] [--auto-relocate-citations] [--include-tests] \
-  [--module-depth N] [--cache-dir <dir>] \
+  [--module-depth N] [--viewer v2|v1] [--cache-dir <dir>] \
   [--maven-arg=<arg>]... [--maven-online] [--maven-reactor]
 
 # 3. Local 0-overhead agent query CLI (reads <cache>/repos/<id>/index.db)
@@ -423,6 +445,8 @@ arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--include-test
 ```
 
 `index --strict-tier1-any` evaluates every unit before touching the store and exits `4` when any unit whose language has a Tier 1 indexer falls back, online or offline; `--offline --strict-tier1` remains the narrower tool/runtime-unavailable check.
+
+`index --viewer v2` (the default) writes `docs/flow-viewer.html` from the pre-built `viewer/dist/` app and the `docs/arch/` bundle (§6.3), while `--viewer v1` writes the legacy single-file viewer; `v2` falls back to `v1` when the pre-built assets are absent.
 
 `refs` and `flow-trace` respect the same test scope as `entrypoints`: unless `--include-tests` is passed, a reference or call edge located in a test file is neither returned nor counted, and a test-file entrypoint cannot start a trace.
 
@@ -576,7 +600,7 @@ The thin skill instructs Firstmate to run the following 4 steps:
         - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
         - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates. The citation gate tolerates empty required sections, because a document started from the skeleton is mostly empty; the next `index` run re-impacts them with `empty_section` (§5.5).
         - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
-     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json`, `docs/flow-viewer.html` and `docs/arch/dependencies.json` artifacts written by `arch-indexer index`).
+     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json`, `docs/flow-viewer.html` and `docs/arch/` artifacts written by `arch-indexer index`).
    - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
 
 4. **Step 4 — Summary Report**

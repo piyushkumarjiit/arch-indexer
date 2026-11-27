@@ -5,7 +5,7 @@ import {
   loadSearchIndex,
   readOptionalOverlays,
 } from "../data/chunks";
-import { buildSymbolGraph } from "../views/viewGraphs";
+import { buildSymbolGraph, parseFileSymbolId } from "../views/viewGraphs";
 import type {
   BreadcrumbItem,
   ChunkFlow,
@@ -637,6 +637,24 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
         await get().drillToSymbol(pid, grpId, symNode.file, symNode.id);
         get().selectNode(symNode.id, true);
         return;
+      }
+
+      // File-view symbols (including folded items listed in the Inspector) carry an id of
+      // the form `sym:<path>:<name>:<line>` and are not chunk graph nodes.
+      if (nodeId.startsWith("sym:")) {
+        const [fp, name, line] = parseFileSymbolId(nodeId);
+        const fRow = chunk.files.find(
+          (f) =>
+            f.path === fp &&
+            f.symbols.some(
+              (s) => s.name === name && (!line || s.line === Number(line)),
+            ),
+        );
+        if (fRow) {
+          await get().drillToSymbol(pid, fRow.module_id, fRow.path, nodeId);
+          get().selectNode(nodeId, true);
+          return;
+        }
       }
     }
   },

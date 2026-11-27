@@ -186,8 +186,17 @@ export function App() {
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent) => {
       const target = ev.target as HTMLElement | null;
+      // Checkboxes/radios/buttons keep global shortcuts alive: the flow "Follow step"
+      // toggle is a checkbox, and focusing it must not swallow arrow-key flow stepping.
+      const nonTextInputType =
+        target &&
+        target.tagName === "INPUT" &&
+        ["checkbox", "radio", "button", "submit", "reset", "range"].includes(
+          (target as HTMLInputElement).type,
+        );
       const inInput =
         target &&
+        !nonTextInputType &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
           target.tagName === "SELECT" ||

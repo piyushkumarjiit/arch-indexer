@@ -43,6 +43,17 @@ export interface ViewBuildOptions {
   flowStepIndex: number;
 }
 
+/** Split a file-view symbol id (``sym:<path>:<name>:<line>``) into its parts. */
+export function parseFileSymbolId(symbolId: string): [string, string, string] {
+  const body = symbolId.startsWith("sym:") ? symbolId.slice(4) : symbolId;
+  const lineSep = body.lastIndexOf(":");
+  if (lineSep < 0) return [body, "", ""];
+  const line = body.slice(lineSep + 1);
+  const nameSep = body.lastIndexOf(":", lineSep - 1);
+  if (nameSep < 0) return [body.slice(0, lineSep), "", line];
+  return [body.slice(0, nameSep), body.slice(nameSep + 1, lineSep), line];
+}
+
 function mergeEdgeIntoMap(
   map: Map<string, ViewEdgeData>,
   edge: ViewEdgeData,
@@ -760,6 +771,43 @@ export function buildSymbolGraph(
 
   const nodes: ViewNodeData[] = [];
   const nodeIds = new Set<string>();
+
+  // Folded items (and other file-view symbols) are not graph nodes in the chunk, so a
+  // jump to them must still render the symbol card from the owning file row.
+  if (!chunkNodeMap.has(symbolId) && symbolId.startsWith("sym:")) {
+    const [filePath, name, lineText] = parseFileSymbolId(symbolId);
+    const line = Number(lineText);
+    const fileRow = chunk.files.find((f) => f.path === filePath);
+    const symRow = fileRow?.symbols.find(
+      (s) => s.name === name && (Number.isFinite(line) ? s.line === line : true),
+    );
+    if (fileRow && symRow) {
+      nodes.push({
+        id: symbolId,
+        label: symRow.name,
+        subtitle: `${fileRow.path}:${symRow.line}`,
+        kind: symRow.kind,
+        badge: "root",
+        tier: fileRow.tier,
+        confidence: fileRow.tier === "scip" ? "exact" : "heuristic",
+        highlighted: true,
+        drillable: false,
+        partId,
+        groupId: fileRow.module_id,
+        filePath: fileRow.path,
+        symbolId,
+        evidence: [
+          {
+            file: fileRow.path,
+            line: symRow.line,
+            source: fileRow.tier === "scip" ? "scip" : "tree-sitter",
+          },
+        ],
+      });
+      nodeIds.add(symbolId);
+    }
+  }
+
   for (const id of Array.from(includedIds).sort()) {
     const cn = chunkNodeMap.get(id);
     if (cn) {

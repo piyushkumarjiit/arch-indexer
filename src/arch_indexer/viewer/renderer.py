@@ -103,10 +103,11 @@ def render_viewer_v2(overview: dict[str, Any]) -> str:
         '<script id="arch-overview-data" type="application/json">{}</script>',
         f'<script id="arch-overview-data" type="application/json">{embedded_overview}</script>',
     )
-    html = html.replace(
-        '<script defer src="./app.js"></script>',
-        f"{sidecar_scripts}\n  <script>\n{app_js}\n</script>",
-    )
+    # The app script must run after ``#root`` and ``#arch-overview-data`` exist, so the
+    # inlined bundle goes at the end of ``<body>`` instead of replacing the (deferred)
+    # head tag; executing it in the head leaves the page blank.
+    html = html.replace('<script defer src="./app.js"></script>', sidecar_scripts)
+    html = html.replace("</body>", f"<script>\n{app_js}\n</script>\n</body>")
 
     banner = _license_banner()
     if banner:

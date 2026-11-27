@@ -70,17 +70,42 @@ def test_file_url_viewer_drilldown_and_zero_console_errors(tmp_path: Path) -> No
         page.goto(viewer_uri)
         page.wait_for_selector('[data-testid="overview-summary"]')
 
+        # Node positions only settle once the async ELK layout lands. Clicking while the
+        # fallback grid is still on screen moves the card out from under the pointer and
+        # the double-click drill silently misses.
+        def wait_layout_ready() -> None:
+            page.wait_for_selector('.arch-canvas-wrap[data-layout-ready="true"]')
+
+        def double_click(locator) -> None:
+            # Human-paced double click: the first click selects the node and re-renders it,
+            # so two synthetic clicks with no gap in between never form a dblclick.
+            box = locator.bounding_box()
+            assert box is not None
+            point = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.move(*point)
+            page.mouse.down()
+            page.mouse.up()
+            page.wait_for_timeout(120)
+            page.mouse.down(click_count=2)
+            page.mouse.up(click_count=2)
+
+        wait_layout_ready()
+
         # Drill overview -> part -> group -> file -> symbol and back
-        page.locator(".arch-node-card.kind-service").first.dblclick()
+        double_click(page.locator(".arch-node-card.kind-service").first)
         page.wait_for_selector('[data-testid="part-bands"]')
-        page.locator(".arch-node-card.kind-group").first.dblclick()
+        wait_layout_ready()
+        double_click(page.locator(".arch-node-card.kind-group").first)
         page.wait_for_selector('[data-testid="view-group:mod:server:all"]')
-        page.locator(".arch-node-card.kind-file").first.dblclick()
+        wait_layout_ready()
+        double_click(page.locator(".arch-node-card.kind-file").first)
         page.wait_for_selector(".arch-node-card")
-        page.locator(".arch-node-card.kind-entrypoint").first.dblclick()
+        wait_layout_ready()
+        double_click(page.locator(".arch-node-card.kind-entrypoint").first)
         page.wait_for_selector(".arch-crumb")
         page.locator(".arch-crumb").first.click()
         page.wait_for_selector('[data-testid="overview-summary"]')
+        wait_layout_ready()
 
         # Play one flow
         page.locator(".arch-summary-flows .arch-chip").first.click()
