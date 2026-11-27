@@ -248,3 +248,16 @@ def test_merged_sidecar_header_is_mixed_when_stored_rows_disagree(
     assert payload["tool"] == "mixed"
     assert payload["tool_version"] == "mixed"
     assert set(_sidecar(repo)) == {"ep:POST:/ask", "ep:GET:/items"}
+
+
+def test_extract_dispatch_callee_parses_keyword_arguments_and_assignments() -> None:
+    hints = {"req.query"}
+    assert runner._extract_dispatch_callee(
+        "loop.run_in_executor(executor, run_query, req.query, timeout=5)", hints
+    ) == ("run_query", 0)
+    assert runner._extract_dispatch_callee(
+        "ans = await loop.run_in_executor(executor, run_query, req.query)", hints
+    ) == ("run_query", 0)
+    assert runner._extract_dispatch_callee(
+        "await asyncio.to_thread(run_query, req.query)", hints
+    ) == ("run_query", 0)

@@ -38,12 +38,18 @@ _PYTHON_DISPATCH_RULE_ID = "arch-dataflow.internal.python-dispatch"
 def _extract_dispatch_callee(snippet: str, hint_tokens: set[str]) -> tuple[str, int] | None:
     """Extract ``(callee_name, param_index)`` from an executor dispatch call snippet."""
     expr_text = snippet.strip()
-    if "=" in expr_text and not expr_text.startswith(("(", "[", "{")):
-        expr_text = expr_text.split("=", 1)[1].strip()
     try:
         node = ast.parse(expr_text, mode="eval").body
     except SyntaxError:
-        return None
+        try:
+            statement = ast.parse(expr_text).body[0]
+        except (SyntaxError, IndexError):
+            return None
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)):
+            return None
+        node = statement.value
+    while isinstance(node, ast.Await):
+        node = node.value
     if not isinstance(node, ast.Call):
         return None
 
