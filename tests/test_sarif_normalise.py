@@ -135,7 +135,7 @@ def test_normalise_sarif_truncates_long_payload_hint_and_exports_sidecar(tmp_pat
     assert edge["entry_id"] == "ep:POST:/ask"
     assert edge["sink_boundary_id"] == "ext:ollama"
     assert len(edge["evidence"]) == 2
-    assert edge["evidence"][0]["source"] == "sarif"
+    assert edge["evidence"][0]["source"] == "opengrep"
 
     js_text = js_path.read_text(encoding="utf-8")
     assert js_text.startswith("window.__ARCH_DATAFLOW__ = ")
@@ -179,3 +179,45 @@ def test_normalise_joern_output(tmp_path: Path) -> None:
         assert rows[0]["tool"] == "joern"
         assert rows[0]["entry_id"] == "ep:POST:/ask"
         assert rows[0]["sink_boundary_id"] == "ext:ollama"
+
+    json_path, _js_path = export_dataflow(
+        tmp_path / "docs", rows, tool="joern", tool_version=rows[0]["tool_version"]
+    )
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["edges"][0]["evidence"][0]["source"] == "joern"
+
+
+def test_normalise_joern_uses_pinned_version_when_output_omits_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    joern_json = tmp_path / "joern.json"
+    joern_json.write_text(
+        json.dumps(
+            {
+                "tool": "joern",
+                "flows": [
+                    {
+                        "steps": [
+                            {"file": "app.py", "line": 17, "col": 4, "note": "question"},
+                            {
+                                "file": "app.py",
+                                "line": 12,
+                                "col": 11,
+                                "note": "ollama.chat(prompt)",
+                            },
+                        ]
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "arch_indexer.toolchain.load_toolchain_manifest",
+        lambda: {"tools": {"joern": {"version": "9.9.9"}}},
+    )
+
+    with _seed_py_store(tmp_path / "index.db") as store:
+        rows = normalise_joern(joern_json, store)
+        assert len(rows) == 1
+        assert rows[0]["tool_version"] == "9.9.9"

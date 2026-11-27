@@ -20,6 +20,29 @@ def default_joern_script_path() -> Path:
         return Path(path)
 
 
+def _joern_argv(
+    bin_path: Path,
+    script: Path,
+    repo_path: Path,
+    json_path: Path,
+    lang: str,
+    tool_version: str,
+) -> list[str]:
+    return [
+        str(bin_path),
+        "--script",
+        str(script),
+        "--param",
+        f"repoPath={repo_path}",
+        "--param",
+        f"outFile={json_path}",
+        "--param",
+        f"lang={lang}",
+        "--param",
+        f"toolVersion={tool_version}",
+    ]
+
+
 def run_joern(
     repo: Path | str,
     script: Path | str | None = None,
@@ -32,7 +55,7 @@ def run_joern(
 ) -> Path:
     """Run pinned Joern as an isolated offline subprocess with bounded JVM heap."""
     repo_path = Path(repo).resolve()
-    bin_path, _version, tool_env = resolve_dataflow_engine("joern", cache_dir=cache_dir)
+    bin_path, version, tool_env = resolve_dataflow_engine("joern", cache_dir=cache_dir)
 
     if out_path is None:
         cache_paths = RepoCachePaths.from_repo(repo_path, cache_dir_override=cache_dir)
@@ -58,19 +81,8 @@ def run_joern(
         if script is None:
             ref = importlib.resources.files("arch_indexer.dataflow").joinpath("dataflow.sc")
             with importlib.resources.as_file(ref) as script_path:
-                argv = [
-                    str(bin_path),
-                    "--script",
-                    str(script_path),
-                    "--param",
-                    f"repoPath={repo_path}",
-                    "--param",
-                    f"outFile={json_path}",
-                    "--param",
-                    f"lang={lang}",
-                ]
                 proc = subprocess.run(
-                    argv,
+                    _joern_argv(bin_path, script_path, repo_path, json_path, lang, version),
                     cwd=tmp_home,
                     env=clean_env,
                     capture_output=True,
@@ -79,19 +91,8 @@ def run_joern(
                     check=False,
                 )
         else:
-            argv = [
-                str(bin_path),
-                "--script",
-                str(Path(script).resolve()),
-                "--param",
-                f"repoPath={repo_path}",
-                "--param",
-                f"outFile={json_path}",
-                "--param",
-                f"lang={lang}",
-            ]
             proc = subprocess.run(
-                argv,
+                _joern_argv(bin_path, Path(script).resolve(), repo_path, json_path, lang, version),
                 cwd=tmp_home,
                 env=clean_env,
                 capture_output=True,

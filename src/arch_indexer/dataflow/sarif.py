@@ -17,6 +17,7 @@ from arch_indexer.graph_rules import (
     classify_token_rule,
 )
 from arch_indexer.store import IndexStore
+from arch_indexer.toolchain import get_pinned_tool_version
 
 _CALL_TOKEN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.:$@/-]*)\s*\(")
 _SOURCE_QUOTE_RE = re.compile(r"Source:\s*'([^']+)'")
@@ -498,7 +499,7 @@ def normalise_joern(
     root_path = Path(repo_root).resolve() if repo_root is not None else None
     idx = _SymbolIndex(store, overview)
     tool = str(raw.get("tool") or "joern")
-    tool_version = str(raw.get("tool_version") or "4.0.693")
+    tool_version = str(raw.get("tool_version") or get_pinned_tool_version(tool))
 
     rows: list[dict[str, Any]] = []
     for flow in raw.get("flows") or ():

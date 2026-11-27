@@ -44,19 +44,20 @@ def build_dataflow_payload(
             path_steps = []
 
         rule_id = str(row.get("rule_id") or "")
+        row_tool = str(row.get("tool") or tool)
         first_step = path_steps[0] if path_steps else None
         last_step = path_steps[-1] if path_steps else None
         first_ev: dict[str, Any] = {
             "file": str((first_step or {}).get("file") or row["source_file"]),
             "line": int((first_step or {}).get("line") or row["source_line"]),
             "col": int((first_step or {}).get("col") or 0),
-            "source": "sarif",
+            "source": row_tool,
         }
         last_ev: dict[str, Any] = {
             "file": str((last_step or {}).get("file") or row["sink_file"]),
             "line": int((last_step or {}).get("line") or row["sink_line"]),
             "col": int((last_step or {}).get("col") or 0),
-            "source": "sarif",
+            "source": row_tool,
         }
         if rule_id:
             first_ev["rule_id"] = rule_id

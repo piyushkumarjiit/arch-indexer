@@ -22,7 +22,7 @@ private def jsonEscape(raw: String): String = {
   sb.toString()
 }
 
-@main def exec(repoPath: String, outFile: String, lang: String = "auto"): Unit = {
+@main def exec(repoPath: String, outFile: String, lang: String = "auto", toolVersion: String = ""): Unit = {
   lang.toLowerCase match {
     case "java"                   => importCode.java(repoPath)
     case "python" | "py"          => importCode.python(repoPath)
@@ -74,6 +74,6 @@ private def jsonEscape(raw: String): String = {
     s"""{"steps":[${steps.mkString(",")}]}"""
   }.mkString(",")
 
-  val payload = s"""{"tool":"joern","tool_version":"4.0.693","flows":[$flowJson]}\n"""
+  val payload = s"""{"tool":"joern","tool_version":${jsonEscape(toolVersion)},"flows":[$flowJson]}\n"""
   Files.write(Paths.get(outFile), payload.getBytes(StandardCharsets.UTF_8))
 }

@@ -96,6 +96,12 @@ def load_toolchain_manifest() -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def get_pinned_tool_version(tool_name: str) -> str:
+    """Return the pinned version for ``tool_name`` from the packaged manifest."""
+    tool_info = load_toolchain_manifest().get("tools", {}).get(tool_name, {})
+    return str(tool_info.get("version", ""))
+
+
 _BUNDLE_FILES = frozenset(
     {
         "overview.json",
