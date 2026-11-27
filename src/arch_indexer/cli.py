@@ -563,6 +563,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Claims plan path (default: <cache>/claims-plan.json from 'verify-claims plan')",
     )
+    claims_gate.add_argument(
+        "--descriptions",
+        default=None,
+        help="Optional path to descriptions.json for verified_by write-back",
+    )
+    claims_gate.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+    )
     claims_gate.add_argument("--cache-dir", default=None, help="Cache directory override")
     claims_gate.add_argument(
         "--judges",
@@ -1000,6 +1008,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     judges=args.judges,
                     max_partial=args.max_partial,
                     plan_path=args.plan,
+                    descriptions_path=args.descriptions,
+                    docs_dir=args.docs_dir,
                     cache_dir=args.cache_dir,
                     output_format=args.format,
                 )

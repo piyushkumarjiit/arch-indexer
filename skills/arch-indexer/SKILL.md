@@ -183,10 +183,11 @@ The assembly command automatically:
   ```bash
   arch-indexer verify-claims plan <repo> --docs-dir docs
   ```
-  Dispatch judge worker(s) to produce `verdicts.jsonl`, then gate the docs and descriptions (`--judges 2` for release audits):
+  Dispatch judge worker(s) to produce `verdicts.jsonl` with an explicit `judge_model` on every row (the file name supplies no identity), then gate the docs and descriptions (`--judges 2` for release audits):
   ```bash
   arch-indexer verify-claims gate <repo> --verdicts verdicts.jsonl --writer-model <writer-id> --judges 1
   ```
+  Never hand-author `verified_by` in `descriptions.json`: the gate writes it for every judged entry (and clears it on any `contradicted`/`bad-citation` claim), and `describe check` rejects a `verified_by` without a matching gate record.
   If `verify-claims gate` exits `3`, dispatch targeted fix workers for the failing claims and re-assemble; if it exits `0`, proceed to commit (Step 3e).
 - If `assemble` exits `3` (`EXIT_VALIDATION_FAILED`):
   1. Inspect error diagnostics from `check-citations` or `check-mermaid` (the drafts are retained).

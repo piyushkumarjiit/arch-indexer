@@ -50,3 +50,25 @@ def test_known_token_prefixes_and_env_secrets_are_masked() -> None:
     assert "sk-abcdefghijklmnopqrstuvwx" not in masked
     assert "my_plain_env_secret" not in masked
     assert "PUBLIC_PORT=8080" in masked
+
+
+def test_pem_private_key_block_body_is_masked_and_line_count_is_preserved() -> None:
+    key_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+    second_body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB"
+    code = (
+        "# deployment key\n"
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        f"{key_body}\n"
+        "\n"
+        f"{second_body}\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "PORT = 8080\n"
+    )
+
+    masked = mask_secrets(code, file_path="deploy.sh")
+
+    assert key_body not in masked
+    assert second_body not in masked
+    assert "PRIVATE KEY" not in masked
+    assert masked.splitlines()[-1] == "PORT = 8080"
+    assert len(masked.splitlines()) == len(code.splitlines())

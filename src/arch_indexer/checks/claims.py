@@ -22,6 +22,8 @@ from arch_indexer.checks.citations import (
     parse_citation_definitions,
 )
 from arch_indexer.config import DEFAULT_DOCS_DIR, RepoCachePaths
+from arch_indexer.describe import claims_gate_artifact_path, mask_secrets
+from arch_indexer.graph import git_head
 
 MAX_CLAIM_SPAN_LINES = 80
 DEFAULT_JUDGES = 1
@@ -152,7 +154,7 @@ def _extract_capped_span(
     start_line = max(1, start_line)
     end_line = min(len(lines), end_line)
     snippet = "\n".join(lines[start_line - 1 : end_line])
-    return start_line, end_line, snippet
+    return start_line, end_line, mask_secrets(snippet, file_path=file_rel)
 
 
 def plan_claims(
@@ -310,12 +312,10 @@ def _load_verdict_rows(
         paths = [Path(p) for p in verdicts_jsonl]
 
     rows: list[dict[str, Any]] = []
-    for p_idx, path in enumerate(paths):
+    fallback_judge = default_judge_model.strip() if default_judge_model else ""
+    for path in paths:
         if not path.is_file():
             raise FileNotFoundError(f"Verdicts file does not exist: {path}")
-        fallback_judge = default_judge_model or (
-            path.stem if len(paths) > 1 else path.parent.name or path.stem
-        )
         for line_no, raw_line in enumerate(
             path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
         ):
@@ -338,10 +338,13 @@ def _load_verdict_rows(
             judge = (
                 str(j_model).strip()
                 if isinstance(j_model, str) and j_model.strip()
-                else f"{fallback_judge}#{p_idx}"
-                if len(paths) > 1 and not default_judge_model
                 else fallback_judge
             )
+            if not judge:
+                raise ValueError(
+                    f"{path}:{line_no}: verdict missing 'judge_model' "
+                    "(pass --judge-model or set judge_model on every row)"
+                )
             rows.append({**obj, "key": key, "verdict": verdict, "judge_model": judge})
     return rows
 
@@ -401,6 +404,7 @@ def gate_claims(
 
     seen_judges: list[str] = []
     seen_judge_set: set[str] = set()
+    seen_votes: set[tuple[str, str]] = set()
     by_key: dict[str, list[dict[str, Any]]] = {}
 
     for row in rows:
@@ -410,7 +414,11 @@ def gate_claims(
                 f"Refusing gate: row {row['key']!r} has judge_model == "
                 f"writer_model ({writer_model!r})"
             )
-        if j_str and j_str not in seen_judge_set:
+        vote = (row["key"], j_str)
+        if vote in seen_votes:
+            raise ValueError(f"duplicate verdict for claim {row['key']!r} from judge {j_str!r}")
+        seen_votes.add(vote)
+        if j_str not in seen_judge_set:
             seen_judge_set.add(j_str)
             seen_judges.append(j_str)
         by_key.setdefault(row["key"], []).append(row)
@@ -574,6 +582,93 @@ def run_verify_claims_plan(
     return 0
 
 
+def _verified_by_for_descriptions(
+    descriptions: dict[str, Any],
+    planned_keys: Sequence[str],
+    result: GateResult,
+    judge_label: str,
+    at_commit: str,
+) -> dict[str, dict[str, str] | None]:
+    entries = descriptions.get("entries")
+    if not isinstance(entries, Mapping):
+        raise ValueError("descriptions.json is missing an 'entries' object")
+    planned = set(planned_keys)
+    partial = set(result.partial_keys)
+    failed = set(result.contradicted_keys) | set(result.bad_citation_keys)
+    verified: dict[str, dict[str, str] | None] = {}
+    for entry_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        keys = {f"DESC#{entry_id}"}
+        steps = entry.get("steps")
+        if isinstance(steps, list):
+            for idx, step in enumerate(steps):
+                if isinstance(step, Mapping):
+                    keys.add(f"DESC#{entry_id}#step{idx}")
+        judged = keys & planned
+        verified_by: dict[str, str] | None = None
+        if judged and not judged & failed:
+            verified_by = {
+                "judge_model": judge_label,
+                "verdict": "partial" if judged & partial else "supported",
+                "at_commit": at_commit,
+            }
+        entry["verified_by"] = verified_by
+        verified[str(entry_id)] = verified_by
+    return verified
+
+
+def _record_claim_verification(
+    repo_path: Path,
+    docs_dir: str,
+    descriptions_path: str | Path | None,
+    planned_keys: Sequence[str],
+    result: GateResult,
+    cache_dir: str | Path | None,
+) -> None:
+    docs_root = Path(docs_dir) if Path(docs_dir).is_absolute() else repo_path / docs_dir
+    desc_path = (
+        Path(descriptions_path)
+        if descriptions_path is not None
+        else docs_root / "arch" / "descriptions.json"
+    )
+    if not desc_path.is_absolute():
+        desc_path = repo_path / desc_path
+
+    at_commit = git_head(repo_path) or ""
+    judge_label = ", ".join(sorted(result.judge_models))
+    verified: dict[str, dict[str, str] | None] = {}
+    if desc_path.is_file():
+        data = json.loads(desc_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"{desc_path}: root must be a JSON object")
+        verified = _verified_by_for_descriptions(data, planned_keys, result, judge_label, at_commit)
+        desc_path.write_text(
+            json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    artifact_path = claims_gate_artifact_path(repo_path, cache_dir)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "at_commit": at_commit,
+                "writer_model": result.writer_model,
+                "judges": sorted(result.judge_models),
+                "passed": result.passed,
+                "entries": verified,
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def run_verify_claims_gate(
     repo: str | Path,
     *,
@@ -583,6 +678,8 @@ def run_verify_claims_gate(
     judges: int = DEFAULT_JUDGES,
     max_partial: float = DEFAULT_MAX_PARTIAL,
     plan_path: str | Path | None = None,
+    descriptions_path: str | Path | None = None,
+    docs_dir: str = DEFAULT_DOCS_DIR,
     cache_dir: str | Path | None = None,
     output_format: str = "text",
     out: TextIO | None = None,
@@ -613,13 +710,22 @@ def run_verify_claims_gate(
         plan_file = cache_paths.repo_cache_dir / "claims-plan.json"
 
     try:
+        planned_keys = _read_plan_keys(plan_file)
         result = gate_claims(
             resolved_verdicts[0] if len(resolved_verdicts) == 1 else resolved_verdicts,
             writer_model=writer_model,
             judges=judges,
             max_partial=max_partial,
             judge_model=judge_model,
-            planned_keys=_read_plan_keys(plan_file),
+            planned_keys=planned_keys,
+        )
+        _record_claim_verification(
+            repo_path,
+            docs_dir,
+            descriptions_path,
+            planned_keys,
+            result,
+            cache_dir,
         )
     except JudgeWriterConflictError as exc:
         stderr.write(f"Error: {exc}\n")
