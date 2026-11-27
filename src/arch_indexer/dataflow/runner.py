@@ -360,17 +360,9 @@ def run_dataflow(
             rows = [r for r in rows if r["entry_id"] in selected_set]
             replace_entry_ids: set[str] | None = selected_set
         else:
-            # Cap distinct entry_ids at max_entries deterministically
-            allowed_entries: list[str] = []
-            seen_entries: set[str] = set()
-            for r in rows:
-                eid = r["entry_id"]
-                if eid in selected_set and eid not in seen_entries:
-                    seen_entries.add(eid)
-                    allowed_entries.append(eid)
-            capped_set = set(allowed_entries[:max_entries])
+            capped_set = set(selected_ids[:max_entries])
             rows = [r for r in rows if r["entry_id"] in capped_set]
-            replace_entry_ids = capped_set if len(allowed_entries) > max_entries else None
+            replace_entry_ids = capped_set if len(selected_ids) > max_entries else None
 
         store.replace_dataflow_edges(rows, entry_ids=replace_entry_ids)
         rows = store.get_dataflow_edges()

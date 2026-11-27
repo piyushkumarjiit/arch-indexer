@@ -192,3 +192,32 @@ def test_max_entries_trimmed_run_preserves_trimmed_entry_edges(
     sidecar = _sidecar(repo)
     assert set(sidecar) == {"ep:GET:/items", "ep:POST:/ask", "ep:POST:/extra"}
     assert sidecar["ep:POST:/extra"]["sink_boundary_id"] == "ext:redis"
+
+
+def test_max_entries_trim_clears_stale_edges_of_analysed_entries(
+    tmp_path: Path, engine_rows: dict[str, list[dict]]
+) -> None:
+    repo, cache = _seed_repo(
+        tmp_path,
+        [("GET", "/a"), ("GET", "/b"), ("GET", "/c"), ("GET", "/d")],
+    )
+    engine_rows["current"] = [
+        _row("ep:GET:/a", "ds:a"),
+        _row("ep:GET:/b", "ds:b"),
+        _row("ep:GET:/c", "ds:c"),
+        _row("ep:GET:/d", "ds:d"),
+    ]
+    run_dataflow(repo, cache_dir=cache, max_entries=10)
+
+    engine_rows["current"] = [
+        _row("ep:GET:/a", "ds:a2"),
+        _row("ep:GET:/c", "ds:c2"),
+        _row("ep:GET:/d", "ds:d2"),
+    ]
+    run_dataflow(repo, cache_dir=cache, max_entries=2)
+
+    persisted = _persisted(repo, cache)
+    assert set(persisted) == {"ep:GET:/a", "ep:GET:/c", "ep:GET:/d"}
+    assert persisted["ep:GET:/a"]["sink_boundary_id"] == "ds:a2"
+    assert persisted["ep:GET:/c"]["sink_boundary_id"] == "ds:c"
+    assert persisted["ep:GET:/d"]["sink_boundary_id"] == "ds:d"
