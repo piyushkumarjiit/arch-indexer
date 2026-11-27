@@ -193,6 +193,26 @@ async function followFlowStepToSymbol(
   }
 }
 
+function runtimeOverlayFields(
+  state: Pick<ViewerStoreState, "runtime" | "activeTraceId" | "traceSpanIndex" | "layers">,
+  overlay: RuntimeOverlayData | null,
+) {
+  const activeTrace =
+    overlay?.traces.find((trace) => trace.trace_id === state.activeTraceId) ?? null;
+  const traceStillExists = activeTrace !== null;
+  const traceSpanCount = activeTrace?.spans.length ?? 0;
+  return {
+    activeTraceId: traceStillExists ? state.activeTraceId : null,
+    traceSpanIndex: traceStillExists
+      ? Math.max(0, Math.min(state.traceSpanIndex, traceSpanCount - 1))
+      : 0,
+    layers: {
+      ...state.layers,
+      runtime: overlay !== null ? (state.runtime !== null ? state.layers.runtime : true) : false,
+    },
+  };
+}
+
 export const useViewerStore = create<ViewerStoreState>((set, get) => ({
   overview: null,
   chunks: {},
@@ -273,10 +293,7 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
       descriptions: overlays.descriptions,
       runtime: overlays.runtime,
       dataflow: overlays.dataflow,
-      layers: {
-        ...state.layers,
-        runtime: overlays.runtime !== null ? state.layers.runtime : false,
-      },
+      ...runtimeOverlayFields(state, overlays.runtime),
     }));
   },
 
@@ -284,20 +301,10 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
     if (typeof window !== "undefined") {
       window.__ARCH_RUNTIME__ = overlay;
     }
-    set((state) => {
-      const traceStillExists =
-        overlay !== null &&
-        overlay.traces.some((trace) => trace.trace_id === state.activeTraceId);
-      return {
-        runtime: overlay,
-        activeTraceId: traceStillExists ? state.activeTraceId : null,
-        traceSpanIndex: traceStillExists ? state.traceSpanIndex : 0,
-        layers: {
-          ...state.layers,
-          runtime: overlay !== null ? (state.runtime !== null ? state.layers.runtime : true) : false,
-        },
-      };
-    });
+    set((state) => ({
+      runtime: overlay,
+      ...runtimeOverlayFields(state, overlay),
+    }));
   },
 
   ensurePartLoaded: async (partId) => {

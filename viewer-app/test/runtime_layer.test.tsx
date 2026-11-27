@@ -487,4 +487,92 @@ describe("Slice 7 Runtime layer and TraceReplay", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("surfaces live poll failures and marks stale overlays", async () => {
+    const { overview } = loadFqd();
+    const onLoadRuntime = vi.fn();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(SAMPLE_RUNTIME), {
+          status: 200,
+          headers: { "X-Arch-Overlay-Status": "stale" },
+        }),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    vi.useFakeTimers();
+    try {
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root!.render(
+          <RuntimeLayerControls
+            runtime={SAMPLE_RUNTIME}
+            overview={overview}
+            runtimeLayerActive
+            activeTraceId={null}
+            onLoadRuntime={onLoadRuntime}
+            onStartTrace={() => {}}
+            onClearRuntime={() => {}}
+          />,
+        );
+      });
+
+      const toggle = container.querySelector(
+        '[data-testid="runtime-live-poll-toggle"]',
+      ) as HTMLInputElement;
+      await act(async () => {
+        toggle.click();
+        await Promise.resolve();
+      });
+      expect(container.querySelector(".arch-runtime-error")?.textContent).toContain("503");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(onLoadRuntime).toHaveBeenCalledWith(SAMPLE_RUNTIME);
+      expect(container.querySelector('[data-testid="runtime-overlay-stale"]')).not.toBeNull();
+      expect(container.querySelector(".arch-runtime-error")?.textContent).toContain("stale");
+    } finally {
+      vi.useRealTimers();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("clamps the trace span index when a refreshed trace shrinks", () => {
+    const { overview } = loadFqd();
+    const store = () => useViewerStore.getState();
+    store().initFromOverview(overview);
+    store().setRuntimeOverlay(null);
+    store().setRuntimeOverlay(SAMPLE_RUNTIME);
+
+    const trace = SAMPLE_RUNTIME.traces[0];
+    store().startTrace(trace.trace_id);
+    store().nextTraceSpan();
+    expect(store().traceSpanIndex).toBe(1);
+
+    store().setRuntimeOverlay({
+      ...SAMPLE_RUNTIME,
+      traces: [{ ...trace, spans: [trace.spans[0]] }],
+    });
+    expect(store().activeTraceId).toBe(trace.trace_id);
+    expect(store().traceSpanIndex).toBe(0);
+
+    store().setRuntimeOverlay(SAMPLE_RUNTIME);
+    store().startTrace(trace.trace_id);
+    store().nextTraceSpan();
+    expect(store().traceSpanIndex).toBe(1);
+    const previous = window.__ARCH_RUNTIME__;
+    window.__ARCH_RUNTIME__ = {
+      ...SAMPLE_RUNTIME,
+      traces: [{ ...trace, spans: [trace.spans[0]] }],
+    };
+    store().refreshOverlays();
+    expect(store().activeTraceId).toBe(trace.trace_id);
+    expect(store().traceSpanIndex).toBe(0);
+    window.__ARCH_RUNTIME__ = previous;
+  });
 });

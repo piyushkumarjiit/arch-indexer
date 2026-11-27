@@ -193,6 +193,7 @@ export function RuntimeLayerControls({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [livePoll, setLivePoll] = useState(false);
+  const [liveStale, setLiveStale] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const canLivePoll = isHttpServedOrigin();
 
@@ -202,14 +203,30 @@ export function RuntimeLayerControls({
     const poll = async () => {
       try {
         const resp = await fetch("arch/runtime-overlay.v1.json", { cache: "no-store" });
-        if (!resp.ok) return;
-        const parsed: unknown = await resp.json();
-        if (active && isRuntimeOverlayPayload(parsed)) {
-          onLoadRuntime(parsed);
-          setLoadError(null);
+        if (!resp.ok) {
+          if (active) {
+            setLiveStale(true);
+            setLoadError(`Live runtime overlay unavailable (HTTP ${resp.status})`);
+          }
+          return;
         }
-      } catch {
-        // Ignore transient poll failures during live debugging
+        const pollStale = resp.headers.get("X-Arch-Overlay-Status") === "stale";
+        const parsed: unknown = await resp.json();
+        if (!active) return;
+        if (!isRuntimeOverlayPayload(parsed)) {
+          setLiveStale(true);
+          setLoadError("Live runtime overlay payload is invalid");
+          return;
+        }
+        onLoadRuntime(parsed);
+        setLiveStale(pollStale);
+        setLoadError(pollStale ? "Live runtime overlay is stale" : null);
+      } catch (err) {
+        if (!active) return;
+        setLiveStale(true);
+        setLoadError(
+          err instanceof Error ? `Live overlay poll failed: ${err.message}` : "Live overlay poll failed",
+        );
       }
     };
     void poll();
@@ -224,6 +241,7 @@ export function RuntimeLayerControls({
     if (!file) return;
     try {
       const overlay = await readRuntimeOverlayFile(file);
+      setLiveStale(false);
       setLoadError(null);
       onLoadRuntime(overlay);
     } catch (err) {
@@ -301,6 +319,11 @@ export function RuntimeLayerControls({
             commit mismatch
           </span>
         )}
+        {liveStale && (
+          <span className="arch-badge arch-badge--stale" data-testid="runtime-overlay-stale">
+            stale
+          </span>
+        )}
         {!runtimeLayerActive && (
           <span className="arch-runtime-bar__hint">(Runtime layer hidden)</span>
         )}
@@ -356,6 +379,8 @@ export function RuntimeLayerControls({
           data-testid="runtime-clear-btn"
           onClick={() => {
             setLivePoll(false);
+            setLiveStale(false);
+            setLoadError(null);
             onClearRuntime();
           }}
         >
