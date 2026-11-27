@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from arch_indexer.cli import main
 from arch_indexer.graph import load_graph
+from arch_indexer.resources import collect_resources
 
 
 def test_shared_faiss_path_produces_resource_and_one_sided_does_not(tmp_path: Path) -> None:
@@ -45,3 +48,60 @@ def test_shared_faiss_path_produces_resource_and_one_sided_does_not(tmp_path: Pa
     assert any(w["path"] == "indexer/indexer_service.py" for w in res["writers"])
     assert any(r["path"] == "server/rag_service.py" for r in res["readers"])
     assert "res:path:only_written_path" not in resources
+
+
+def _sql_call(module: str, statement: str) -> dict[str, Any]:
+    return {
+        "kind": "call",
+        "file_path": f"{module}/service.py",
+        "line": 1,
+        "col": 0,
+        "name_text": "execute",
+        "name_fqname": "connection.execute",
+        "args_json": json.dumps([{"kind": "literal", "text": json.dumps(statement)}]),
+        "enclosing_fqname": f"{module}.run",
+    }
+
+
+def _collect(facts: list[dict[str, Any]], modules: list[str]) -> dict[str, dict[str, Any]]:
+    files = [{"path": f"{module}/service.py", "module": module} for module in modules]
+    resources, _ = collect_resources(
+        facts=facts,
+        files=files,
+        symbols=[],
+        entrypoints=[],
+        infra_artifacts=[],
+    )
+    return {resource["id"]: resource for resource in resources}
+
+
+def test_sql_write_statements_do_not_record_their_target_as_read() -> None:
+    resources = _collect(
+        [
+            _sql_call("delete_module", "DELETE FROM orders"),
+            _sql_call("update_module", "UPDATE orders SET id = 1 FROM staging"),
+            _sql_call("insert_module", "INSERT INTO orders SELECT * FROM inventory"),
+            _sql_call("seed_module", "INSERT INTO staging VALUES (1)"),
+        ],
+        ["delete_module", "update_module", "insert_module", "seed_module"],
+    )
+
+    assert "res:table:orders" not in resources
+    assert "res:table:inventory" not in resources
+    staging = resources["res:table:staging"]
+    assert [w["path"] for w in staging["writers"]] == ["seed_module/service.py"]
+    assert [r["path"] for r in staging["readers"]] == ["update_module/service.py"]
+
+
+def test_sql_select_still_records_readers() -> None:
+    resources = _collect(
+        [
+            _sql_call("delete_module", "DELETE FROM orders"),
+            _sql_call("reader_module", "SELECT * FROM orders"),
+        ],
+        ["delete_module", "reader_module"],
+    )
+
+    orders = resources["res:table:orders"]
+    assert [w["path"] for w in orders["writers"]] == ["delete_module/service.py"]
+    assert [r["path"] for r in orders["readers"]] == ["reader_module/service.py"]

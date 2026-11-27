@@ -157,15 +157,14 @@ def _classify_call_resource(
 
     # 1. SQL literals in call args -> table read/write
     for val in resolved_vals:
-        matched_sql = False
-        for m in _SQL_WRITE_TABLE_RE.finditer(val):
+        write_matches = list(_SQL_WRITE_TABLE_RE.finditer(val))
+        write_spans = [m.span() for m in write_matches]
+        for m in write_matches:
             out.append(("table", m.group(1).lower(), "write"))
-            matched_sql = True
         for m in _SQL_READ_TABLE_RE.finditer(val):
+            if any(start <= m.start() < end for start, end in write_spans):
+                continue
             out.append(("table", m.group(1).lower(), "read"))
-            matched_sql = True
-        if matched_sql:
-            continue
 
     # 2. Vector store / filesystem paths
     bkind = (b_cand.get("kind") or b_cand.get("boundary_kind") or "") if b_cand else ""
