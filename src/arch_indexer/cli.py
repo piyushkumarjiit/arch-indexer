@@ -728,13 +728,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="entries",
         default=None,
         metavar="EP_ID",
-        help="Restrict exported dataflow edges to matching entrypoint ID (repeatable)",
+        help=(
+            "Restrict the run and refresh stored edges only for matching entrypoint ID "
+            "(repeatable); other entrypoints keep their previously stored edges"
+        ),
     )
     df_parser.add_argument(
         "--max-entries",
         type=_positive_int,
         default=50,
-        help="Maximum number of entrypoints to retain (default: 50)",
+        help=(
+            "Maximum number of entrypoints to refresh and retain (default: 50); when a run "
+            "is trimmed, entrypoints beyond the cap keep their previously stored edges"
+        ),
     )
     df_parser.add_argument(
         "--timeout-sec",

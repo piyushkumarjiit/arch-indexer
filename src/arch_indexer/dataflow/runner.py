@@ -358,6 +358,7 @@ def run_dataflow(
 
         if entries:
             rows = [r for r in rows if r["entry_id"] in selected_set]
+            replace_entry_ids: set[str] | None = selected_set
         else:
             # Cap distinct entry_ids at max_entries deterministically
             allowed_entries: list[str] = []
@@ -369,8 +370,10 @@ def run_dataflow(
                     allowed_entries.append(eid)
             capped_set = set(allowed_entries[:max_entries])
             rows = [r for r in rows if r["entry_id"] in capped_set]
+            replace_entry_ids = capped_set if len(allowed_entries) > max_entries else None
 
-        store.replace_dataflow_edges(rows)
+        store.replace_dataflow_edges(rows, entry_ids=replace_entry_ids)
+        rows = store.get_dataflow_edges()
 
     json_path, js_path = export_dataflow(
         docs_path,

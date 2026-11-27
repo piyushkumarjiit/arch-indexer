@@ -837,8 +837,16 @@ class IndexStore:
             )
         return [dict(row) for row in cursor.fetchall()]
 
-    def replace_dataflow_edges(self, rows: Iterable[dict[str, Any]]) -> None:
-        """Replace all dataflow_edges rows deterministically in one transaction."""
+    def replace_dataflow_edges(
+        self,
+        rows: Iterable[dict[str, Any]],
+        *,
+        entry_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Replace dataflow_edges rows deterministically in one transaction.
+
+        ``entry_ids`` limits the delete to those entry points; ``None`` replaces every row.
+        """
         spec = TABLE_REGISTRY["dataflow_edges"]
         row_list = sorted(
             (
@@ -864,7 +872,16 @@ class IndexStore:
             key=spec.sort_key,
         )
         with self.conn:
-            self.conn.execute("DELETE FROM dataflow_edges")
+            if entry_ids is None:
+                self.conn.execute("DELETE FROM dataflow_edges")
+            else:
+                replaced = sorted({str(eid) for eid in entry_ids if eid})
+                if replaced:
+                    placeholders = ", ".join("?" for _ in replaced)
+                    self.conn.execute(
+                        f"DELETE FROM dataflow_edges WHERE entry_id IN ({placeholders})",
+                        tuple(replaced),
+                    )
             if row_list:
                 self._upsert_rows("dataflow_edges", row_list)
 
