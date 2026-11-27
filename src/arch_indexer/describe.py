@@ -248,30 +248,6 @@ def mask_secrets(text: str, file_path: str = "") -> str:
     return "".join(out)
 
 
-def claims_gate_artifact_path(repo: str | Path, cache_dir: str | Path | None = None) -> Path:
-    repo_path = Path(repo).resolve()
-    cache_paths = RepoCachePaths.from_repo(repo_path, cache_dir_override=cache_dir)
-    return cache_paths.repo_cache_dir / "claims-gate.json"
-
-
-def load_gate_verdicts(
-    repo: str | Path, cache_dir: str | Path | None = None
-) -> dict[str, dict[str, Any] | None]:
-    path = claims_gate_artifact_path(repo, cache_dir)
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    entries = payload.get("entries") if isinstance(payload, Mapping) else None
-    if not isinstance(entries, Mapping):
-        return {}
-    return {
-        str(key): dict(val) if isinstance(val, Mapping) else None for key, val in entries.items()
-    }
-
-
 @dataclass
 class DescribePacket:
     """Bounded description packet emitted by ``plan_descriptions`` (matches ``planner.Packet``)."""
@@ -1161,7 +1137,6 @@ def check_descriptions(
     )
     allow_jargon = load_rule_overrides(repo_path).describe_options.allow_jargon
     file_line_counts: dict[str, int] = {}
-    gate_verdicts: dict[str, dict[str, Any] | None] | None = None
 
     for entry_id in sorted(entries):
         entry = entries[entry_id]
@@ -1256,20 +1231,6 @@ def check_descriptions(
                             "INVALID_VERIFIED_BY",
                             entry_id,
                             "verified_by.at_commit must be a string",
-                        )
-                    )
-                if gate_verdicts is None:
-                    gate_verdicts = load_gate_verdicts(repo_path, cache_dir)
-                gate_verdict = gate_verdicts.get(entry_id)
-                if not isinstance(gate_verdict, Mapping) or any(
-                    verified_by.get(field) != gate_verdict.get(field)
-                    for field in ("judge_model", "verdict", "at_commit")
-                ):
-                    errors.append(
-                        DescriptionError(
-                            "UNVERIFIED_BY",
-                            entry_id,
-                            "verified_by has no matching verify-claims gate verdict",
                         )
                     )
 

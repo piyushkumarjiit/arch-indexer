@@ -187,7 +187,7 @@ The assembly command automatically:
   ```bash
   arch-indexer verify-claims gate <repo> --verdicts verdicts.jsonl --writer-model <writer-id> --judges 1
   ```
-  Never hand-author `verified_by` in `descriptions.json`: the gate writes it for every judged entry (and clears it on any `contradicted`/`bad-citation` claim), and `describe check` rejects a `verified_by` without a matching gate record.
+  Never hand-author `verified_by` in `descriptions.json`: the gate writes it for every judged entry (and clears it on any `contradicted`/`bad-citation` claim), and `describe check` validates its shape.
   If `verify-claims gate` exits `3`, dispatch targeted fix workers for the failing claims and re-assemble; if it exits `0`, proceed to commit (Step 3e).
 - If `assemble` exits `3` (`EXIT_VALIDATION_FAILED`):
   1. Inspect error diagnostics from `check-citations` or `check-mermaid` (the drafts are retained).

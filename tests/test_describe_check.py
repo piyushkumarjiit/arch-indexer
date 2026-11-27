@@ -62,18 +62,6 @@ def _build_two_part_repo(tmp_path: Path) -> tuple[Path, Path]:
     return repo, cache
 
 
-def _write_gate_artifact(repo: Path, cache: Path, entries: dict) -> Path:
-    path = RepoCachePaths.from_repo(repo, cache_dir_override=cache).repo_cache_dir / (
-        "claims-gate.json"
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"schema_version": "1.0", "entries": entries}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return path
-
-
 def _valid_descriptions_for_repo(repo: Path, cache: Path) -> dict:
     overview = json.loads((repo / "docs" / "arch" / "overview.json").read_text(encoding="utf-8"))
     flow_id = overview["flow_index"][0]["id"]
@@ -127,15 +115,6 @@ def _valid_descriptions_for_repo(repo: Path, cache: Path) -> dict:
             },
         },
     }
-    _write_gate_artifact(
-        repo,
-        cache,
-        {
-            entry_id: entry["verified_by"]
-            for entry_id, entry in data["entries"].items()
-            if entry.get("verified_by")
-        },
-    )
     return data
 
 
@@ -211,37 +190,18 @@ def test_describe_check_failures_and_pass_emits_js(tmp_path: Path) -> None:
     assert not any(e.code == "JARGON_HIT" for e in errs_allowed)
 
 
-def test_describe_check_rejects_verified_by_without_matching_gate_verdict(
-    tmp_path: Path,
-) -> None:
-    repo, cache = _build_two_part_repo(tmp_path)
+def test_describe_check_passes_committed_verified_by_with_empty_cache(tmp_path: Path) -> None:
+    repo, _ = _build_two_part_repo(tmp_path)
+    empty_cache = tmp_path / "empty-cache"
     desc_path = repo / "docs" / "arch" / "descriptions.json"
-    base = _valid_descriptions_for_repo(repo, cache)
-    desc_path.write_text(json.dumps(base, indent=2), encoding="utf-8")
-    verified = base["entries"]["part:server"]["verified_by"]
-    artifact = (
-        RepoCachePaths.from_repo(repo, cache_dir_override=cache).repo_cache_dir / "claims-gate.json"
+    desc_path.write_text(
+        json.dumps(_valid_descriptions_for_repo(repo, empty_cache), indent=2),
+        encoding="utf-8",
     )
 
-    assert not check_descriptions(repo, desc_path, cache_dir=cache, write_js=False)
-
-    artifact.unlink()
-    unverified = check_descriptions(repo, desc_path, cache_dir=cache, write_js=False)
-    assert any(
-        error.code == "UNVERIFIED_BY" and error.entry_id == "part:server" for error in unverified
-    )
-
-    _write_gate_artifact(repo, cache, {"part:server": verified})
-    tampered = json.loads(json.dumps(base))
-    tampered["entries"]["part:server"]["verified_by"]["verdict"] = "partial"
-    desc_path.write_text(json.dumps(tampered, indent=2), encoding="utf-8")
-    unverified = check_descriptions(repo, desc_path, cache_dir=cache, write_js=False)
-    assert any(
-        error.code == "UNVERIFIED_BY" and error.entry_id == "part:server" for error in unverified
-    )
-
-    desc_path.write_text(json.dumps(base, indent=2), encoding="utf-8")
-    assert not check_descriptions(repo, desc_path, cache_dir=cache, write_js=False)
+    assert not check_descriptions(repo, desc_path, cache_dir=empty_cache, write_js=False)
+    cache_paths = RepoCachePaths.from_repo(repo, cache_dir_override=empty_cache)
+    assert not (cache_paths.repo_cache_dir / "claims-gate.json").exists()
 
 
 def test_editing_one_cited_span_marks_only_that_entry_and_flows_stale(tmp_path: Path) -> None:

@@ -479,12 +479,6 @@ def test_gate_writes_verified_by_for_passing_entry_and_clears_failing_entry(
             "at_commit": "",
         }
 
-    artifact = (
-        RepoCachePaths.from_repo(repo, cache_dir_override=cache).repo_cache_dir / "claims-gate.json"
-    )
-    artifact_data = json.loads(artifact.read_text(encoding="utf-8"))
-    assert artifact_data["entries"]["part:app"] == data["entries"]["part:app"]["verified_by"]
-
     contradicted = [{"key": key, "judge_model": "judge-z", "verdict": "supported"} for key in keys]
     contradicted[1]["verdict"] = "contradicted"
     _write_jsonl(tmp_path / "verdicts.jsonl", contradicted)

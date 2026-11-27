@@ -22,7 +22,7 @@ from arch_indexer.checks.citations import (
     parse_citation_definitions,
 )
 from arch_indexer.config import DEFAULT_DOCS_DIR, RepoCachePaths
-from arch_indexer.describe import claims_gate_artifact_path, mask_secrets
+from arch_indexer.describe import mask_secrets
 from arch_indexer.graph import git_head
 
 MAX_CLAIM_SPAN_LINES = 80
@@ -582,20 +582,19 @@ def run_verify_claims_plan(
     return 0
 
 
-def _verified_by_for_descriptions(
+def _apply_verified_by(
     descriptions: dict[str, Any],
     planned_keys: Sequence[str],
     result: GateResult,
     judge_label: str,
     at_commit: str,
-) -> dict[str, dict[str, str] | None]:
+) -> None:
     entries = descriptions.get("entries")
     if not isinstance(entries, Mapping):
         raise ValueError("descriptions.json is missing an 'entries' object")
     planned = set(planned_keys)
     partial = set(result.partial_keys)
     failed = set(result.contradicted_keys) | set(result.bad_citation_keys)
-    verified: dict[str, dict[str, str] | None] = {}
     for entry_id, entry in entries.items():
         if not isinstance(entry, dict):
             continue
@@ -614,8 +613,6 @@ def _verified_by_for_descriptions(
                 "at_commit": at_commit,
             }
         entry["verified_by"] = verified_by
-        verified[str(entry_id)] = verified_by
-    return verified
 
 
 def _record_claim_verification(
@@ -624,7 +621,6 @@ def _record_claim_verification(
     descriptions_path: str | Path | None,
     planned_keys: Sequence[str],
     result: GateResult,
-    cache_dir: str | Path | None,
 ) -> None:
     docs_root = Path(docs_dir) if Path(docs_dir).is_absolute() else repo_path / docs_dir
     desc_path = (
@@ -634,37 +630,21 @@ def _record_claim_verification(
     )
     if not desc_path.is_absolute():
         desc_path = repo_path / desc_path
+    if not desc_path.is_file():
+        return
 
-    at_commit = git_head(repo_path) or ""
-    judge_label = ", ".join(sorted(result.judge_models))
-    verified: dict[str, dict[str, str] | None] = {}
-    if desc_path.is_file():
-        data = json.loads(desc_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError(f"{desc_path}: root must be a JSON object")
-        verified = _verified_by_for_descriptions(data, planned_keys, result, judge_label, at_commit)
-        desc_path.write_text(
-            json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-
-    artifact_path = claims_gate_artifact_path(repo_path, cache_dir)
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "at_commit": at_commit,
-                "writer_model": result.writer_model,
-                "judges": sorted(result.judge_models),
-                "passed": result.passed,
-                "entries": verified,
-            },
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        + "\n",
+    data = json.loads(desc_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{desc_path}: root must be a JSON object")
+    _apply_verified_by(
+        data,
+        planned_keys,
+        result,
+        ", ".join(sorted(result.judge_models)),
+        git_head(repo_path) or "",
+    )
+    desc_path.write_text(
+        json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
@@ -725,7 +705,6 @@ def run_verify_claims_gate(
             descriptions_path,
             planned_keys,
             result,
-            cache_dir,
         )
     except JudgeWriterConflictError as exc:
         stderr.write(f"Error: {exc}\n")
