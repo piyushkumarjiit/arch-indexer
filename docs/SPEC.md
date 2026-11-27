@@ -77,8 +77,11 @@ arch-indexer/
 │   │   └── _otlp/                   # Vendored opentelemetry-proto bindings (Apache-2.0, see its README)
 │   ├── checks/
 │   │   ├── citations.py             # Citation parser, verifier, drift repair, impact mapper
+│   │   ├── claims.py                # Cross-model claim planner & judge verdict gate (§8.5)
 │   │   └── mermaid.py               # Static Mermaid validator & AUTO-DIAGRAM verifier
+│   ├── humanize.py                  # Plain-language naming helpers & banned-jargon lint
 │   ├── planner.py                   # Bounded worker packet generator
+│   ├── describe.py                  # Description packet planner, validator, secret masking & staleness tracker (§8.4)
 │   ├── assembler.py                 # Deterministic section merger & diagram injector
 │   ├── skeletons/
 │   │   ├── DESIGN.md                # Design-doc skeleton: SECTION markers & AUTO-DIAGRAM slots
@@ -98,7 +101,12 @@ arch-indexer/
     ├── test_query.py
     ├── test_citations.py
     ├── test_planner.py
-    └── test_assembler.py
+    ├── test_assembler.py
+    ├── test_describe_check.py
+    ├── test_humanize.py
+    ├── test_secret_masking.py
+    ├── test_claims_gate.py
+    └── test_mermaid_parts.py
 ```
 
 ### 2.2 External Tool-Local Cache Layout
@@ -118,6 +126,8 @@ Default root: `${XDG_CACHE_HOME:-~/.cache}/arch-indexer` (overridable via `ARCH_
         ├── index-delta.json         # Added/modified/deleted files & symbols
         ├── impacted-sections.json   # Doc sections invalidated by the current delta
         ├── work-plan.json           # Bounded worker packets
+        ├── describe-plan.json       # Bounded description packets (§8.4)
+        ├── claims-plan.json         # Claim verification packets (§8.5)
         └── scip-tmp/                # Ephemeral per-unit .scip files (cleaned after ingest)
 ```
 
@@ -137,14 +147,15 @@ Only human-facing docs and viewer outputs are written to `<target_repo>/docs/`:
 │   ├── vendor/
 │   │   ├── elk-worker.min.js        # Unmodified ELKjs 0.12.2 worker, loaded by the viewer
 │   │   └── elkjs-EPL-2.0.txt        # Its licence text
-│   ├── descriptions.js              # null JSONP stub until descriptions.json exists
+│   ├── descriptions.json            # Plain-language descriptions for parts, groups, boundaries and flows (§8.4)
+│   ├── descriptions.js              # Its JSONP twin: `null` until `describe check` passes, then the validated payload
 │   ├── runtime-overlay.v1.json      # Joined runtime metrics & sampled traces (§6.3); only `trace ingest` writes it
 │   ├── runtime-overlay.v1.js        # window.__ARCH_RUNTIME__ sidecar (null stub until the overlay JSON exists)
 │   ├── dataflow.v1.js               # null JSONP stub until dataflow.v1.json exists
 │   └── dependencies.json            # Deterministic package dependency catalog (§6.4)
 └── flow-viewer.html                 # Offline single-file interactive viewer (no server/network)
 ```
-Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`) are never committed.
+Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`, `docs/arch/.describe-drafts/`) are never committed.
 
 ---
 
@@ -374,16 +385,16 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 
 **Shared resources and sidecars.** `resources` lists a `res:<kind>:<value>` artifact only when it has at least one writer and one reader across two distinct modules or entry roots, with writer/reader evidence (`path`, `line`, optional `symbol`) on both sides. Compose/Kubernetes services whose image is not itself a data store and that are not the repository's own root build become `sidecar` nodes (`svc:*`) with `http_request` edges from the code that binds them; the `sidecars` array keeps each service's `image`, source site and the config sites that bind it. Outbound HTTP calls whose file or symbol binds a non-local host become `ext:host:<host>` sinks, and the generic `ext:http` sink is dropped when every candidate was retargeted. Secret-like configuration values are never persisted.
 
-**Rule overrides.** Boundary and entrypoint classification is data-driven. Built-in rules live in `src/arch_indexer/rules/boundaries.toml` and `src/arch_indexer/rules/entrypoints.toml` (package data); `index` merges `.arch-indexer.toml` overrides by `id` (a repository rule replaces a built-in with the same id, otherwise it is appended). The repository file accepts `[[rule]]` entries, a `[boundaries."<package>"]` shorthand, a `[graph] dispatch_fanout_cap` integer, a `[parts."<name>"] paths` glob list that claims modules for a named part (an explicit override wins over the derived parts, and a module joins the part matching most of its files), and a `[viewer] editor_url` template; `.arch-indexer.proposals.toml` is never loaded automatically. A malformed rule file or invalid rule value fails `index` with exit `1` before the graph is exported.
+**Rule overrides.** Boundary and entrypoint classification is data-driven. Built-in rules live in `src/arch_indexer/rules/boundaries.toml` and `src/arch_indexer/rules/entrypoints.toml` (package data); `index` merges `.arch-indexer.toml` overrides by `id` (a repository rule replaces a built-in with the same id, otherwise it is appended). The repository file accepts `[[rule]]` entries, a `[boundaries."<package>"]` shorthand, a `[graph] dispatch_fanout_cap` integer, a `[parts."<name>"] paths` glob list that claims modules for a named part (an explicit override wins over the derived parts, and a module joins the part matching most of its files), a `[viewer] editor_url` template, and a `[describe] allow_jargon` string list that exempts repository vocabulary from the `describe check` jargon lint (§8.4); `.arch-indexer.proposals.toml` is never loaded automatically. A malformed rule file or invalid rule value fails `index` with exit `1` before the graph is exported.
 
 **Module identity.** Modules come from real structure, not one fixed package level (`src/arch_indexer/module_identity.py`). A JVM file in a multi-module Maven reactor leads with its reactor module (the directory owning `src/{main,test}/<lang>`) followed by its package below the reverse-domain prefix; JVM files outside any reactor module keep only their package path. Every other file leads with its package path, with source roots (`src`, `lib`, `app`, ...) and a Python container package shared by all Python files stripped. A module whose files exceed the planner's per-worker budget (§9.2) is split into its subpackages, recursively, so no module is larger than one worker can document; files that sit directly in a split package stay in a module named after it (`root` when no segment remains), and `module_id` stays `mod:<name>` with dots for subpackages. Overrides, strongest first: a `[modules.map]` entry in `.arch-indexer.toml` at the repository root (a repository-relative path prefix mapped to a module name; the longest matching prefix wins), then a fixed depth from `index --module-depth N` or `[modules] depth` in the same file. Derivation is a deterministic function of the file rows and these options; a malformed `.arch-indexer.toml` or a non-positive depth fails `index` with exit `1` before `index.db` is touched.
 
 **Test code is not architecture.** Test files (a `test`/`tests`/`__tests__` directory, `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.*`/`*.spec.*` for TypeScript/JavaScript, `*Test.java`/`*Tests.java`/`*IT.java`, or a `src/test/...` tree) stay in `index.db` so `query def`/`query refs` remain traceable, but by default they produce no modules, entrypoint nodes, diagram domains, `master-index.json` modules or totals, work packets or delta entries. `index --include-tests` opts them back into every architecture output (`include_tests: true` in `graph.json` and `master-index.json`), and the graph-derived flag is then honoured by `plan`; `query entrypoints`, `query module-summary`, `query refs` and `query flow-trace` expose the same `--include-tests` opt-in.
 
 ### 6.2 Deterministic Mermaid Generation
-`arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks.
-- **Module Dependency Diagram** (`module-overview`): `flowchart LR` of modules, data stores, and external sinks.
-- **Per-Entrypoint / Per-Domain Flow Diagrams** (`flow-<domain>`): one `flowchart TD` per entrypoint domain, tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`. Diagram ids are the exact `AUTO-DIAGRAM:<id>` slot ids (no `diagram:` prefix).
+`arch-indexer` generates Mermaid code directly from `graph.json`—LLM workers **never** write or edit Mermaid blocks. The generation mode follows the viewer bundle: when `docs/arch/overview.json` holds at least two derived parts (parts-first docs mode), the overview and flow diagrams are parts-first; otherwise they are module/domain-based.
+- **Module or Parts Overview** (`module-overview`): in parts-first mode, `flowchart LR` of derived parts (child modules in each label) plus data stores and external sinks; otherwise `flowchart LR` of modules, data stores, and external sinks.
+- **Per-Part or Per-Domain Flow Diagrams**: in parts-first mode one boundary-centred `flowchart TD` per part (`flow-<part-slug>`), capped at the part's top 3 flows; otherwise one `flowchart TD` per entrypoint domain (`flow-<domain>`), tracing `Entrypoint -> Handler/Auth -> Service -> Data Store / External Sink`. Diagram ids are the exact `AUTO-DIAGRAM:<id>` slot ids (no `diagram:` prefix).
 - **Readability budgets** (essential for ~1,000-file repos): fixed node and edge budgets of `35` nodes and `60` edges. When a flow diagram exceeds either budget, its service nodes are first collapsed to their module-level aggregates, except those of the dominant module (the module holding more than half of the visited services), which is kept so a flow never collapses into a single module stub with no edges. If the diagram is still over budget (or the module overview is over budget), it is deterministically truncated to the budget: entrypoints may take at most a third of the node budget, preferring those that call something, and the remaining nodes are filled breadth-first from those entrypoints (boundaries ranked ahead of services) so every kept node stays connected to a kept entrypoint. Either way it adds a note pointing to `docs/flow-viewer.html` for full interactive traversal, including how many entrypoints were summarized.
 - Diagrams are inserted into `docs/DESIGN.md` inside immutable markers:
   ```markdown
@@ -398,7 +409,7 @@ Generated deterministically by `arch-indexer index` (zero LLM involvement):
 ### 6.3 Static Offline HTML Viewer (`docs/flow-viewer.html`)
 `index` generates one **single self-contained HTML file** with inline CSS and JS (no external CDN, no web server, no network) from one of two renderers, selected by `--viewer` (default `v2`). Both open directly over `file://`.
 
-**v2 (default, `--viewer v2`).** `arch_indexer.viewer.render_viewer_v2` inlines the pre-built React Flow + ELKjs app from `viewer/dist/` (rebuilt with `make viewer`), embeds `docs/arch/overview.json`, and references the sibling `docs/arch/` bundle rather than inlining it: one JSONP detail chunk per part under `chunks/`, `chunks/search.js` loaded on first search, and the unmodified `vendor/elk-worker.min.js`. Optional layer files are written as `null` JSONP stubs (`descriptions.js`, `runtime-overlay.v1.js`, `dataflow.v1.js`); `trace ingest` fills `runtime-overlay.v1.json` and its `.js` sidecar, and `index` rewrites the `.js` stub only when that JSON is absent, so the page opens from `file://` with zero console errors. `index` writes the v1 viewer instead when the pre-built assets are missing.
+**v2 (default, `--viewer v2`).** `arch_indexer.viewer.render_viewer_v2` inlines the pre-built React Flow + ELKjs app from `viewer/dist/` (rebuilt with `make viewer`), embeds `docs/arch/overview.json`, and references the sibling `docs/arch/` bundle rather than inlining it: one JSONP detail chunk per part under `chunks/`, `chunks/search.js` loaded on first search, and the unmodified `vendor/elk-worker.min.js`. Every optional layer file is a written `null` JSONP stub until its producer exists (`descriptions.js`, `runtime-overlay.v1.js`, `dataflow.v1.js`), so the page opens from `file://` with zero console errors: `describe check` replaces the `descriptions.js` stub with the validated descriptions (§8.4) and `index` marks individual entries stale when a cited span changes, while `trace ingest` fills `runtime-overlay.v1.json` and its `.js` sidecar and `index` rewrites that `.js` stub only when the JSON is absent. A described node shows its summary (dimmed with a `stale` badge when stale), the inspector shows its summary and details, and the flow banner shows the flow title and the current step's narration. `index` writes the v1 viewer instead when the pre-built assets are missing.
 - **Levels**: overview (parts, boundaries and the summary panel) -> part (three `Used by` / `Inside` / `Uses` bands derived from the real ELK partition bounds) -> group (directory chips once a group holds more than `24` files) -> file (`22` symbols by degree, then `+N more`) -> symbol (call tree to depth 3 plus the flows through it). A view draws at most `300` nodes; the rest fold into one `+N` node whose items the inspector lists as jump links.
 - **Layers and edges**: control (`calls`, `registers`, `boots`, `implements`), data (`reads`, `writes`, `publishes`, `dataflow`, plus `ds:`/`res:` boundaries) and integration (`http_request`, plus `ext:`/`svc:` boundaries) can each be switched off, and runtime joins once an overlay exists. One merged edge is drawn per node pair from the kinds its active layers leave visible, and the edge inspector reports the per-kind breakdown. A boundary hides when its own layer is off and nothing active connects it.
 - **Inspector and navigation**: clicking a node or edge shows its `file:line`, kind, part/group, tier and `confidence`, its docstring, incoming and outgoing edges and the flows through it, with `evidence[]` copyable as `path:line` and linked to an editor when `.arch-indexer.toml` sets `[viewer] editor_url` (a template with `{abs_path}`, `{file}` and `{line}`; allowed URL schemes are `vscode:`, `vscode-insiders:`, `cursor:`, `idea:`, `jetbrains:`, `zed:`, `subl:`, `http:`, `https:`, and `file:`, validated at config load and before link rendering). Click selects, double-click or Enter drills down, Backspace or the breadcrumb goes up, `/` or Ctrl-K searches, and `#node=<id>` deep-links a node.
@@ -463,6 +474,7 @@ arch-indexer query <repo> flow-trace <entrypoint-id> [--depth 6] [--include-test
 ```bash
 # 4. Bounded worker planning
 arch-indexer plan <repo> \
+  [--by parts|modules] \
   [--max-lines-per-worker 15000] \
   [--max-symbols-per-worker 800] \
   [--max-sections-per-worker 3]
@@ -475,20 +487,30 @@ arch-indexer assemble <repo> --drafts-dir <dir> [--docs-dir docs] [--diagrams <j
 arch-indexer check-citations <repo> [--docs-dir docs] [--file <path>] [--format json|text]
 arch-indexer check-mermaid <repo> [--docs-dir docs] [--format json|text]
 
-# 7. Live-production runtime overlay (offline span files or read-only Jaeger GET;
+# 7. Plain-language descriptions (§8.4)
+arch-indexer describe plan <repo> [--top-flows 10] [--docs-dir docs] [--cache-dir <dir>] [--out <path>]
+arch-indexer describe check <repo> [--input <descriptions.json>] [--docs-dir docs] [--format json|text]
+
+# 8. Cross-model claim verification (§8.5)
+arch-indexer verify-claims plan <repo> [--docs-dir docs] [--descriptions <path>] [--cache-dir <dir>] [--out <path>]
+arch-indexer verify-claims gate <repo> --verdicts <jsonl> [--verdicts <jsonl>]... \
+  --writer-model <id> [--judge-model <id>] [--judges 1] [--max-partial 0.05] \
+  [--plan <claims-plan.json>] [--cache-dir <dir>] [--format json|text]
+
+# 9. Live-production runtime overlay (offline span files or read-only Jaeger GET;
 #    writes docs/arch/runtime-overlay.v1.{json,js})
 arch-indexer trace ingest <repo> \
   (--otlp-file <path> | --collector-file <path> | --jaeger <url> --service <name>) \
   [--lookback 1h] [--limit 200] [--path-prefix-map SRC=DST]... [--docs-dir docs] [--cache-dir <dir>]
 
-# 8. Optional read-only localhost server for live overlay polling (Decision D5)
+# 10. Optional read-only localhost server for live overlay polling (Decision D5)
 arch-indexer serve <repo> [--docs-dir docs] [--host 127.0.0.1] [--port 8765] \
   [--jaeger <url> --service <name>] [--lookback 1h] [--limit 200] \
   [--poll-interval 15] [--path-prefix-map SRC=DST]... [--cache-dir <dir>]
 ```
 
 > [!NOTE] Amendment: `assemble --diagrams`, `assemble --remove-slice` and path resolution
-> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text. When `docs/graph.json` exists, `assemble` derives the diagrams itself with `arch_indexer.mermaid_gen.generate_diagrams` and rewrites every slot in `docs/DESIGN.md` to that graph's deterministic output: slots the graph does not produce are removed and missing `flow-<domain>` slots are inserted in the section that owns them, so a freshly assembled document passes the `check-mermaid` AUTO-DIAGRAM gate. An explicit `--diagrams` mapping is applied first and the graph-derived diagrams then take precedence, so keys must match slot ids exactly (no alias spellings). Without `docs/graph.json`, slots are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory. A missing in-repo drafts directory is created instead of rejected: with zero `*.md` drafts and no `--remove-slice`, `assemble` creates the directory, prints the draft-packet contract and the canonical section ids that still have no body text, and exits `0` without running the gates or writing documents. A missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` is not a gate failure: both `check-citations` and `check-mermaid` consistently skip a missing canonical document, and `assemble` reports that skip once for both gates instead of printing one note per gate.
+> `assemble` accepts `--diagrams <json>`: a JSON object mapping `AUTO-DIAGRAM` slot id to Mermaid text. When `docs/graph.json` exists, `assemble` derives the diagrams itself with `arch_indexer.mermaid_gen.generate_diagrams` and rewrites every slot in `docs/DESIGN.md` to that graph's deterministic output: slots the graph does not produce are removed and missing `flow-<domain>` (or, in parts-first mode, `flow-<part-slug>`) slots are inserted in the section that owns them, so a freshly assembled document passes the `check-mermaid` AUTO-DIAGRAM gate. An explicit `--diagrams` mapping is applied first and the graph-derived diagrams then take precedence, so keys must match slot ids exactly (no alias spellings). Without `docs/graph.json`, slots are left untouched. `assemble` also accepts repeatable `--remove-slice <packet_id>`: it deletes the `SLICE` block of that packet from whichever canonical document holds it, so the planner can retire slices of removed or re-sharded packets; removals apply even when no drafts are present. Relative `--drafts-dir`, `--docs-dir` and `--diagrams` paths resolve against `<repo>` only, never the current working directory. `assemble` refuses (exit 1) a drafts directory outside `<repo>`, equal to `<repo>`, equal to the docs directory, or containing the docs directory. A missing in-repo drafts directory is created instead of rejected: with zero `*.md` drafts and no `--remove-slice`, `assemble` creates the directory, prints the draft-packet contract and the canonical section ids that still have no body text, and exits `0` without running the gates or writing documents. A missing `docs/DESIGN.md` or `docs/USER_GUIDE.md` is not a gate failure: both `check-citations` and `check-mermaid` consistently skip a missing canonical document, and `assemble` reports that skip once for both gates instead of printing one note per gate.
 
 `trace ingest` auto-detects OTLP JSON vs protobuf for `--otlp-file` (by extension, otherwise by a leading `{`/`[`) and reads `--collector-file` as the OTel Collector file-exporter's JSON/JSONL output; `--jaeger` requires `--service` and reads `/api/v3/traces` read-only. `--lookback` accepts `<n>d`, `<n>h`, `<n>m` or `<n>s` (bare seconds also accepted; default `1h`) and `--limit` caps the Jaeger trace count (default `200`). Relative `--docs-dir` resolves against `<repo>`. When fewer than 10% of spans match (including an empty input), the command writes nothing and exits `3` after printing the top unmatched span names; otherwise it writes `docs/arch/runtime-overlay.v1.json` and `.js` and prints the match count.
 
@@ -500,9 +522,9 @@ All callers (CI pipelines, shell scripts, Firstmate orchestrators) must handle e
 | Code | Name | Meaning |
 | :--- | :--- | :--- |
 | `0` | `OK` / `NO_CHANGES` | Command succeeded. For `index`, means no documentation work is needed: the delta is empty and no section is impacted (docs are up to date; skip LLM workers), or a move-only delta was relocated by `--auto-relocate-citations` with no section left impacted. |
-| `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path (outside the repository, the repository root, the docs directory or containing it), a `packet_id` declared by more than one draft, or unreadable repository. A missing in-repo drafts directory is created and zero drafts is a successful bootstrap (`assemble` exits `0`). |
+| `1` | `ERROR` | Runtime error, invalid CLI arguments, an unusable `--drafts-dir`/`--diagrams` path (outside the repository, the repository root, the docs directory or containing it), a `packet_id` declared by more than one draft, or unreadable repository. Also: `plan --by parts` or `describe plan` without `docs/arch/overview.json`, `describe check` without its input file, and a `verify-claims gate` whose judge model equals the writer model or whose verdicts/claims plan are missing or malformed. A missing in-repo drafts directory is created and zero drafts is a successful bootstrap (`assemble` exits `0`). |
 | `2` | `DELTA_DETECTED` | For `index` only: changes detected, a canonical section is missing, or any section remains impacted (including an `AUTO-DIAGRAM` block edited since the last index while the source tree is unchanged, or a required section that still has no body). `index-delta.json` and `impacted-sections.json` are ready; proceed to `plan` and workers. |
-| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, or a worker draft that violates the draft-file contract in §9.2), or `trace ingest` matched fewer than 10% of its spans (including none). |
+| `3` | `VALIDATION_FAILED` | `check-citations`, `check-mermaid`, `assemble`, `describe check`, `verify-claims gate`, or the `index --auto-relocate-citations` repair failed verification (broken/drifted citation, missing symbol, uncited technical section, empty required section reported by `check-citations` alone, invalid Mermaid syntax, an `AUTO-DIAGRAM` block that differs from `docs/graph.json` or a graph-generated diagram with no block, a worker draft that violates the draft-file contract in §9.2, invalid or stale descriptions per §8.4, or a contradicted claim or over-threshold partial/bad-citation rate per §8.5), or `trace ingest` matched fewer than 10% of its spans (including none). |
 | `4` | `TOOLCHAIN_MISSING` | `--offline` with `--strict-tier1` requested and a required Tier 1 indexer or its runtime is not available, or `--strict-tier1-any` requested and any unit whose language has a Tier 1 indexer fell back, online or offline. The stored `index.db` is left untouched. |
 
 `index` stdout always agrees with its exit code. Only the exit-`0` path prints `No changes: documentation is up to date`. When the source tree is unchanged but sections remain impacted (exit `2`), it prints `No source changes: <N> documentation section(s) still impacted`, where `<N>` counts impacted plus missing sections, then `Impacted sections: <n>` and/or `Missing sections: <n>` for the non-zero counts; it never prints the up-to-date message.
@@ -555,6 +577,21 @@ No headless browser or Chromium dependency. A missing canonical document is skip
 - When `docs/graph.json` exists, verifies that every `AUTO-DIAGRAM:<id>` block matches the exact deterministic output of that graph, and that every diagram the graph produces has a block in `docs/DESIGN.md` (detecting accidental manual or LLM edits to generated diagrams, and missing generated diagrams).
 - Exits **`3`** on any violation.
 
+### 8.4 Plain-Language Descriptions (`docs/arch/descriptions.json`)
+`arch-indexer describe plan` reads `docs/arch/overview.json` (exit `1` when missing) and emits bounded description packets to `<cache>/repos/<id>/describe-plan.json` covering every part, group and boundary plus the top `--top-flows` (default `10`) flows. Each packet stays within a 4,000-token cap: a part or flow is its own target, while groups and boundaries are batched up to eight targets per packet, and each packet names a per-packet writer draft path under `docs/arch/.describe-drafts/`. Entries already `fresh` are skipped, and every snippet and docstring in a packet is secret-masked to `[REDACTED]` by the detectors in `arch_indexer.describe` so credentials never reach a writer or a committed description.
+
+`docs/arch/descriptions.json` is the writer-owned payload: schema version `1.0`, a non-empty `writer_model`, and `entries` keyed by an overview id (`part:`, `mod:`, `ds:`, `ext:`, `svc:`, `res:` or `flow:`); `file:`, `ep:`, `fe:` and `sym:` keys are rejected. Each entry carries:
+- `summary` (required, at most 160 characters) and `details` (at most 600 characters);
+- `status` (`fresh` or `stale`), `span_hash`, a non-empty `citations` list of `path:line` entries (at least one must fall inside the entity's own files), and an optional `verified_by` object (`verdict` is `supported` or `partial`, with a `judge_model`);
+- for a `flow:` entry, a `title` (at most 60 characters) and `steps[]`, each with a `node_id`, a `narration` (at most 200 characters) and a `citation` inside that step node's file.
+
+`summary`, `details`, titles and narrations pass the plain-language lint (`arch_indexer.humanize.jargon_in`), which rejects generic marketing words and framework jargon unless `[describe] allow_jargon` in `.arch-indexer.toml` exempts them (§6.1); backticked symbol-like identifiers must exist in the index. `describe check` validates the file and, only when it is clean, writes the JSONP twin `docs/arch/descriptions.js` consumed by the viewer (§6.3). Any violation exits `3` with per-entry diagnostics; a missing input file exits `1`. Every `index` run recomputes staleness: an entry whose cited spans hash differently becomes `stale`, a flow also becomes `stale` when one of its steps depends on a stale entry, the entry file is rewritten when its content changed, and `descriptions.js` is regenerated from it.
+
+### 8.5 Cross-Model Claim Verification (`verify-claims`)
+Writer and judge must come from different model families. `arch-indexer verify-claims plan` extracts one claim per `docs/DESIGN.md` and `docs/USER_GUIDE.md` footnote (`DESIGN#<n>`, `GUIDE#<n>`: the claim is the lines referencing that footnote and the evidence is the cited source span, capped at 80 lines) plus one per descriptions entry (`DESC#<id>`) and per flow step (`DESC#<id>#step<i>`), and writes `<cache>/repos/<id>/claims-plan.json`.
+
+`arch-indexer verify-claims gate` reads one or more verdict JSONL files (repeatable `--verdicts`) whose rows carry `key`, `verdict` (`supported`, `partial`, `contradicted`, `bad-citation` or `unprovable`), `judge_model`, and optional `evidence`/`note`. It exits `1` when the writer model is empty, when a row's or `--judge-model`'s judge equals `--writer-model`, when fewer than `--judges` distinct judges voted, when a planned claim has no verdict or lacks a vote from every requested judge, or when the plan or a verdict file is missing or malformed. Consensus uses the quorum `ceil(judges/2)`: a claim is `contradicted` when contradicted votes reach quorum, `partial` when partial-plus-contradicted votes do, and `bad-citation` when any flag votes reach quorum without either of those majorities; `unprovable` votes never count as a flag. The gate passes only when at least one claim was judged, no claim is contradicted, and the partial-plus-bad-citation rate is at or below `--max-partial` (default `0.05`); otherwise it exits `3` and prints the failing keys. `--judges 2` is the release-audit setting.
+
 ---
 
 ## 9. Firstmate Integration (Thin Skill & Conflict-Free Workers)
@@ -566,6 +603,7 @@ No headless browser or Chromium dependency. A missing canonical document is skip
 ### 9.2 Bounded Worker Sharding (`arch-indexer plan`)
 To prevent any single worker from handling a 200k-line repository, `arch-indexer plan` reads `impacted-sections.json`, `master-index.json`, and `graph.json`, and emits `work-plan.json` containing bounded **work packets**:
 - Each packet targets a disjoint subset of impacted sections and/or module slices (e.g., the packets `design-sec2-mod-billing` and `design-sec2-mod-orders` both draft canonical section `design-sec2`, and `guide-sec3-admin` drafts `guide-sec3`; the packet id names the slice, while `section_ids` names the canonical section).
+- `--by` selects the planning axis and `work-plan.json` records it as `axis`: `parts` is the default when `docs/arch/overview.json` holds at least two derived parts, `modules` otherwise (and by explicit request). Parts-first planning emits one `DESIGN.md` §2 packet per part (sub-splitting a part only when it exceeds a budget) and falls back to `part:root` for unclaimed modules; `--by parts` without part data exits `1`.
 - Budgets per packet (configurable):
   - Default max **15,000 source lines** across assigned modules
   - Default max **800 indexed symbols**
@@ -574,7 +612,7 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
   - `packet_id`
   - `target_doc` (`DESIGN.md` or `USER_GUIDE.md`) and `section_ids`
   - `draft_output_path`: `docs/.drafts/<packet_id>.md` (guaranteed unique per worker)
-  - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context). On a non-first run `plan` skips an empty-`delta_slice` module slice instead of dispatching a worker for a module that did not change. Structural work is exempt because it is not driven by a source delta: a missing or empty section, and a section whose `AUTO-DIAGRAM` block was edited, still gets its packet (otherwise the zero-source-change `empty_section` path would leave a required section unfillable). First runs still emit every slice, and a fully up-to-date run emits none.
+  - `assigned_modules`, `delta_slice`, and pre-rendered diagram IDs (read-only context); parts-first packets also carry `assigned_parts` and the `verified_descriptions` (fresh, judge-verified entries) relevant to their part, its boundaries and its flows. On a non-first run `plan` skips an empty-`delta_slice` module slice instead of dispatching a worker for a module that did not change. Structural work is exempt because it is not driven by a source delta: a missing or empty section, and a section whose `AUTO-DIAGRAM` block was edited, still gets its packet (otherwise the zero-source-change `empty_section` path would leave a required section unfillable). First runs still emit every slice, and a fully up-to-date run emits none.
   - `over_budget`, present and `true` only when the packet's module cannot be split further (one flat package, or a fixed depth) and still exceeds a per-worker budget; `plan` also warns on stderr in that case
 
 > [!NOTE] Amendment: Draft File Front-Matter Format
@@ -587,43 +625,10 @@ To prevent any single worker from handling a 200k-line repository, `arch-indexer
 >   - design-sec2
 > ---
 > ```
-> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A draft may end with one trailing `## References` heading holding its local footnote definitions; assembly merges those definitions into the document's References block. Any other prose outside the `SECTION` markers is rejected. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section and empty-section checks; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers (other than that single trailing `## References` block), an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the canonical document: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and only tool output rewrites them—`assemble` from `docs/graph.json` where it exists (§7.1), and `index --auto-relocate-citations` on a move-only delta (§5.4). The packaged skeleton ships a `module-overview` slot and a `flow-main` placeholder slot; when `docs/graph.json` exists, `assemble` replaces them with the graph's deterministic `module-overview` and `flow-<domain>` diagrams (§7.1).
+> For drafts spanning multiple sections, `section_ids` lists each section, and the draft body uses `<!-- SECTION:<id>:START -->` and `<!-- SECTION:<id>:END -->` markers to bound each section. Single-section drafts may omit internal section markers. A draft may end with one trailing `## References` heading holding its local footnote definitions; assembly merges those definitions into the document's References block. Any other prose outside the `SECTION` markers is rejected. A canonical section's start marker may carry an `:exempt` flag (e.g. `<!-- SECTION:design-sec1:START:exempt -->`), which exempts that section from the `check-citations` uncited-section and empty-section checks; section ids are the ones defined by the packaged skeleton for the target document. Local draft footnotes (`[^1]: `path:line` — `symbol``) are extracted and renumbered globally during assembly; definitions inside backtick-fenced code blocks stay literal, and a draft that defines the same local footnote id twice fails assembly with exit 3. Several drafts may target the same section (packets are sharded by module slice); `assemble` wraps each draft's prose in that section in `<!-- SLICE:<packet_id>:START -->` and `<!-- SLICE:<packet_id>:END -->` markers ordered by `packet_id` under the section's one canonical heading. An incremental run replaces only the slices it has drafts for, keeps every other existing slice untouched, and renumbers footnotes across the whole document; drafts must not author `SLICE` markers themselves. A draft naming a section id that does not exist in the target document fails assembly with exit 3, writes no docs, and keeps the drafts. The same applies when a draft body carries prose outside its `SECTION` markers (other than that single trailing `## References` block), an unclosed `SECTION` start marker, a stray or nested `SECTION` marker, a marker block for an id absent from `section_ids`, a repeated marker id, a `SLICE` marker, an `AUTO-DIAGRAM` marker, or a Mermaid block, so drafted prose is never silently discarded. Every `packet_id` must be declared by at most one draft per run; a repeated `packet_id` fails assembly with exit 1, writes no docs, and keeps the drafts. Diagram slots belong to the canonical document: drafts never author `AUTO-DIAGRAM` markers or Mermaid, slots live outside every `SLICE` block, and only tool output rewrites them—`assemble` from `docs/graph.json` where it exists (§7.1), and `index --auto-relocate-citations` on a move-only delta (§5.4). The packaged skeleton ships a `module-overview` slot and a `flow-main` placeholder slot; when `docs/graph.json` exists, `assemble` replaces them with the graph's deterministic `module-overview` and `flow-<domain>` (or, in parts-first mode, `flow-<part-slug>`) diagrams (§7.1, §6.2).
 
 ### 9.3 Conflict-Free Parallel Workflow (`SKILL.md`)
-The thin skill instructs Firstmate to run the following 4 steps:
-
-1. **Step 1 — Index & Plan (0 LLM Tokens)**
-   - Run `arch-indexer index <repo> --offline --auto-relocate-citations` (after `arch-indexer toolchain ensure --repo <repo>` if online; for a Java/Maven repo also prime once with `arch-indexer toolchain prime --repo <repo>`), so indexing never re-triggers toolchain installation.
-   - If exit code is `0` (`NO_CHANGES`): stop immediately and report that documentation is up to date.
-   - If exit code is `2` (`DELTA_DETECTED`): run `arch-indexer plan <repo>` and inspect `work-plan.json`.
-   - If exit code is `1`, `3`, or `4`: stop and report the error.
-
-2. **Step 2 — Dispatch Bounded Section Workers (Parallel, Isolated Branches)**
-   - Dispatch up to `K` parallel Firstmate workers (one per packet in `work-plan.json`, capped by concurrency limit).
-   - Each worker operates in its own isolated checkout/branch and writes **only** its assigned disjoint draft file `docs/.drafts/<packet_id>.md`—never `docs/DESIGN.md` or `docs/USER_GUIDE.md`. Each draft follows the draft-file contract in §9.2 (YAML front-matter, `SECTION` markers, no `SLICE` or `AUTO-DIAGRAM` markers).
-   - Worker rules:
-     - Read only its packet JSON, `master-index.json`, `index-delta.json`, and existing section text (if patching).
-     - Use `arch-indexer query <repo> ...` and targeted line-range file reads; never load entire large files indiscriminately.
-     - Explain the code and generated diagrams; **never author or edit Mermaid blocks**.
-     - Cite every technical claim using local draft footnotes (`[^1]: \`path:line\` — \`symbol\``).
-     - Before finishing, run `arch-indexer check-citations <repo> --file docs/.drafts/<packet_id>.md` and fix any failure.
-
-3. **Step 3 — Deterministic Assembly Worker (Single Writer)**
-   - Dispatch **one** assembly worker that:
-     1. Merges all worker draft branches into a single branch (guaranteed conflict-free because every worker wrote a unique file in `docs/.drafts/`).
-     2. Runs `arch-indexer assemble <repo> --drafts-dir docs/.drafts --docs-dir docs`, which deterministically:
-        - Creates `docs/DESIGN.md` or `docs/USER_GUIDE.md` from its packaged skeleton when the document does not exist yet.
-        - Patches only the updated sections into `docs/DESIGN.md` and `docs/USER_GUIDE.md` (preserving untouched sections on incremental runs).
-        - Injects code-generated Mermaid diagrams into `AUTO-DIAGRAM` slots from `docs/graph.json`, with `--diagrams <json>` applied first as an optional fallback (graph output wins; see §7.1).
-        - Renumbers footnotes globally across each document into clean sequential `[^1]..[^N]` entries in `## References`.
-        - Leaves graph export (`docs/graph.json`, `docs/flow-viewer.html`) to `arch-indexer index`; `assemble` does not write them.
-        - Runs `arch-indexer check-citations` and `arch-indexer check-mermaid` as mandatory gates. The citation gate tolerates empty required sections, because a document started from the skeleton is mostly empty; the next `index` run re-impacts them with `empty_section` (§5.5).
-        - Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
-     3. Commits only `docs/DESIGN.md` and `docs/USER_GUIDE.md` (plus the `docs/graph.json`, `docs/flow-viewer.html` and `docs/arch/` artifacts written by `arch-indexer index`).
-   - If validation fails (exit `3`), the orchestrator dispatches a targeted fix pass only for the failing section(s).
-
-4. **Step 4 — Summary Report**
-   - Report files/symbols indexed by tier (`scip` vs `tree-sitter`), fallback reasons, unresolved reference counts, sections updated, and high-priority gaps found.
+The executable orchestrator instructions are owned by [`skills/arch-indexer/SKILL.md`](../skills/arch-indexer/SKILL.md), which covers the 4-step workflow end to end: toolchain preparation and offline indexing with exit-code branching, optional plain-language description planning (§8.4), bounded worker drafting in isolated branches, deterministic assembly with the citation and Mermaid gates, and cross-model claim verification (§8.5) before commit. This spec owns the contracts those steps call (§6, §7, §8 and §9.2) and does not duplicate the step-by-step instructions.
 
 ---
 
@@ -653,10 +658,16 @@ Built against small, committed fixture repositories under `tests/fixtures/` (Pyt
   - File-to-section mapping accurately isolates impacted sections.
 - **`test_planner.py`**:
   - Large synthetic index splits into multiple bounded packets under line/symbol budgets with disjoint draft paths.
+  - `plan --by parts|modules` axis selection, one packet per part for `design-sec2`, `assigned_parts`/`verified_descriptions` payloads, and the `modules` fallback for single-part bundles.
 - **`test_assembler.py`**:
   - `assemble` merges drafts, patches only impacted sections, globally renumbers footnotes, injects diagrams, deletes drafts, and enforces validation gates.
+- **`test_describe_check.py`**: description packet planning, the `describe check` schema/citation/jargon/span-hash gate, staleness tracking on `index`, and `describe plan` output.
+- **`test_humanize.py`**: plain-language identifier naming and the banned-jargon lint.
+- **`test_secret_masking.py`**: secret detection and masking in description packets (no credential reaches a packet or `descriptions.json`).
+- **`test_claims_gate.py`**: cross-model claim planning, judge/writer conflict refusal, judge quorum and per-claim coverage, `--max-partial` threshold, and CLI exit codes.
+- **`test_mermaid_parts.py`**: parts-first Mermaid generation and `check-mermaid` AUTO-DIAGRAM verification in parts mode.
 - **`viewer-app/test/`** (Vitest, `jsdom`):
-  - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). Run with `make viewer` (`npm ci && npm run build && npm test`) or the CI `viewer` job, which runs `npm ci`, `npm test` and `npm run build` (including `tsc --noEmit`) and fails when the committed `viewer/dist/` is stale; `make check` stays Python-only.
+  - The v2 viewer app shell: chunk/search loading with byte-size check, deterministic ELKjs layout, five-level drill-down views with the 300-node cap, and canvas interaction (double-click drills into a node instead of zooming). `descriptions.test.tsx` covers node summaries, the stale badge, and flow-banner narration. Run with `make viewer` (`npm ci && npm run build && npm test`) or the CI `viewer` job, which runs `npm ci`, `npm test` and `npm run build` (including `tsc --noEmit`) and fails when the committed `viewer/dist/` is stale; `make check` stays Python-only.
 - **`tests/e2e_viewer/test_file_url.py`** (`browser` marker):
   - Headless Chromium drives the generated `docs/flow-viewer.html` over `file://` through the overview -> part -> group -> file -> symbol drill-down plus one played flow, and asserts zero console errors. It needs the `[browser]` extra (`pip install -e ".[dev,browser]"`) and `python -m playwright install --with-deps chromium`, and skips when Playwright/Chromium or the pre-built `viewer/dist/` is missing; the CI `browser` job runs it and fails on a skip.
 
