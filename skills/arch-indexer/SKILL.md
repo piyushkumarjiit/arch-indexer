@@ -63,7 +63,7 @@ Before drafting docs, plan bounded description packets for parts, groups, bounda
 ```bash
 arch-indexer describe plan <repo>
 ```
-Dispatch writer workers to author `docs/arch/descriptions.json` (citing code spans from each packet and avoiding banned jargon), then verify and emit `docs/arch/descriptions.js`:
+Dispatch one writer per packet, each writing only that packet's `draft_output_path` under `docs/arch/.describe-drafts/` (scratch, never committed; spec §2.3) and citing code spans from the packet while avoiding banned jargon. One writer then merges the fragments into the writer-owned `docs/arch/descriptions.json` and verifies it, which emits `docs/arch/descriptions.js` on pass:
 ```bash
 arch-indexer describe check <repo> --input docs/arch/descriptions.json
 ```
@@ -203,7 +203,7 @@ Commit ONLY the canonical documentation artifacts this run produced:
 - `docs/flow-viewer.html`
 - `docs/arch/` (the whole bundle `index` writes: `overview.json`, `chunks/`, `vendor/`, the `null` sidecar stubs and `dependencies.json`; layout in spec §2.3)
 
-*Never commit `index.db`, `.scip` binaries, draft files, or cache directories.*
+*Never commit `index.db`, `.scip` binaries, draft files (including `docs/arch/.describe-drafts/`), or cache directories.*
 
 ---
 
