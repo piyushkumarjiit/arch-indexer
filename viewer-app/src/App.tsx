@@ -10,7 +10,7 @@ import {
 import { FlowBanner } from "./ui/FlowBanner";
 import { Inspector } from "./ui/Inspector";
 import { LayerToggles } from "./ui/LayerToggles";
-import { RuntimeLayerControls } from "./ui/RuntimeLayer";
+import { RuntimeLayerControls, isRuntimeOverlayPayload } from "./ui/RuntimeLayer";
 import { SearchPalette } from "./ui/SearchPalette";
 import { Tier2Banner } from "./ui/Tier2Banner";
 import { TraceReplay } from "./ui/TraceReplay";
@@ -303,8 +303,8 @@ export function App() {
       } else if (parsed.entries && typeof parsed.entries === "object") {
         window.__ARCH_DESCRIPTIONS__ = parsed as unknown as typeof window.__ARCH_DESCRIPTIONS__;
         refreshOverlays();
-      } else if (parsed.node_metrics && parsed.edge_metrics) {
-        window.__ARCH_RUNTIME__ = parsed as unknown as typeof window.__ARCH_RUNTIME__;
+      } else if (isRuntimeOverlayPayload(parsed)) {
+        window.__ARCH_RUNTIME__ = parsed;
         refreshOverlays();
       } else if (Array.isArray(parsed.edges) && typeof parsed.tool === "string") {
         window.__ARCH_DATAFLOW__ = parsed as unknown as typeof window.__ARCH_DATAFLOW__;

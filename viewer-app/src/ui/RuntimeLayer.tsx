@@ -23,14 +23,25 @@ export function runtimeHeatLevel(metric: RuntimeNodeMetric | null | undefined): 
   return "ok";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function isRuntimeOverlayPayload(value: unknown): value is RuntimeOverlayData {
-  if (!value || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const { source, traces, unmatched } = value;
   return (
-    typeof obj.node_metrics === "object" &&
-    obj.node_metrics !== null &&
-    typeof obj.edge_metrics === "object" &&
-    obj.edge_metrics !== null
+    isRecord(value.node_metrics) &&
+    Object.values(value.node_metrics).every(isRecord) &&
+    isRecord(value.edge_metrics) &&
+    Object.values(value.edge_metrics).every(isRecord) &&
+    isRecord(source) &&
+    typeof source.kind === "string" &&
+    Array.isArray(source.service_names) &&
+    Array.isArray(traces) &&
+    traces.every((trace) => isRecord(trace) && Array.isArray(trace.spans)) &&
+    isRecord(unmatched) &&
+    typeof unmatched.span_count === "number"
   );
 }
 
@@ -343,7 +354,10 @@ export function RuntimeLayerControls({
           type="button"
           className="arch-mini-btn arch-runtime-btn"
           data-testid="runtime-clear-btn"
-          onClick={onClearRuntime}
+          onClick={() => {
+            setLivePoll(false);
+            onClearRuntime();
+          }}
         >
           Clear
         </button>

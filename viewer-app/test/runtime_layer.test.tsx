@@ -16,6 +16,7 @@ import type {
 } from "../src/types/bundle";
 import { Inspector } from "../src/ui/Inspector";
 import {
+  isRuntimeOverlayPayload,
   readRuntimeOverlayFile,
   runtimeHeatLevel,
   RuntimeLayerControls,
@@ -379,5 +380,111 @@ describe("Slice 7 Runtime layer and TraceReplay", () => {
     expect(useViewerStore.getState().selectedNodeId).toBe("ds:sqlite");
     useViewerStore.getState().exitTrace();
     expect(useViewerStore.getState().activeTraceId).toBeNull();
+  });
+
+  it("rejects partial runtime overlay payloads at every ingestion boundary", async () => {
+    const partial = { node_metrics: {}, edge_metrics: {} };
+    expect(isRuntimeOverlayPayload(partial)).toBe(false);
+
+    const file = new File([JSON.stringify(partial)], "runtime-overlay.v1.json", {
+      type: "application/json",
+    });
+    await expect(readRuntimeOverlayFile(file)).rejects.toThrow(
+      "File is not a valid runtime-overlay.v1.json payload",
+    );
+
+    expect(isRuntimeOverlayPayload(SAMPLE_RUNTIME)).toBe(true);
+    const previous = window.__ARCH_RUNTIME__;
+    window.__ARCH_RUNTIME__ = partial as unknown as RuntimeOverlayData;
+    useViewerStore.getState().initFromOverview(loadFqd().overview);
+    expect(useViewerStore.getState().runtime).toBeNull();
+    window.__ARCH_RUNTIME__ = previous;
+  });
+
+  it("keeps the runtime layer toggle and clears trace selection on overlay refresh", () => {
+    const { overview } = loadFqd();
+    const store = () => useViewerStore.getState();
+    store().initFromOverview(overview);
+    store().setRuntimeOverlay(null);
+    store().setRuntimeOverlay(SAMPLE_RUNTIME);
+    expect(store().layers.runtime).toBe(true);
+
+    store().toggleLayer("runtime");
+    expect(store().layers.runtime).toBe(false);
+    store().setRuntimeOverlay(SAMPLE_RUNTIME);
+    expect(store().layers.runtime).toBe(false);
+
+    const traceId = SAMPLE_RUNTIME.traces[0].trace_id;
+    store().startTrace(traceId);
+    expect(store().layers.runtime).toBe(true);
+    expect(store().activeTraceId).toBe(traceId);
+
+    store().setRuntimeOverlay({ ...SAMPLE_RUNTIME, traces: [] });
+    expect(store().activeTraceId).toBeNull();
+    expect(store().traceSpanIndex).toBe(0);
+    expect(store().layers.runtime).toBe(true);
+
+    store().setRuntimeOverlay(null);
+    expect(store().layers.runtime).toBe(false);
+  });
+
+  it("Clear stops live polling", async () => {
+    const { overview } = loadFqd();
+    const onClear = vi.fn();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    vi.useFakeTimers();
+    try {
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root!.render(
+          <RuntimeLayerControls
+            runtime={SAMPLE_RUNTIME}
+            overview={overview}
+            runtimeLayerActive
+            activeTraceId={null}
+            onLoadRuntime={() => {}}
+            onStartTrace={() => {}}
+            onClearRuntime={onClear}
+          />,
+        );
+      });
+
+      const toggle = container.querySelector(
+        '[data-testid="runtime-live-poll-toggle"]',
+      ) as HTMLInputElement;
+      await act(async () => {
+        toggle.click();
+        await Promise.resolve();
+      });
+      const callsAfterStart = fetchMock.mock.calls.length;
+      expect(callsAfterStart).toBeGreaterThan(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterStart);
+
+      const clear = container.querySelector(
+        '[data-testid="runtime-clear-btn"]',
+      ) as HTMLButtonElement;
+      await act(async () => {
+        clear.click();
+      });
+      expect(onClear).toHaveBeenCalledTimes(1);
+      expect(toggle.checked).toBe(false);
+
+      const callsAfterClear = fetchMock.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(fetchMock.mock.calls.length).toBe(callsAfterClear);
+    } finally {
+      vi.useRealTimers();
+      globalThis.fetch = originalFetch;
+    }
   });
 });

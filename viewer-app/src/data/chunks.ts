@@ -1,3 +1,4 @@
+import { isRuntimeOverlayPayload } from "../ui/RuntimeLayer";
 import type {
   ChunkMeta,
   DataflowData,
@@ -258,9 +259,10 @@ export function readOptionalOverlays(): OptionalOverlays {
   if (typeof window === "undefined") {
     return { descriptions: null, runtime: null, dataflow: null };
   }
+  const runtime = window.__ARCH_RUNTIME__;
   return {
     descriptions: window.__ARCH_DESCRIPTIONS__ ?? null,
-    runtime: window.__ARCH_RUNTIME__ ?? null,
+    runtime: isRuntimeOverlayPayload(runtime) ? runtime : null,
     dataflow: window.__ARCH_DATAFLOW__ ?? null,
   };
 }

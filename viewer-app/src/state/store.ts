@@ -284,15 +284,20 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
     if (typeof window !== "undefined") {
       window.__ARCH_RUNTIME__ = overlay;
     }
-    set((state) => ({
-      runtime: overlay,
-      activeTraceId: overlay ? state.activeTraceId : null,
-      traceSpanIndex: overlay ? state.traceSpanIndex : 0,
-      layers: {
-        ...state.layers,
-        runtime: overlay !== null,
-      },
-    }));
+    set((state) => {
+      const traceStillExists =
+        overlay !== null &&
+        overlay.traces.some((trace) => trace.trace_id === state.activeTraceId);
+      return {
+        runtime: overlay,
+        activeTraceId: traceStillExists ? state.activeTraceId : null,
+        traceSpanIndex: traceStillExists ? state.traceSpanIndex : 0,
+        layers: {
+          ...state.layers,
+          runtime: overlay !== null ? (state.runtime !== null ? state.layers.runtime : true) : false,
+        },
+      };
+    });
   },
 
   ensurePartLoaded: async (partId) => {
