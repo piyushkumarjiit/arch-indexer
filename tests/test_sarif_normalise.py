@@ -221,3 +221,77 @@ def test_normalise_joern_uses_pinned_version_when_output_omits_it(
         rows = normalise_joern(joern_json, store)
         assert len(rows) == 1
         assert rows[0]["tool_version"] == "9.9.9"
+
+
+def test_normalise_joern_keeps_dot_directory_paths(tmp_path: Path) -> None:
+    joern_json = tmp_path / "joern.json"
+    joern_json.write_text(
+        json.dumps(
+            {
+                "tool": "joern",
+                "flows": [
+                    {
+                        "steps": [
+                            {
+                                "file": "./.github/scripts/app.py",
+                                "line": 17,
+                                "col": 4,
+                                "note": "question",
+                            },
+                            {
+                                "file": "./.github/scripts/app.py",
+                                "line": 12,
+                                "col": 11,
+                                "note": "ollama.chat(prompt)",
+                            },
+                        ]
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with IndexStore(tmp_path / "index.db") as store:
+        store.insert_files(
+            [
+                {
+                    "path": ".github/scripts/app.py",
+                    "language": "python",
+                    "sha256": "h1",
+                    "line_count": 25,
+                    "module": "app",
+                    "tier": "tree-sitter",
+                }
+            ]
+        )
+        store.insert_symbols(
+            [
+                {
+                    "fqname": "app.ask_question",
+                    "name": "ask_question",
+                    "kind": "function",
+                    "file_path": ".github/scripts/app.py",
+                    "start_line": 16,
+                    "end_line": 18,
+                    "body_sha256": "s3",
+                }
+            ]
+        )
+        store.insert_entrypoints(
+            [
+                {
+                    "kind": "http",
+                    "name": "ask_question",
+                    "method": "POST",
+                    "route_or_trigger": "/ask",
+                    "file_path": ".github/scripts/app.py",
+                    "line": 16,
+                    "symbol_fqname": "app.ask_question",
+                }
+            ]
+        )
+        rows = normalise_joern(joern_json, store)
+
+    assert len(rows) == 1
+    assert rows[0]["source_file"] == ".github/scripts/app.py"
+    assert rows[0]["sink_boundary_id"] == "ext:ollama"

@@ -55,10 +55,12 @@ def _normalize_uri_path(uri: str, repo_root: Path | None) -> str:
     if repo_root is not None:
         root_str = repo_root.resolve().as_posix().rstrip("/")
         if raw_posix.startswith(root_str + "/"):
-            return raw_posix[len(root_str) + 1 :]
-        if raw_posix == root_str:
-            return "."
-    return raw_posix.lstrip("./") if raw_posix.startswith("./") else raw_posix
+            raw_posix = raw_posix[len(root_str) + 1 :]
+        elif raw_posix == root_str:
+            raw_posix = "."
+    if raw_posix.startswith("./"):
+        raw_posix = raw_posix[2:]
+    return raw_posix
 
 
 class _SymbolIndex:
