@@ -19,6 +19,7 @@ import type {
   ChunkFlow,
   ChunkNode,
   DataflowData,
+  DescriptionsData,
   LayerFilter,
   OverviewData,
   OverviewEdge,
@@ -42,10 +43,24 @@ export interface ViewBuildOptions {
   exactOnly: boolean;
   runtime: RuntimeOverlayData | null;
   dataflow: DataflowData | null;
+  descriptions?: DescriptionsData | null;
   activeFlow: ChunkFlow | null;
   flowStepIndex: number;
   activeTrace?: RuntimeTrace | null;
   traceSpanIndex?: number;
+}
+
+function applyDescriptionsToNodes(
+  nodes: ViewNodeData[],
+  descriptions?: DescriptionsData | null,
+): void {
+  if (!descriptions?.entries) return;
+  for (const n of nodes) {
+    const entry = descriptions.entries[n.id];
+    if (!entry) continue;
+    n.descriptionSummary = entry.summary;
+    n.descriptionStale = entry.status === "stale";
+  }
 }
 
 /** Split a file-view symbol id (``sym:<path>:<name>:<line>``) into its parts. */
@@ -351,6 +366,7 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
   }
 
   const flowPartId = overview.flow_index.find((flow) => flow.id === activeFlow?.id)?.part_id;
+  applyDescriptionsToNodes(nodes, opts.descriptions);
   applyFlowDimming(nodes, visibleEdges, activeFlow, flowStepIndex, (nodeId) =>
     nodeIds.has(nodeId) ? nodeId : flowPartId,
   );
@@ -512,6 +528,7 @@ export function buildPartGraph(
   attachProjectedMetrics(nodes, runtime, overview, chunks);
 
   const edges = Array.from(edgeMap.values());
+  applyDescriptionsToNodes(nodes, opts.descriptions);
   applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolvePartTraceNode);
   if (!activeFlow) {
     applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolvePartTraceNode);
@@ -662,6 +679,7 @@ export function buildGroupGraph(
   attachProjectedMetrics(nodes, runtime, overview, chunks);
 
   const edges = Array.from(edgeMap.values());
+  applyDescriptionsToNodes(nodes, opts.descriptions);
   applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveGroupNode);
   if (!activeFlow) {
     applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveGroupNode);
@@ -849,6 +867,7 @@ export function buildFileGraph(
   attachProjectedMetrics(nodes, runtime, overview, chunks);
 
   const edges = Array.from(edgeMap.values());
+  applyDescriptionsToNodes(nodes, opts.descriptions);
   applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveFileNode);
   if (!activeFlow) {
     applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveFileNode);
@@ -1037,6 +1056,7 @@ export function buildSymbolGraph(
   attachProjectedMetrics(nodes, runtime, overview, chunks);
 
   const edges = Array.from(edgeMap.values());
+  applyDescriptionsToNodes(nodes, opts.descriptions);
   applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveSymbolNode);
   if (!activeFlow) {
     applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveSymbolNode);

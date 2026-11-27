@@ -1,4 +1,4 @@
-import type { ChunkFlow, EndReason } from "../types/bundle";
+import type { ChunkFlow, DescriptionEntry, EndReason } from "../types/bundle";
 
 const END_REASON_LABELS: Record<EndReason, string> = {
   boundary: "reached boundary",
@@ -12,6 +12,7 @@ export function FlowBanner({
   flow,
   stepIndex,
   flowTitle,
+  flowDescription,
   followStep = true,
   onToggleFollowStep,
   onPrev,
@@ -21,6 +22,7 @@ export function FlowBanner({
   flow: ChunkFlow | null;
   stepIndex: number;
   flowTitle?: string;
+  flowDescription?: DescriptionEntry | null;
   followStep?: boolean;
   onToggleFollowStep?: () => void;
   onPrev: () => void;
@@ -34,6 +36,10 @@ export function FlowBanner({
   const step = flow.steps[clampedIdx];
   const isFinal = clampedIdx === total - 1;
   const isPartial = flow.end_reason !== "boundary" && flow.end_reason !== "resource";
+  const stepDesc =
+    flowDescription?.steps?.[clampedIdx]?.node_id === step.node_id
+      ? flowDescription.steps[clampedIdx]
+      : flowDescription?.steps?.find((s) => s.node_id === step.node_id);
 
   return (
     <div className="arch-flow-banner" role="region" aria-label="Flow walkthrough" data-testid="flow-banner">
@@ -42,6 +48,9 @@ export function FlowBanner({
           step {clampedIdx + 1} of {total}
         </span>
         {flowTitle && <span className="arch-flow-title">{flowTitle}</span>}
+        {flowDescription?.status === "stale" && (
+          <span className="arch-badge arch-badge--stale">stale</span>
+        )}
         <span className="arch-flow-node">{step.node_id}</span>
         {step.edge_kind && (
           <span className="arch-flow-edge">via {step.edge_kind}</span>
@@ -49,6 +58,11 @@ export function FlowBanner({
         {step.file && (
           <span className="arch-flow-loc">
             {step.file}:{step.line}
+          </span>
+        )}
+        {stepDesc?.narration && (
+          <span className="arch-flow-narration" data-testid="flow-step-narration">
+            {stepDesc.narration}
           </span>
         )}
         {isFinal && isPartial && (

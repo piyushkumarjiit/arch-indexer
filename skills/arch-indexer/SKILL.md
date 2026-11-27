@@ -58,10 +58,20 @@ Evaluate exit code:
 - **`3` (`EXIT_VALIDATION_FAILED`)**: Citations still fail after relocation; the documents were restored. Abort workflow and report stderr.
 - **`1`, `4`**: Fatal error or missing toolchain. Abort workflow and report stderr.
 
-#### 1c. Bounded Worker Planning
-Partition impacted sections into bounded work packets:
+#### 1c. Plain-Language Descriptions (Optional / Recommended)
+Before drafting docs, plan bounded description packets for parts, groups, boundaries, and top flows:
 ```bash
-arch-indexer plan <repo> --max-lines-per-worker 15000 --max-symbols-per-worker 800 --max-sections-per-worker 3
+arch-indexer describe plan <repo>
+```
+Dispatch one writer per packet, each writing only that packet's `draft_output_path` under `docs/arch/.describe-drafts/` (scratch, never committed; spec §2.3) and citing code spans from the packet while avoiding banned jargon. One writer then merges the fragments into the writer-owned `docs/arch/descriptions.json` and verifies it, which emits `docs/arch/descriptions.js` on pass:
+```bash
+arch-indexer describe check <repo> --input docs/arch/descriptions.json
+```
+
+#### 1d. Bounded Worker Planning
+Partition impacted sections into bounded work packets (`--by parts` is the default when 2+ parts exist; `--by modules` stays available):
+```bash
+arch-indexer plan <repo> --by parts --max-lines-per-worker 15000 --max-symbols-per-worker 800 --max-sections-per-worker 3
 ```
 Read generated `<cache>/repos/<id>/work-plan.json`:
 - If work plan contains 0 packets: stop and report no impacted sections.
@@ -168,8 +178,17 @@ The assembly command automatically:
    ```
 7. Deletes the consumed `*.md` drafts from `docs/.drafts/` (and the directory itself once empty) only after both gates pass; a failed gate exits `3` and keeps the drafts for the targeted fix pass.
 
-#### 3d. Gate Verification & Targeted Fixes
-- If `assemble` exits `0`: proceed to commit (Step 3e).
+#### 3d. Gate Verification, Cross-Model Claim Check & Targeted Fixes
+- If `assemble` exits `0`: run cross-model claim verification using a judge model from a **different model family** than the writer:
+  ```bash
+  arch-indexer verify-claims plan <repo> --docs-dir docs
+  ```
+  Dispatch judge worker(s) to produce `verdicts.jsonl` with an explicit `judge_model` on every row (the file name supplies no identity), then gate the docs and descriptions (`--judges 2` for release audits):
+  ```bash
+  arch-indexer verify-claims gate <repo> --verdicts verdicts.jsonl --writer-model <writer-id> --judges 1
+  ```
+  Never hand-author `verified_by` in `descriptions.json`: the gate writes it for every judged entry (and clears it on any `contradicted`/`bad-citation` claim), and `describe check` validates its shape.
+  If `verify-claims gate` exits `3`, dispatch targeted fix workers for the failing claims and re-assemble; if it exits `0`, proceed to commit (Step 3e).
 - If `assemble` exits `3` (`EXIT_VALIDATION_FAILED`):
   1. Inspect error diagnostics from `check-citations` or `check-mermaid` (the drafts are retained).
   2. Identify specific failing section(s).
@@ -185,7 +204,7 @@ Commit ONLY the canonical documentation artifacts this run produced:
 - `docs/flow-viewer.html`
 - `docs/arch/` (the whole bundle `index` writes: `overview.json`, `chunks/`, `vendor/`, the `null` sidecar stubs and `dependencies.json`; layout in spec §2.3)
 
-*Never commit `index.db`, `.scip` binaries, draft files, or cache directories.*
+*Never commit `index.db`, `.scip` binaries, draft files (including `docs/arch/.describe-drafts/`), or cache directories.*
 
 ---
 

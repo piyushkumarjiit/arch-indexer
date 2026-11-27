@@ -13,6 +13,7 @@ export function SymbolView() {
   const exactOnly = useViewerStore((s) => s.exactOnly);
   const runtime = useViewerStore((s) => s.runtime);
   const dataflow = useViewerStore((s) => s.dataflow);
+  const descriptions = useViewerStore((s) => s.descriptions);
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
   const activeTraceId = useViewerStore((s) => s.activeTraceId);
@@ -38,6 +39,7 @@ export function SymbolView() {
       exactOnly,
       runtime,
       dataflow,
+      descriptions,
       activeFlow,
       flowStepIndex,
       activeTrace,
@@ -52,6 +54,7 @@ export function SymbolView() {
     exactOnly,
     runtime,
     dataflow,
+    descriptions,
     activeFlow,
     flowStepIndex,
     activeTrace,

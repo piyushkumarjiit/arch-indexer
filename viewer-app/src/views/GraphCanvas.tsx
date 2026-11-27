@@ -134,6 +134,7 @@ function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<s
     data.isCurrentStep ? "is-current-step" : "",
     data.highlighted ? "is-highlighted" : "",
     data.dimmed ? "is-dimmed" : "",
+    data.descriptionStale ? "is-desc-stale" : "",
     isFold ? "is-fold" : "",
   ]
     .filter(Boolean)
@@ -145,7 +146,7 @@ function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<s
       style={{
         width: DEFAULT_NODE_WIDTH,
         minHeight: DEFAULT_NODE_HEIGHT,
-        opacity: data.dimmed ? 0.25 : 1,
+        opacity: data.dimmed ? 0.25 : data.descriptionStale ? 0.65 : 1,
       }}
     >
       <Handle type="target" position={Position.Left} className="arch-handle" />
@@ -157,6 +158,9 @@ function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<s
           {data.badge && <span className="arch-badge">{data.badge}</span>}
           {data.confidence === "heuristic" && (
             <span className="arch-badge arch-badge--heuristic">approx</span>
+          )}
+          {data.descriptionStale && (
+            <span className="arch-badge arch-badge--stale">stale</span>
           )}
           <ChangeBadge status={data.changeStatus} />
           {data.drillable && onDrillNode && (
@@ -194,6 +198,11 @@ function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<s
               {data.metrics.error_count} err
             </span>
           )}
+        </div>
+      )}
+      {data.descriptionSummary && (
+        <div className="arch-node-desc" title={data.descriptionSummary}>
+          {data.descriptionSummary}
         </div>
       )}
       <Handle type="source" position={Position.Right} className="arch-handle" />

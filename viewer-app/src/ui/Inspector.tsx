@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { layerForEdgeKind } from "../data/layers";
 import type {
+  ChunkFileRow,
   ChunkNode,
   DataflowData,
   DescriptionsData,
@@ -289,11 +290,25 @@ export function Inspector({
   const runtimeMetric = runtime?.node_metrics?.[resolvedNode.id] ?? resolvedNode.metrics ?? null;
 
   let chunkNode: ChunkNode | undefined;
+  let chunkFile: ChunkFileRow | undefined;
+  let owningChunk: PartChunk | undefined;
+  const targetFilePath =
+    resolvedNode.filePath ??
+    (resolvedNode.id.startsWith("file:") ? resolvedNode.id.slice(5) : undefined);
   for (const c of Object.values(chunks)) {
-    const found = c.nodes.find((n) => n.id === resolvedNode.id);
-    if (found) {
-      chunkNode = found;
-      break;
+    if (!chunkNode) {
+      const found = c.nodes.find((n) => n.id === resolvedNode.id);
+      if (found) {
+        chunkNode = found;
+        owningChunk = c;
+      }
+    }
+    if (!chunkFile && targetFilePath) {
+      const foundFile = c.files.find((f) => f.path === targetFilePath);
+      if (foundFile) {
+        chunkFile = foundFile;
+        owningChunk = c;
+      }
     }
   }
 
@@ -442,18 +457,78 @@ export function Inspector({
             <div className="arch-detail-label">
               Description
               {desc?.status === "stale" && (
-                <span className="arch-badge arch-badge--stale" style={{ marginLeft: 6 }}>
+                <span className="arch-badge arch-badge--stale" data-testid="desc-stale-badge">
                   stale
+                </span>
+              )}
+              {desc?.verified_by && (
+                <span className="arch-badge" data-testid="desc-verified-badge">
+                  {desc.verified_by.verdict} ({desc.verified_by.judge_model})
                 </span>
               )}
             </div>
             {desc ? (
               <div className={`arch-description ${desc.status === "stale" ? "is-stale" : ""}`}>
-                <p>{desc.summary}</p>
-                {desc.details && <p className="arch-detail-muted">{desc.details}</p>}
+                <div className="arch-detail-text">{desc.summary}</div>
+                {desc.details && <div className="arch-detail-muted">{desc.details}</div>}
+                {desc.citations.length > 0 && (
+                  <div className="arch-desc-citations">
+                    {desc.citations.map((c) => (
+                      <span key={c} className="arch-badge">
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <pre className="arch-docstring">{chunkNode?.docstring}</pre>
+            )}
+          </div>
+        )}
+
+        {(chunkNode?.kind === "entrypoint" || resolvedNode.kind === "entrypoint") && (
+          <div className="arch-detail-block" data-testid="endpoint-card">
+            <div className="arch-detail-label">Endpoint Card</div>
+            <div className="arch-detail-mono">
+              {chunkNode?.metadata
+                ? `${String(chunkNode.metadata.method || chunkNode.metadata.kind || "entry")} ${String(
+                    chunkNode.metadata.route || chunkNode.symbol || chunkNode.label,
+                  )}`
+                : chunkNode?.symbol || resolvedNode.label}
+            </div>
+          </div>
+        )}
+
+        {chunkFile && (resolvedNode.kind === "file" || resolvedNode.kind === "infra_file") && (
+          <div className="arch-detail-block" data-testid="file-card">
+            <div className="arch-detail-label">
+              File Signatures ({chunkFile.symbols.length})
+            </div>
+            <div className="arch-detail-muted">
+              {chunkFile.language} &middot; {chunkFile.loc} loc &middot; {chunkFile.tier}
+            </div>
+            {chunkFile.symbols.length > 0 && (
+              <div className="arch-file-symbols">
+                {chunkFile.symbols.slice(0, 20).map((sym) => {
+                  const symNode = owningChunk?.nodes.find(
+                    (n) =>
+                      n.file === chunkFile.path &&
+                      (n.symbol === sym.name || n.label === sym.name) &&
+                      n.docstring,
+                  );
+                  return (
+                    <div key={`${sym.name}:${sym.line}`} className="arch-file-sym-row">
+                      <div className="arch-detail-mono">
+                        {sym.kind} {sym.name} (L{sym.line})
+                      </div>
+                      {symNode?.docstring && (
+                        <div className="arch-detail-muted">{symNode.docstring}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         )}

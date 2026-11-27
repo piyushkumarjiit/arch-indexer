@@ -125,6 +125,13 @@ class ViewerOptions:
 
 
 @dataclass(frozen=True)
+class DescribeOptions:
+    """Configurable description lint options from `.arch-indexer.toml` ``[describe]``."""
+
+    allow_jargon: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RepoRuleConfig:
     """Overrides loaded from a repository `.arch-indexer.toml`."""
 
@@ -133,6 +140,7 @@ class RepoRuleConfig:
     graph_options: GraphOptions = field(default_factory=GraphOptions)
     part_overrides: tuple[tuple[str, tuple[str, ...]], ...] = ()
     viewer_options: ViewerOptions = field(default_factory=ViewerOptions)
+    describe_options: DescribeOptions = field(default_factory=DescribeOptions)
 
 
 def _slugify(text: str) -> str:
@@ -460,12 +468,26 @@ def load_rule_overrides(repo_path: Path | str) -> RepoRuleConfig:
                 )
             editor_url = _validate_editor_url(eurl)
 
+    allow_jargon: list[str] = []
+    raw_describe = data.get("describe")
+    if raw_describe is not None:
+        if not isinstance(raw_describe, dict):
+            raise ValueError(f"{REPO_CONFIG_NAME}: [describe] must be a table")
+        if "allow_jargon" in raw_describe:
+            raw_allow = raw_describe["allow_jargon"]
+            if not isinstance(raw_allow, list) or not all(isinstance(v, str) for v in raw_allow):
+                raise ValueError(
+                    f"{REPO_CONFIG_NAME}: describe.allow_jargon must be a list of strings"
+                )
+            allow_jargon = [v.strip().lower() for v in raw_allow if v.strip()]
+
     return RepoRuleConfig(
         boundary_rules=tuple(boundary_rules),
         entrypoint_rules=tuple(entrypoint_rules),
         graph_options=GraphOptions(dispatch_fanout_cap=dispatch_fanout_cap),
         part_overrides=tuple(part_overrides),
         viewer_options=ViewerOptions(editor_url=editor_url),
+        describe_options=DescribeOptions(allow_jargon=tuple(allow_jargon)),
     )
 
 

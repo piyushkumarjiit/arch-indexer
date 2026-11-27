@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 
@@ -30,6 +30,7 @@ from arch_indexer.mermaid_gen import (
     MODULE_OVERVIEW_ID,
     _entrypoints_by_domain,
     _module_names,
+    _parts_flow_groups,
     diagram_ids,
 )
 from arch_indexer.module_identity import load_module_options
@@ -98,9 +99,11 @@ class Packet:
     # Internal: a structural packet (missing/empty section or edited diagram) keeps its
     # worker even when this run has no source delta, unlike an untouched module slice.
     structural: bool = False
+    assigned_parts: list[str] = field(default_factory=list)
+    verified_descriptions: dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "assigned_modules": sorted(self.assigned_modules),
             "delta_slice": self.delta_slice,
             "draft_output_path": self.draft_output_path,
@@ -111,6 +114,10 @@ class Packet:
             "symbol_count": self.symbol_count,
             "target_doc": self.target_doc,
         }
+        if self.assigned_parts:
+            payload["assigned_parts"] = sorted(self.assigned_parts)
+        if self.verified_descriptions:
+            payload["verified_descriptions"] = dict(sorted(self.verified_descriptions.items()))
         if self.over_budget:
             # An indivisible module (one package/file group) larger than a worker budget.
             payload["over_budget"] = True
@@ -511,9 +518,12 @@ def resolve_packet_diagram_ids(
     assigned_modules: Sequence[str],
     section_diagram_ids: Sequence[str],
     graph: dict[str, Any],
+    *,
+    parts: Sequence[Mapping[str, Any]] | None = None,
+    assigned_parts: Sequence[str] = (),
 ) -> list[str]:
     """Map pre-rendered diagram IDs from graph.json to a packet's scope."""
-    available_diagrams = set(diagram_ids(graph))
+    available_diagrams = set(diagram_ids(graph, parts=parts))
     result: set[str] = set()
 
     for d in section_diagram_ids:
@@ -522,6 +532,24 @@ def resolve_packet_diagram_ids(
 
     if "design-sec1" in section_ids and MODULE_OVERVIEW_ID in available_diagrams:
         result.add(MODULE_OVERVIEW_ID)
+
+    if parts is not None:
+        part_by_diag, _ = _parts_flow_groups(graph, parts)
+        target_part_ids = set(assigned_parts)
+        if not target_part_ids and assigned_modules:
+            assigned_mod_ids = {f"mod:{m}" for m in assigned_modules} | set(assigned_modules)
+            for p in parts:
+                if any(gid in assigned_mod_ids for gid in p.get("group_ids") or ()):
+                    target_part_ids.add(str(p.get("id") or ""))
+        for diag_id, part in part_by_diag.items():
+            if diag_id not in available_diagrams:
+                continue
+            if target_part_ids:
+                if str(part.get("id") or "") in target_part_ids:
+                    result.add(diag_id)
+            elif "design-sec3" in section_ids:
+                result.add(diag_id)
+        return sorted(result)
 
     mod_names = _module_names(graph)
     domain_groups = _entrypoints_by_domain(graph, mod_names)
@@ -544,6 +572,62 @@ def resolve_packet_diagram_ids(
     return sorted(result)
 
 
+def _load_verified_descriptions(docs_root: Path) -> dict[str, dict[str, Any]]:
+    desc_path = docs_root / "arch" / "descriptions.json"
+    if not desc_path.is_file():
+        return {}
+    payload = read_json(desc_path)
+    if not isinstance(payload, Mapping):
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, Mapping):
+        return {}
+    verified: dict[str, dict[str, Any]] = {}
+    for key, val in entries.items():
+        if not isinstance(val, Mapping):
+            continue
+        if val.get("status") != "fresh":
+            continue
+        vb = val.get("verified_by")
+        if isinstance(vb, Mapping) and vb.get("verdict") in ("supported", "partial"):
+            verified[str(key)] = dict(val)
+    return verified
+
+
+def _packet_descriptions_subset(
+    verified_descriptions: Mapping[str, dict[str, Any]],
+    *,
+    assigned_parts: Sequence[str],
+    assigned_modules: Sequence[str],
+    overview: Mapping[str, Any] | None,
+    section_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    if not verified_descriptions:
+        return {}
+    selected: dict[str, dict[str, Any]] = {}
+    target_ids: set[str] = set(assigned_parts) | {f"mod:{m}" for m in assigned_modules}
+    if overview:
+        for oe in overview.get("edges") or ():
+            src = str(oe.get("source") or "")
+            tgt = str(oe.get("target") or "")
+            if src in target_ids:
+                target_ids.add(tgt)
+            if tgt in target_ids:
+                target_ids.add(src)
+        for fl in overview.get("flow_index") or ():
+            if str(fl.get("part_id") or "") in assigned_parts:
+                target_ids.add(str(fl["id"]))
+    if "design-sec1" in section_ids or "design-sec3" in section_ids or "guide-sec1" in section_ids:
+        # Overview and flow sections see all part, boundary, and flow descriptions
+        for key, val in verified_descriptions.items():
+            if key.startswith(("part:", "ds:", "ext:", "svc:", "res:", "flow:")):
+                selected[key] = val
+    for key, val in verified_descriptions.items():
+        if key in target_ids:
+            selected[key] = val
+    return selected
+
+
 def _build_packet_for_sections(
     sections: list[SectionItem],
     docs_dir: str,
@@ -555,10 +639,19 @@ def _build_packet_for_sections(
     graph: dict[str, Any],
     *,
     include_tests: bool = False,
+    parts: Sequence[Mapping[str, Any]] | None = None,
+    mod_to_part_id: Mapping[str, str] | None = None,
+    overview: Mapping[str, Any] | None = None,
+    verified_descriptions: Mapping[str, dict[str, Any]] | None = None,
 ) -> Packet:
     target_doc = sections[0].target_doc
     section_ids = [s.sec_id for s in sections]
     assigned_modules = sorted(set(m for s in sections for m in s.modules))
+    assigned_parts = (
+        sorted({mod_to_part_id[m] for m in assigned_modules if m in mod_to_part_id})
+        if mod_to_part_id
+        else []
+    )
     cited_files = sorted(set(f for s in sections for f in s.cited_files))
     sec_diagram_ids = sorted(set(d for s in sections for d in s.diagram_ids))
     total_lines = sum(module_lines.get(m, 0) for m in assigned_modules)
@@ -587,7 +680,25 @@ def _build_packet_for_sections(
         module_paths=module_paths,
         include_tests=include_tests,
     )
-    d_diagrams = resolve_packet_diagram_ids(section_ids, assigned_modules, sec_diagram_ids, graph)
+    d_diagrams = resolve_packet_diagram_ids(
+        section_ids,
+        assigned_modules,
+        sec_diagram_ids,
+        graph,
+        parts=parts,
+        assigned_parts=assigned_parts,
+    )
+    pkt_descs = (
+        _packet_descriptions_subset(
+            verified_descriptions or {},
+            assigned_parts=assigned_parts,
+            assigned_modules=assigned_modules,
+            overview=overview,
+            section_ids=section_ids,
+        )
+        if parts is not None
+        else {}
+    )
 
     return Packet(
         packet_id=packet_id,
@@ -600,6 +711,8 @@ def _build_packet_for_sections(
         line_count=total_lines,
         symbol_count=total_symbols,
         structural=sections_are_structural(sections),
+        assigned_parts=assigned_parts,
+        verified_descriptions=pkt_descs,
     )
 
 
@@ -620,6 +733,7 @@ def _ensure_unique_packet_id(packet: Packet, seen_ids: set[str], docs_dir: str) 
 def run_plan(
     repo: str | Path,
     *,
+    by: str | None = None,
     max_lines_per_worker: int = DEFAULT_MAX_LINES_PER_WORKER,
     max_symbols_per_worker: int = DEFAULT_MAX_SYMBOLS_PER_WORKER,
     max_sections_per_worker: int = DEFAULT_MAX_SECTIONS_PER_WORKER,
@@ -640,6 +754,10 @@ def run_plan(
 
     if max_lines_per_worker <= 0 or max_symbols_per_worker <= 0 or max_sections_per_worker <= 0:
         stderr.write("Error: Worker budgets must be positive integers\n")
+        return EXIT_ERROR
+
+    if by is not None and by not in ("parts", "modules"):
+        stderr.write(f"Error: Invalid --by axis {by!r}; expected 'parts' or 'modules'\n")
         return EXIT_ERROR
 
     cache_paths = RepoCachePaths.from_repo(target_repo, cache_dir_override=cache_dir)
@@ -687,6 +805,48 @@ def run_plan(
     # Read delta and state if present
     delta = read_json(cache_paths.index_delta_json) or {}
     state = read_json(cache_paths.state_json) or {}
+
+    docs_root = target_repo / effective_docs_dir
+    overview = read_json(docs_root / "arch" / "overview.json")
+    overview_parts: list[dict[str, Any]] = (
+        list(overview.get("parts") or ())
+        if isinstance(overview, Mapping) and isinstance(overview.get("parts"), list)
+        else []
+    )
+    if by == "parts" and not overview_parts:
+        stderr.write(
+            f"Error: Missing overview parts in '{docs_root / 'arch' / 'overview.json'}'. "
+            "Run 'arch-indexer index' first.\n"
+        )
+        return EXIT_ERROR
+
+    # D6: 'parts' is default for repos with >= 2 parts, 'modules' otherwise.
+    effective_by = by if by is not None else ("parts" if len(overview_parts) >= 2 else "modules")
+    active_parts: list[dict[str, Any]] | None = (
+        overview_parts if effective_by == "parts" and overview_parts else None
+    )
+    diagram_parts: list[dict[str, Any]] | None = (
+        overview_parts if len(overview_parts) >= 2 else None
+    )
+    verified_descriptions = (
+        _load_verified_descriptions(docs_root) if diagram_parts is not None else {}
+    )
+
+    mod_to_part_id: dict[str, str] = {}
+    mapping_parts = diagram_parts if diagram_parts is not None else active_parts
+    if mapping_parts is not None and isinstance(overview, Mapping):
+        grp_name_by_id = {
+            str(g.get("id") or ""): str(g.get("name") or "")
+            for g in (overview.get("groups") or ())
+            if isinstance(g, Mapping)
+        }
+        for part in mapping_parts:
+            pid = str(part.get("id") or "")
+            for gid in part.get("group_ids") or ():
+                gid_str = str(gid)
+                mod_name = grp_name_by_id.get(gid_str) or gid_str.removeprefix("mod:")
+                mod_to_part_id[mod_name] = pid
+                mod_to_part_id[gid_str] = pid
 
     # Extract canonical module metadata
     canonical_names: set[str] = set()
@@ -815,6 +975,82 @@ def run_plan(
         non_oversized: list[SectionItem] = []
 
         for sec in regular_sections:
+            if active_parts is not None and sec.sec_id == "design-sec2" and sec.modules:
+                # Parts-first DESIGN §2: one packet per part, sub-split only when over budget.
+                cited_by_mod = _partition_cited_files(
+                    sec.cited_files, sec.modules, file_to_canonical, specific_paths
+                )
+                mods_by_part: dict[str, list[str]] = {}
+                for m in sec.modules:
+                    pid = mod_to_part_id.get(m) or "part:root"
+                    mods_by_part.setdefault(pid, []).append(m)
+                for pid in sorted(mods_by_part):
+                    p_mods = sorted(mods_by_part[pid])
+                    p_slug = pid.removeprefix("part:")
+                    p_lines = sum(module_lines.get(m, 0) for m in p_mods)
+                    p_syms = sum(module_symbols.get(m, 0) for m in p_mods)
+                    needs_subsplit = len(p_mods) > 1 and (
+                        p_lines > max_lines_per_worker or p_syms > max_symbols_per_worker
+                    )
+                    chunks_of_mods = [[m] for m in p_mods] if needs_subsplit else [p_mods]
+                    for sub_mods in chunks_of_mods:
+                        unhandled = [
+                            m
+                            for m in sub_mods
+                            if (target_doc, sec.sec_id, m) not in handled_module_slices
+                        ]
+                        if not unhandled:
+                            continue
+                        for m in unhandled:
+                            handled_module_slices.add((target_doc, sec.sec_id, m))
+                        pkt_id = (
+                            f"{sec.sec_id}-part-{p_slug}-mod-{unhandled[0]}"
+                            if needs_subsplit
+                            else f"{sec.sec_id}-part-{p_slug}"
+                        )
+                        p_cited = sorted({f for m in unhandled for f in cited_by_mod.get(m, ())})
+                        d_slice = extract_delta_slice(
+                            delta,
+                            unhandled,
+                            module_files,
+                            p_cited,
+                            module_paths=module_paths,
+                            include_tests=include_tests,
+                        )
+                        d_diagrams = resolve_packet_diagram_ids(
+                            [sec.sec_id],
+                            unhandled,
+                            sec.diagram_ids,
+                            graph,
+                            parts=diagram_parts,
+                            assigned_parts=[pid],
+                        )
+                        pkt_descs = _packet_descriptions_subset(
+                            verified_descriptions,
+                            assigned_parts=[pid],
+                            assigned_modules=unhandled,
+                            overview=overview if isinstance(overview, Mapping) else None,
+                            section_ids=[sec.sec_id],
+                        )
+                        pkt = Packet(
+                            packet_id=pkt_id,
+                            target_doc=target_doc,
+                            section_ids=[sec.sec_id],
+                            draft_output_path=f"{effective_docs_dir}/.drafts/{pkt_id}.md",
+                            assigned_modules=unhandled,
+                            delta_slice=d_slice,
+                            diagram_ids=d_diagrams,
+                            line_count=sum(module_lines.get(m, 0) for m in unhandled),
+                            symbol_count=sum(module_symbols.get(m, 0) for m in unhandled),
+                            structural=sections_are_structural([sec]),
+                            assigned_parts=[pid],
+                            verified_descriptions=pkt_descs,
+                        )
+                        packets.append(
+                            _ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir)
+                        )
+                continue
+
             # Oversized check per SPEC 9.2: split into module slices
             is_oversized = len(sec.modules) > 1 and (
                 sec.lines > max_lines_per_worker or sec.symbols > max_symbols_per_worker
@@ -842,7 +1078,11 @@ def run_plan(
                         include_tests=include_tests,
                     )
                     d_diagrams = resolve_packet_diagram_ids(
-                        [sec.sec_id], [m], sec.diagram_ids, graph
+                        [sec.sec_id],
+                        [m],
+                        sec.diagram_ids,
+                        graph,
+                        parts=diagram_parts,
                     )
                     draft_path = f"{effective_docs_dir}/.drafts/{pkt_id}.md"
                     pkt = Packet(
@@ -865,6 +1105,64 @@ def run_plan(
                     handled_module_slices.add((target_doc, sec.sec_id, m))
                 non_oversized.append(sec)
 
+        if active_parts is not None and missing_sections:
+            missing_by_part: dict[str, list[str]] = {}
+            unassigned_missing: list[SectionItem] = []
+            for sec in missing_sections:
+                if not sec.modules:
+                    unassigned_missing.append(sec)
+                    continue
+                for mod in sec.modules:
+                    if (target_doc, sec.sec_id, mod) in handled_module_slices:
+                        continue
+                    pid = mod_to_part_id.get(mod) or "part:root"
+                    missing_by_part.setdefault(pid, []).append(mod)
+            for pid in sorted(missing_by_part):
+                p_mods = sorted(set(missing_by_part[pid]))
+                for mod in p_mods:
+                    handled_module_slices.add((target_doc, "design-sec2", mod))
+                p_slug = pid.removeprefix("part:")
+                pkt_id = f"design-sec2-part-{p_slug}"
+                d_slice = extract_delta_slice(
+                    delta,
+                    p_mods,
+                    module_files,
+                    [],
+                    module_paths=module_paths,
+                    include_tests=include_tests,
+                )
+                d_diagrams = resolve_packet_diagram_ids(
+                    ["design-sec2"],
+                    p_mods,
+                    [],
+                    graph,
+                    parts=diagram_parts,
+                    assigned_parts=[pid],
+                )
+                pkt_descs = _packet_descriptions_subset(
+                    verified_descriptions,
+                    assigned_parts=[pid],
+                    assigned_modules=p_mods,
+                    overview=overview if isinstance(overview, Mapping) else None,
+                    section_ids=["design-sec2"],
+                )
+                pkt = Packet(
+                    packet_id=pkt_id,
+                    target_doc=target_doc,
+                    section_ids=["design-sec2"],
+                    draft_output_path=f"{effective_docs_dir}/.drafts/{pkt_id}.md",
+                    assigned_modules=p_mods,
+                    delta_slice=d_slice,
+                    diagram_ids=d_diagrams,
+                    line_count=sum(module_lines.get(m, 0) for m in p_mods),
+                    symbol_count=sum(module_symbols.get(m, 0) for m in p_mods),
+                    structural=True,
+                    assigned_parts=[pid],
+                    verified_descriptions=pkt_descs,
+                )
+                packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
+            missing_sections = unassigned_missing
+
         for sec in missing_sections:
             for mod in sec.modules or [""]:
                 slice_key = (target_doc, sec.sec_id, mod)
@@ -884,7 +1182,7 @@ def run_plan(
                     include_tests=include_tests,
                 )
                 d_diagrams = resolve_packet_diagram_ids(
-                    [sec.sec_id], slice_mods, sec.diagram_ids, graph
+                    [sec.sec_id], slice_mods, sec.diagram_ids, graph, parts=diagram_parts
                 )
                 pkt = Packet(
                     packet_id=pkt_id,
@@ -923,6 +1221,10 @@ def run_plan(
                     module_paths,
                     graph,
                     include_tests=include_tests,
+                    parts=diagram_parts,
+                    mod_to_part_id=mod_to_part_id,
+                    overview=overview if isinstance(overview, Mapping) else None,
+                    verified_descriptions=verified_descriptions,
                 )
                 packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
                 cur_sections = [sec]
@@ -942,6 +1244,10 @@ def run_plan(
                 module_paths,
                 graph,
                 include_tests=include_tests,
+                parts=diagram_parts,
+                mod_to_part_id=mod_to_part_id,
+                overview=overview if isinstance(overview, Mapping) else None,
+                verified_descriptions=verified_descriptions,
             )
             packets.append(_ensure_unique_packet_id(pkt, seen_packet_ids, effective_docs_dir))
 
@@ -971,6 +1277,7 @@ def run_plan(
     packets.sort(key=lambda p: (p.target_doc, p.packet_id))
 
     work_plan = {
+        "axis": effective_by,
         "budgets": {
             "max_lines_per_worker": max_lines_per_worker,
             "max_sections_per_worker": max_sections_per_worker,
