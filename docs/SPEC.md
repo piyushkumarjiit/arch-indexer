@@ -124,6 +124,8 @@ Only human-facing docs and viewer outputs are written to `<target_repo>/docs/`:
 ├── DESIGN.md                        # Technical Design Document
 ├── USER_GUIDE.md                    # Role-based User Guide
 ├── graph.json                       # Deterministic control/data flow graph
+├── arch/
+│   └── dependencies.json            # Deterministic package dependency catalog (§6.4)
 └── flow-viewer.html                 # Offline single-file interactive viewer (no server/network)
 ```
 Volatile files (`index.db`, `*.scip`, `index-delta.json`, `docs/.drafts/`) are never committed.

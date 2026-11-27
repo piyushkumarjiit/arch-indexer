@@ -1,6 +1,6 @@
 ---
 name: arch-indexer
-description: Load when indexing a target repository or generating and updating architecture documentation (docs/DESIGN.md, docs/USER_GUIDE.md, docs/graph.json, docs/flow-viewer.html) with arch-indexer.
+description: Load when indexing a target repository or generating and updating architecture documentation (docs/DESIGN.md, docs/USER_GUIDE.md, docs/graph.json, docs/flow-viewer.html, docs/arch/dependencies.json) with arch-indexer.
 user-invocable: false
 metadata:
   internal: true
@@ -183,6 +183,7 @@ Commit ONLY the canonical documentation artifacts this run produced:
 - `docs/USER_GUIDE.md`
 - `docs/graph.json`
 - `docs/flow-viewer.html`
+- `docs/arch/dependencies.json`
 
 *Never commit `index.db`, `.scip` binaries, draft files, or cache directories.*
 
