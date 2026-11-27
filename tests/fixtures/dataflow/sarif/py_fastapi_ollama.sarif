@@ -1,0 +1,126 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Opengrep 2.1.0",
+          "rules": [
+            {
+              "id": "arch-dataflow.python.ollama",
+              "properties": {
+                "package_key": "ollama"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "arch-dataflow.python.ollama",
+          "message": {
+            "text": "Request data reaches ollama"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "app.py" },
+                "region": { "startLine": 12, "startColumn": 12 }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "fp-ask-1"
+          },
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "message": { "text": "Source: 'question' @ 'app.py:17'" },
+                        "physicalLocation": {
+                          "artifactLocation": { "uri": "app.py" },
+                          "region": {
+                            "startLine": 17,
+                            "startColumn": 23,
+                            "snippet": { "text": "question" }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "location": {
+                        "message": { "text": "Propagator: 'prompt' @ 'app.py:11'" },
+                        "physicalLocation": {
+                          "artifactLocation": { "uri": "app.py" },
+                          "region": { "startLine": 11, "startColumn": 14 }
+                        }
+                      }
+                    },
+                    {
+                      "location": {
+                        "message": { "text": "Sink: 'ollama.chat(...)' @ 'app.py:12'" },
+                        "physicalLocation": {
+                          "artifactLocation": { "uri": "app.py" },
+                          "region": {
+                            "startLine": 12,
+                            "startColumn": 12,
+                            "snippet": { "text": "ollama.chat(model=\"qwen3:8b\", messages=[{\"role\": \"user\", \"content\": prompt}])" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "ruleId": "arch-dataflow.python.ollama",
+          "message": {
+            "text": "Non-entry helper flow that must be dropped"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "app.py" },
+                "region": { "startLine": 12, "startColumn": 12 }
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "message": { "text": "Source: 'text' @ 'app.py:8'" },
+                        "physicalLocation": {
+                          "artifactLocation": { "uri": "app.py" },
+                          "region": { "startLine": 8, "startColumn": 12 }
+                        }
+                      }
+                    },
+                    {
+                      "location": {
+                        "message": { "text": "Sink: 'ollama.chat(...)' @ 'app.py:12'" },
+                        "physicalLocation": {
+                          "artifactLocation": { "uri": "app.py" },
+                          "region": { "startLine": 12, "startColumn": 12 }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

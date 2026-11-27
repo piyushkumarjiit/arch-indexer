@@ -7,6 +7,7 @@ import {
   ChangeOverlayPanel,
   collectChangeItems,
 } from "./ui/ChangeBadges";
+import { DataFlowLayer } from "./ui/DataFlowLayer";
 import { FlowBanner } from "./ui/FlowBanner";
 import { Inspector } from "./ui/Inspector";
 import { LayerToggles } from "./ui/LayerToggles";
@@ -476,6 +477,12 @@ export function App() {
           onPrev={prevFlowStep}
           onNext={nextFlowStep}
           onExit={exitFlow}
+        />
+
+        <DataFlowLayer
+          dataflow={dataflow}
+          visible={layers.data && !exactOnly}
+          onSelectEntry={(entryId) => void navigateToNodeId(entryId)}
         />
 
         {!activeFlow && (

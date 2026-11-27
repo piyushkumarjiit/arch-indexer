@@ -29,6 +29,7 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "synthetic_symbols",
         "symbol_relations",
         "resources",
+        "dataflow_edges",
     }
 
     # Verify meta table and user_version
@@ -36,7 +37,7 @@ def test_schema_creation_and_column_names(tmp_path: Path):
     assert c.fetchone()[0] == 2
     c.execute("SELECT key, value FROM meta ORDER BY key")
     meta_rows = dict(c.fetchall())
-    assert meta_rows["schema_version"] == "2.1"
+    assert meta_rows["schema_version"] == "2.2"
     assert "arch_indexer_version" in meta_rows
 
     # Verify column names for units (per-unit tier, hashes, commit, fallback reason, message)
@@ -170,8 +171,26 @@ def test_schema_creation_and_column_names(tmp_path: Path):
         "line",
         "rule_id",
     ]
+    c.execute("PRAGMA table_info('dataflow_edges')")
+    assert [r[1] for r in c.fetchall()] == [
+        "id",
+        "tool",
+        "tool_version",
+        "rule_id",
+        "entry_id",
+        "source_fqname",
+        "source_file",
+        "source_line",
+        "sink_fqname",
+        "sink_file",
+        "sink_line",
+        "sink_boundary_id",
+        "path_json",
+        "payload_hint",
+        "sarif_fingerprint",
+    ]
     c.execute("SELECT value FROM meta WHERE key = 'schema_version'")
-    assert c.fetchone()[0] == "2.1"
+    assert c.fetchone()[0] == "2.2"
     c.execute("PRAGMA user_version")
     assert c.fetchone()[0] == 2
 

@@ -67,6 +67,11 @@ def get_java_tools_dir(cache_dir_override: str | Path | None = None) -> Path:
     return get_tools_dir(cache_dir_override) / "java"
 
 
+def get_dataflow_tools_dir(cache_dir_override: str | Path | None = None) -> Path:
+    """Path to <cache>/tools/dataflow/ directory."""
+    return get_tools_dir(cache_dir_override) / "dataflow"
+
+
 def get_runtimes_dir(cache_dir_override: str | Path | None = None) -> Path:
     """Path to <cache>/runtimes/ (portable JDK/Maven downloaded by --fetch-runtime)."""
     return get_cache_dir(cache_dir_override) / "runtimes"

@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow taint sources and sanitizers for Java / Spring.
+
+sources:
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @RequestBody $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @RequestParam(...) $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @RequestParam $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @PathVariable(...) $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @PathVariable $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @RequestPart(...) $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., @RequestPart $TYPE $PARAM, ...) { ... }
+      - pattern: $PARAM
+  - patterns:
+      - pattern-inside: |
+          $RET $METHOD(..., HttpServletRequest $REQ, ...) { ... }
+      - pattern: $REQ.getParameter(...)
+
+sanitizers:
+  - pattern: sanitize(...)
+  - pattern: Integer.parseInt(...)
+  - pattern: Long.parseLong(...)
+  - pattern: UUID.fromString(...)
+  - pattern: HtmlUtils.htmlEscape(...)
+
+propagators:
+  - pattern: $FN.apply($ARG)
+    from: $ARG
+    to: $FN

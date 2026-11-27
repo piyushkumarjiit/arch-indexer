@@ -14,6 +14,10 @@ import {
 } from "../ui/ChangeBadges";
 import { projectRuntimeNodeMetrics } from "../ui/RuntimeLayer";
 import { sortTraceSpans } from "../ui/TraceReplay";
+import {
+  formatDataflowEdgeLabel,
+  resolveDataflowSourceLocation,
+} from "../ui/DataFlowLayer";
 import type {
   ChunkEdge,
   ChunkFlow,
@@ -102,6 +106,7 @@ function mergeEdgeIntoMap(
   }
   existing.kindCounts = mergedCounts;
   existing.count += edge.count;
+  existing.isDataflow = Boolean(existing.isDataflow || edge.isDataflow);
   if (existing.evidence && edge.evidence) {
     for (const ev of edge.evidence) {
       if (existing.evidence.length >= 3) break;
@@ -111,7 +116,7 @@ function mergeEdgeIntoMap(
   existing.label =
     existing.count > 1
       ? `${existing.kinds.join(", ")} (${existing.count})`
-      : existing.kinds.join(", ");
+      : edge.label || existing.label || existing.kinds.join(", ");
 }
 
 type FlowStepResolver = (nodeId: string) => string | undefined;
@@ -314,20 +319,27 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
 
   if (dataflow && layers.data) {
     for (const df of dataflow.edges) {
-      if (nodeIds.has(df.entry_id) && overview.boundaries.some((b) => b.id === df.sink_boundary_id)) {
-        mergeEdgeIntoMap(edgeMap, {
-          id: `${df.entry_id}->${df.sink_boundary_id}`,
-          source: df.entry_id,
-          target: df.sink_boundary_id,
-          kinds: ["dataflow"],
-          label: "dataflow",
-          count: 1,
-          confidence: df.confidence,
-          evidence: df.evidence,
-          isDataflow: true,
-        });
-        connectedBoundaryIds.add(df.sink_boundary_id);
-      }
+      if (!passesConfidenceFilter(df.confidence, exactOnly)) continue;
+      if (!overview.boundaries.some((b) => b.id === df.sink_boundary_id)) continue;
+      const loc = resolveDataflowSourceLocation(df, overview, opts.chunks);
+      const srcId = nodeIds.has(df.entry_id)
+        ? df.entry_id
+        : loc.partId && nodeIds.has(loc.partId)
+          ? loc.partId
+          : undefined;
+      if (!srcId) continue;
+      mergeEdgeIntoMap(edgeMap, {
+        id: `${srcId}->${df.sink_boundary_id}`,
+        source: srcId,
+        target: df.sink_boundary_id,
+        kinds: ["dataflow"],
+        label: formatDataflowEdgeLabel(df),
+        count: 1,
+        confidence: df.confidence,
+        evidence: df.evidence,
+        isDataflow: true,
+      });
+      connectedBoundaryIds.add(df.sink_boundary_id);
     }
   }
 
@@ -502,6 +514,35 @@ export function buildPartGraph(
     }
   }
 
+  // Project dataflow overlay edges onto Part view groups -> boundaries
+  if (opts.dataflow && layers.data) {
+    for (const df of opts.dataflow.edges) {
+      if (!passesConfidenceFilter(df.confidence, exactOnly)) continue;
+      const loc = resolveDataflowSourceLocation(df, overview, chunks);
+      const srcGroup =
+        loc.groupId && insideGroupIds.has(loc.groupId)
+          ? loc.groupId
+          : loc.partId === partId
+            ? partGroups[0]?.id
+            : undefined;
+      if (!srcGroup || !boundaryMap.has(df.sink_boundary_id)) continue;
+      ensureExternalNode(df.sink_boundary_id, 2);
+      if (nodeIds.has(srcGroup) && nodeIds.has(df.sink_boundary_id)) {
+        mergeEdgeIntoMap(edgeMap, {
+          id: `${srcGroup}->${df.sink_boundary_id}`,
+          source: srcGroup,
+          target: df.sink_boundary_id,
+          kinds: ["dataflow"],
+          label: formatDataflowEdgeLabel(df),
+          count: 1,
+          confidence: df.confidence,
+          evidence: df.evidence,
+          isDataflow: true,
+        });
+      }
+    }
+  }
+
   // Fallback if part had no groups (e.g. an empty/virtual part)
   if (partGroups.length === 0) {
     const part = partMap.get(partId);
@@ -670,6 +711,45 @@ export function buildGroupGraph(
         confidence: e.confidence,
         evidence: e.evidence,
       });
+    }
+  }
+
+  if (opts.dataflow && layers.data) {
+    for (const df of opts.dataflow.edges) {
+      if (!passesConfidenceFilter(df.confidence, exactOnly)) continue;
+      const firstFile = df.path[0]?.file ?? df.evidence[0]?.file;
+      const srcEntity =
+        nodeFileLookup.get(df.entry_id) ??
+        (firstFile ? fileToEntity.get(firstFile) : undefined);
+      if (!srcEntity || !boundaryMap.has(df.sink_boundary_id)) continue;
+      if (!nodeIds.has(df.sink_boundary_id)) {
+        const b = boundaryMap.get(df.sink_boundary_id)!;
+        if (!passesConfidenceFilter(b.confidence, exactOnly)) continue;
+        nodes.push({
+          id: b.id,
+          label: b.label,
+          subtitle: `${b.boundary} (${b.kind})`,
+          kind: b.boundary,
+          badge: b.kind,
+          confidence: b.confidence,
+          drillable: false,
+          evidence: b.evidence,
+        });
+        nodeIds.add(b.id);
+      }
+      if (nodeIds.has(srcEntity) && nodeIds.has(df.sink_boundary_id)) {
+        mergeEdgeIntoMap(edgeMap, {
+          id: `${srcEntity}->${df.sink_boundary_id}`,
+          source: srcEntity,
+          target: df.sink_boundary_id,
+          kinds: ["dataflow"],
+          label: formatDataflowEdgeLabel(df),
+          count: 1,
+          confidence: df.confidence,
+          evidence: df.evidence,
+          isDataflow: true,
+        });
+      }
     }
   }
 
@@ -856,6 +936,35 @@ export function buildFileGraph(
         confidence: e.confidence,
         evidence: e.evidence,
       });
+    }
+  }
+
+  if (opts.dataflow && layers.data) {
+    for (const df of opts.dataflow.edges) {
+      if (!passesConfidenceFilter(df.confidence, exactOnly)) continue;
+      const candSrc = fileNodeMap.has(df.entry_id)
+        ? df.entry_id
+        : fileNodeMap.has(`sym:${df.source_fqname}`)
+          ? `sym:${df.source_fqname}`
+          : fileNodeMap.has(df.source_fqname)
+            ? df.source_fqname
+            : undefined;
+      if (!candSrc) continue;
+      const src = keptIds.has(candSrc) ? candSrc : foldId;
+      ensureNeighbor(df.sink_boundary_id);
+      if (nodeIds.has(src) && nodeIds.has(df.sink_boundary_id)) {
+        mergeEdgeIntoMap(edgeMap, {
+          id: `${src}->${df.sink_boundary_id}`,
+          source: src,
+          target: df.sink_boundary_id,
+          kinds: ["dataflow"],
+          label: formatDataflowEdgeLabel(df),
+          count: 1,
+          confidence: df.confidence,
+          evidence: df.evidence,
+          isDataflow: true,
+        });
+      }
     }
   }
 
@@ -1047,6 +1156,48 @@ export function buildSymbolGraph(
         confidence: e.confidence,
         evidence: e.evidence,
       });
+    }
+  }
+
+  if (opts.dataflow && layers.data) {
+    for (const df of opts.dataflow.edges) {
+      if (!passesConfidenceFilter(df.confidence, exactOnly)) continue;
+      const srcId = nodeIds.has(df.entry_id)
+        ? df.entry_id
+        : nodeIds.has(`sym:${df.source_fqname}`)
+          ? `sym:${df.source_fqname}`
+          : nodeIds.has(df.source_fqname)
+            ? df.source_fqname
+            : undefined;
+      if (!srcId) continue;
+      if (!nodeIds.has(df.sink_boundary_id)) {
+        const b = boundaryMap.get(df.sink_boundary_id);
+        if (!b || !passesConfidenceFilter(b.confidence, exactOnly)) continue;
+        nodes.push({
+          id: b.id,
+          label: b.label,
+          subtitle: `${b.boundary} (${b.kind})`,
+          kind: b.boundary,
+          badge: b.kind,
+          confidence: b.confidence,
+          drillable: false,
+          evidence: b.evidence,
+        });
+        nodeIds.add(b.id);
+      }
+      if (nodeIds.has(df.sink_boundary_id)) {
+        mergeEdgeIntoMap(edgeMap, {
+          id: `${srcId}->${df.sink_boundary_id}`,
+          source: srcId,
+          target: df.sink_boundary_id,
+          kinds: ["dataflow"],
+          label: formatDataflowEdgeLabel(df),
+          count: 1,
+          confidence: df.confidence,
+          evidence: df.evidence,
+          isDataflow: true,
+        });
+      }
     }
   }
 

@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow sink definitions for Python aligned with PACKAGE_*_RULES.
+
+sinks:
+  - package_key: chromadb
+    patterns:
+      - pattern: $COL.add(...)
+      - pattern: $COL.upsert(...)
+      - pattern: $COL.query(...)
+  - package_key: django.db.models
+    patterns:
+      - pattern: $MODEL.objects.create(...)
+      - pattern: $MODEL.objects.filter(...)
+      - pattern: $OBJ.save(...)
+  - package_key: faiss
+    patterns:
+      - pattern: $IDX.add(...)
+      - pattern: $IDX.search(...)
+      - pattern: $VS.similarity_search(...)
+      - pattern: $VS.add_documents(...)
+      - pattern: $VS.add_texts(...)
+      - pattern: $VS.save_local(...)
+      - pattern: FAISS.from_documents(...)
+      - pattern: FAISS.from_texts(...)
+  - package_key: langchain_community.vectorstores.faiss
+    patterns:
+      - pattern: FAISS.from_documents(...)
+      - pattern: FAISS.from_texts(...)
+      - pattern: $VS.similarity_search(...)
+      - pattern: $VS.add_documents(...)
+      - pattern: $VS.add_texts(...)
+      - pattern: $VS.save_local(...)
+      - patterns:
+          - pattern-inside: |
+              from langchain_community.vectorstores import FAISS
+              ...
+          - pattern-inside: |
+              $RET = $VS.as_retriever(...)
+              ...
+          - pattern: $RET.invoke(...)
+  - package_key: google.genai
+    patterns:
+      - pattern: $CLIENT.models.generate_content(...)
+  - package_key: google.generativeai
+    patterns:
+      - pattern: $MODEL.generate_content(...)
+  - package_key: huggingface_hub
+    patterns:
+      - pattern: $CLIENT.text_generation(...)
+      - pattern: $CLIENT.chat_completion(...)
+  - package_key: lancedb
+    patterns:
+      - pattern: $TBL.add(...)
+      - pattern: $TBL.search(...)
+  - package_key: langchain_community.chat_models.chatollama
+    patterns:
+      - pattern: ChatOllama(...).invoke(...)
+  - package_key: langchain_ollama
+    patterns:
+      - pattern: ChatOllama(...).invoke(...)
+      - pattern: OllamaEmbeddings(...).embed_documents(...)
+      - pattern: OllamaEmbeddings(...).embed_query(...)
+      - patterns:
+          - pattern-inside: |
+              from langchain_ollama import ChatOllama
+              ...
+          - pattern-inside: |
+              $CHAIN = ($PROMPT | $LLM | ...)
+              ...
+          - pattern: $CHAIN.invoke(...)
+      - patterns:
+          - pattern-inside: |
+              from langchain_ollama import ChatOllama
+              ...
+          - pattern-inside: |
+              $LLM = ChatOllama(...)
+              ...
+          - pattern: $LLM.invoke(...)
+  - package_key: langchain_openai
+    patterns:
+      - pattern: ChatOpenAI(...).invoke(...)
+  - package_key: ollama
+    patterns:
+      - pattern: ollama.chat(...)
+      - pattern: ollama.generate(...)
+      - pattern: ollama.embeddings(...)
+      - pattern: $OLLAMA.chat(...)
+      - pattern: $OLLAMA.generate(...)
+  - package_key: openai
+    patterns:
+      - pattern: $CLIENT.chat.completions.create(...)
+      - pattern: $CLIENT.responses.create(...)
+      - pattern: $CLIENT.embeddings.create(...)
+  - package_key: anthropic
+    patterns:
+      - pattern: $CLIENT.messages.create(...)
+  - package_key: pgvector
+    patterns:
+      - pattern: $CUR.execute(...)
+  - package_key: pinecone
+    patterns:
+      - pattern: $IDX.upsert(...)
+      - pattern: $IDX.query(...)
+  - package_key: qdrant_client
+    patterns:
+      - pattern: $CLIENT.upsert(...)
+      - pattern: $CLIENT.search(...)
+      - pattern: $CLIENT.query_points(...)
+  - package_key: sqlalchemy.orm
+    patterns:
+      - pattern: $SESSION.add(...)
+      - pattern: $SESSION.execute(...)
+      - pattern: $SESSION.query(...)
+  - package_key: weaviate
+    patterns:
+      - pattern: $COL.data.insert(...)
+      - pattern: $COL.query.near_text(...)
