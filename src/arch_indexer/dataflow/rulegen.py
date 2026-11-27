@@ -46,8 +46,8 @@ def _slugify(value: str) -> str:
 
 
 def _load_lang_yaml(lang: str, filename: str) -> dict[str, Any]:
-    root = importlib.resources.files("arch_indexer.rules.dataflow").joinpath(lang, filename)
-    text = root.read_text(encoding="utf-8")
+    root = importlib.resources.files("arch_indexer.rules.dataflow").joinpath(lang)
+    text = root.joinpath(filename).read_text(encoding="utf-8")
     loaded = yaml.safe_load(text) or {}
     if not isinstance(loaded, dict):
         raise ValueError(f"Expected mapping in rules/dataflow/{lang}/{filename}")
