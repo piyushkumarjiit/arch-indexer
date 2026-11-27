@@ -477,7 +477,12 @@ class _Extractor:
             if value is not None:
                 node = value
         kind = self._arg_kind(node)
-        text = _compact(_text(node, self.source))
+        if kind == "literal":
+            # Literal values are semantic payloads (SQL, routes, topics, paths); keep their
+            # original whitespace so downstream classifiers can still parse them.
+            text = _text(node, self.source)[:_MAX_TEXT]
+        else:
+            text = _compact(_text(node, self.source))
         item: dict[str, Any] = {"kind": kind, "text": text}
         if name:
             item["name"] = name

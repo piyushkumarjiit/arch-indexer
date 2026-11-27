@@ -105,3 +105,31 @@ def test_sql_select_still_records_readers() -> None:
     orders = resources["res:table:orders"]
     assert [w["path"] for w in orders["writers"]] == ["delete_module/service.py"]
     assert [r["path"] for r in orders["readers"]] == ["reader_module/service.py"]
+
+
+def test_inline_sql_string_literals_share_table_resource_end_to_end(tmp_path: Path) -> None:
+    """Inline SQL args survive extraction, so DELETE writes and SELECT reads share a table."""
+    repo = tmp_path / "repo"
+    (repo / "cleanup").mkdir(parents=True)
+    (repo / "reader").mkdir(parents=True)
+    (repo / "cleanup" / "purge.py").write_text(
+        "def purge_orders(conn):\n"
+        '    conn.execute("DELETE FROM orders")\n',
+        encoding="utf-8",
+    )
+    (repo / "reader" / "report.py").write_text(
+        "def count_orders(conn):\n"
+        '    return conn.execute("SELECT count(*) FROM orders").fetchone()\n',
+        encoding="utf-8",
+    )
+
+    cache = tmp_path / "cache"
+    rc = main(["index", str(repo), "--offline", "--force-full", "--cache-dir", str(cache)])
+    assert rc in (0, 2)
+
+    graph = load_graph(repo / "docs" / "graph.json")
+    resources = {r["id"]: r for r in graph["resources"]}
+    orders = resources.get("res:table:orders")
+    assert orders is not None, f"missing table resource; got {sorted(resources)}"
+    assert [w["path"] for w in orders["writers"]] == ["cleanup/purge.py"]
+    assert [r["path"] for r in orders["readers"]] == ["reader/report.py"]
