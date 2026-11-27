@@ -35,7 +35,7 @@ Also included as TypeScript declaration dependencies in `viewer-app/package-lock
 | Package | Version | SPDX License | Upstream URL | Where Used |
 |---|---|---|---|---|
 | `protobuf` | `5.29.3` | `BSD-3-Clause` | https://github.com/protocolbuffers/protobuf | `src/arch_indexer/scip.py`, `src/arch_indexer/scip_pb2.py` |
-| `pyyaml` | `6.0.1` | `MIT` | https://github.com/yaml/pyyaml | `src/arch_indexer/plugins/infra_scanner.py` |
+| `pyyaml` | `6.0.1` | `MIT` | https://github.com/yaml/pyyaml | `src/arch_indexer/plugins/infra_scanner.py`, `src/arch_indexer/dataflow/rulegen.py` |
 | `tree-sitter` | `0.23.2` | `MIT` | https://github.com/tree-sitter/py-tree-sitter | `src/arch_indexer/facts/`, `src/arch_indexer/plugins/`, `src/arch_indexer/storage/state.py` |
 | `tree-sitter-python` | `0.23.6` | `MIT` | https://github.com/tree-sitter/tree-sitter-python | `src/arch_indexer/plugins/python_plugin.py`, `src/arch_indexer/facts/` |
 | `tree-sitter-typescript` | `0.23.2` | `MIT` | https://github.com/tree-sitter/tree-sitter-typescript | `src/arch_indexer/plugins/typescript_plugin.py`, `src/arch_indexer/facts/` |
