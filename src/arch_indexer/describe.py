@@ -120,7 +120,9 @@ def _is_secret_key_name(key: str) -> bool:
     )
 
 
-def find_secrets(text: str, file_path: str = "") -> list[dict[str, Any]]:
+def find_secrets(
+    text: str, file_path: str = "", *, in_pem_block: bool = False
+) -> list[dict[str, Any]]:
     """Detect hardcoded secret literals in source or config text (MIT floorplan port)."""
     del file_path
     findings: list[dict[str, Any]] = []
@@ -129,7 +131,6 @@ def find_secrets(text: str, file_path: str = "") -> list[dict[str, Any]]:
 
     lines = text.splitlines(keepends=True)
     offset = 0
-    in_pem_block = False
     for line_no, raw_line in enumerate(lines, start=1):
         line = raw_line.rstrip("\r\n")
         if in_pem_block or _PEM_BEGIN_RE.search(line):
@@ -230,9 +231,9 @@ def find_secrets(text: str, file_path: str = "") -> list[dict[str, Any]]:
     return findings
 
 
-def mask_secrets(text: str, file_path: str = "") -> str:
+def mask_secrets(text: str, file_path: str = "", *, in_pem_block: bool = False) -> str:
     """Replace detected secret literal values in ``text`` while preserving line numbers."""
-    findings = find_secrets(text, file_path=file_path)
+    findings = find_secrets(text, file_path=file_path, in_pem_block=in_pem_block)
     if not findings:
         return text
     out: list[str] = []
@@ -246,6 +247,24 @@ def mask_secrets(text: str, file_path: str = "") -> str:
         cursor = end
     out.append(text[cursor:])
     return "".join(out)
+
+
+def mask_secrets_span(
+    lines: Sequence[str], start_line: int, end_line: int, file_path: str = ""
+) -> str:
+    """Mask secrets in a 1-based inclusive line span using whole-file PEM-block context."""
+    start = max(1, start_line)
+    end = min(len(lines), end_line)
+    if end < start:
+        return ""
+    in_pem_block = False
+    for line in lines[: start - 1]:
+        if _PEM_BEGIN_RE.search(line):
+            in_pem_block = not bool(_PEM_END_RE.search(line))
+        elif in_pem_block and _PEM_END_RE.search(line):
+            in_pem_block = False
+    snippet = "\n".join(lines[start - 1 : end])
+    return mask_secrets(snippet, file_path=file_path, in_pem_block=in_pem_block)
 
 
 @dataclass
@@ -429,8 +448,7 @@ def _read_masked_span(
     lines = _split_lines(target.read_text(encoding="utf-8", errors="replace"))
     s_idx = max(0, start_line - 1)
     e_idx = min(len(lines), min(end_line, s_idx + max_lines))
-    snippet = "\n".join(lines[s_idx:e_idx])
-    return mask_secrets(snippet, file_path=rel_path)
+    return mask_secrets_span(lines, s_idx + 1, e_idx, file_path=rel_path)
 
 
 def _load_chunks_for_overview(

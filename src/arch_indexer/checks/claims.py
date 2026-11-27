@@ -22,7 +22,7 @@ from arch_indexer.checks.citations import (
     parse_citation_definitions,
 )
 from arch_indexer.config import DEFAULT_DOCS_DIR, RepoCachePaths
-from arch_indexer.describe import mask_secrets
+from arch_indexer.describe import mask_secrets_span
 from arch_indexer.graph import git_head
 
 MAX_CLAIM_SPAN_LINES = 80
@@ -153,8 +153,7 @@ def _extract_capped_span(
 
     start_line = max(1, start_line)
     end_line = min(len(lines), end_line)
-    snippet = "\n".join(lines[start_line - 1 : end_line])
-    return start_line, end_line, mask_secrets(snippet, file_path=file_rel)
+    return start_line, end_line, mask_secrets_span(lines, start_line, end_line, file_path=file_rel)
 
 
 def plan_claims(

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from arch_indexer.describe import find_secrets, mask_secrets
+from arch_indexer.describe import find_secrets, mask_secrets, mask_secrets_span
 
 
 def test_hardcoded_password_is_masked_while_form_lookup_is_not() -> None:
@@ -72,3 +72,22 @@ def test_pem_private_key_block_body_is_masked_and_line_count_is_preserved() -> N
     assert "PRIVATE KEY" not in masked
     assert masked.splitlines()[-1] == "PORT = 8080"
     assert len(masked.splitlines()) == len(code.splitlines())
+
+
+def test_pem_body_is_masked_when_span_starts_inside_the_block() -> None:
+    key_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+    second_body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB"
+    lines = [
+        "# deployment key",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        key_body,
+        second_body,
+        "-----END RSA PRIVATE KEY-----",
+        "PORT = 8080",
+    ]
+
+    assert mask_secrets_span(lines, 4, 4, file_path="deploy.sh") == "[REDACTED]"
+    masked_body = mask_secrets_span(lines, 3, 4, file_path="deploy.sh")
+    assert key_body not in masked_body
+    assert second_body not in masked_body
+    assert masked_body.splitlines() == ["[REDACTED]", "[REDACTED]"]
