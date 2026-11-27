@@ -7,6 +7,7 @@ import hashlib
 import importlib.resources
 import json
 import posixpath
+import sqlite3
 from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
@@ -876,48 +877,38 @@ def export_bundle(
                 " WHERE docstring IS NOT NULL AND docstring != ''"
             ).fetchall():
                 docstrings[row[0]] = row[1]
-        except Exception:
+        except sqlite3.Error:
             pass
-        try:
-            file_rows = filter_rows(
-                [
-                    dict(r)
-                    for r in store.conn.execute(
-                        "SELECT path, language, module, tier, line_count, unit_id "
-                        "FROM files ORDER BY path"
-                    ).fetchall()
-                ],
-                include_tests,
-                key="path",
-            )
-        except Exception:
-            file_rows = []
-        try:
-            infra_rows = filter_rows(
-                [
-                    dict(r)
-                    for r in store.conn.execute(
-                        "SELECT kind, file_path, line, summary_json "
-                        "FROM infra_artifacts ORDER BY file_path, line"
-                    ).fetchall()
-                ],
-                include_tests,
-            )
-        except Exception:
-            infra_rows = []
-        try:
-            entry_rows = filter_rows(
-                [
-                    dict(r)
-                    for r in store.conn.execute(
-                        "SELECT kind, name, method, route_or_trigger, file_path, line "
-                        "FROM entrypoints"
-                    ).fetchall()
-                ],
-                include_tests,
-            )
-        except Exception:
-            entry_rows = []
+        file_rows = filter_rows(
+            [
+                dict(r)
+                for r in store.conn.execute(
+                    "SELECT path, language, module, tier, line_count, unit_id "
+                    "FROM files ORDER BY path"
+                ).fetchall()
+            ],
+            include_tests,
+            key="path",
+        )
+        infra_rows = filter_rows(
+            [
+                dict(r)
+                for r in store.conn.execute(
+                    "SELECT kind, file_path, line, summary_json "
+                    "FROM infra_artifacts ORDER BY file_path, line"
+                ).fetchall()
+            ],
+            include_tests,
+        )
+        entry_rows = filter_rows(
+            [
+                dict(r)
+                for r in store.conn.execute(
+                    "SELECT kind, name, method, route_or_trigger, file_path, line FROM entrypoints"
+                ).fetchall()
+            ],
+            include_tests,
+        )
 
     if not file_rows:
         file_rows = [

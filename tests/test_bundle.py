@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from arch_indexer.bundle import aggregate_edges, build_bundle, build_flows, export_bundle
 from arch_indexer.cli import EXIT_DELTA_DETECTED, main
@@ -251,3 +254,46 @@ def test_build_flows_handles_boundaries_resources_and_partial_traces(tmp_path: P
     overview, chunks, _search = build_bundle(graph, parts)
     assert len(overview["flow_index"]) == 4
     assert len(chunks["part:app"]["flows"]) == 4
+
+
+_STORE_TABLES = {
+    "symbols": "fqname TEXT, docstring TEXT",
+    "files": (
+        "path TEXT PRIMARY KEY, language TEXT, module TEXT, tier TEXT,"
+        " line_count INTEGER, unit_id TEXT"
+    ),
+    "infra_artifacts": "kind TEXT, file_path TEXT, line INTEGER, summary_json TEXT",
+    "entrypoints": (
+        "kind TEXT, name TEXT, method TEXT, route_or_trigger TEXT, file_path TEXT, line INTEGER"
+    ),
+}
+
+
+class _ConnStore:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+
+def _sqlite_store(*missing_tables: str) -> _ConnStore:
+    conn = sqlite3.connect(":memory:")
+    for table, columns in _STORE_TABLES.items():
+        if table not in missing_tables:
+            conn.execute(f"CREATE TABLE {table} ({columns})")
+    return _ConnStore(conn)
+
+
+def test_export_bundle_fails_when_required_store_query_fails(tmp_path: Path) -> None:
+    """A broken ``files`` query must abort the export instead of exporting empty parts."""
+    graph = generate_synthetic_graph(num_nodes=50, num_edges=100, seed=7)
+    store = _sqlite_store("files")
+    with pytest.raises(sqlite3.OperationalError):
+        export_bundle(tmp_path, tmp_path / "docs", graph, store=store)
+    assert not (tmp_path / "docs" / "arch" / "overview.json").exists()
+
+
+def test_export_bundle_degrades_only_when_docstrings_are_unavailable(tmp_path: Path) -> None:
+    """The optional docstring query may degrade; the bundle is still written."""
+    graph = generate_synthetic_graph(num_nodes=50, num_edges=100, seed=7)
+    store = _sqlite_store("symbols")
+    result = export_bundle(tmp_path, tmp_path / "docs", graph, store=store)
+    assert result["overview_path"].is_file()

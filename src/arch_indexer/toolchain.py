@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import resources
@@ -107,17 +108,30 @@ _BUNDLE_FILES = frozenset(
 )
 
 
-def is_path_excluded(path_str: str) -> bool:
-    """Check if relative path touches any excluded directory or generated ``arch/`` bundle."""
+_BUNDLE_DIRS = frozenset({"chunks", "vendor"})
+
+
+def _generated_bundle_dirs(paths: Iterable[str]) -> set[tuple[str, ...]]:
+    """Return directories that hold a generated bundle (they contain ``arch/overview.json``)."""
+    dirs: set[tuple[str, ...]] = set()
+    for rel in paths:
+        parts = Path(rel).parts
+        if len(parts) >= 2 and parts[-1] == "overview.json" and parts[-2] == "arch":
+            dirs.add(parts[:-1])
+    return dirs
+
+
+def is_path_excluded(path_str: str, bundle_dirs: Iterable[tuple[str, ...]] = ()) -> bool:
+    """Check if relative path touches an excluded directory or a generated ``arch/`` bundle."""
     parts = Path(path_str).parts
     if any(p in EXCLUDED_DIR_NAMES for p in parts):
         return True
-    if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "arch":
-        return True
-    for idx in range(len(parts) - 1):
-        if parts[idx] == "arch" and parts[idx + 1] in ("chunks", "vendor"):
-            return True
-    return len(parts) >= 2 and parts[-2] == "arch" and parts[-1] in _BUNDLE_FILES
+    bundle_dirs = set(bundle_dirs)
+    for idx in range(1, len(parts)):
+        if parts[:idx] in bundle_dirs:
+            name = parts[idx]
+            return name in _BUNDLE_DIRS or (idx == len(parts) - 1 and name in _BUNDLE_FILES)
+    return False
 
 
 def get_repo_files(repo_path: Path | str) -> list[str]:
@@ -150,12 +164,13 @@ def get_repo_files(repo_path: Path | str) -> list[str]:
                 check=False,
             )
             if ls_res.returncode == 0:
+                rel_paths = [
+                    os.fsdecode(raw_path) for raw_path in ls_res.stdout.split(b"\0") if raw_path
+                ]
+                bundle_dirs = _generated_bundle_dirs(rel_paths)
                 files = []
-                for raw_path in ls_res.stdout.split(b"\0"):
-                    if not raw_path:
-                        continue
-                    rel_path = os.fsdecode(raw_path)
-                    if not is_path_excluded(rel_path) and (repo / rel_path).is_file():
+                for rel_path in rel_paths:
+                    if not is_path_excluded(rel_path, bundle_dirs) and (repo / rel_path).is_file():
                         files.append(rel_path)
                 return sorted(files)
 
@@ -170,9 +185,9 @@ def get_repo_files(repo_path: Path | str) -> list[str]:
                 rel = full_path.relative_to(repo).as_posix()
             except ValueError:
                 continue
-            if not is_path_excluded(rel):
-                files.append(rel)
-    return sorted(files)
+            files.append(rel)
+    bundle_dirs = _generated_bundle_dirs(files)
+    return sorted(rel for rel in files if not is_path_excluded(rel, bundle_dirs))
 
 
 _CONFIG_PATTERNS = (

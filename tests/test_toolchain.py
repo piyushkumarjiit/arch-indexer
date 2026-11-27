@@ -1577,3 +1577,36 @@ def test_sql_migrations_are_detected_as_infra(tmp_path):
     assert not is_sql_migration_file("src/migration/Migrator.java")
     assert not is_sql_migration_file("db/migration/pom.xml")
     assert not is_sql_migration_file("docs/changelog/releases.json")
+
+
+def _write_file(path: Path, text: str = "x\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize("use_git", [False, True])
+def test_generated_arch_bundle_excluded_but_other_arch_paths_kept(tmp_path, use_git):
+    """Only the generated bundle under the docs dir is dropped; hand-written arch paths stay."""
+    from arch_indexer.toolchain import get_repo_files
+
+    repo = tmp_path / "repo"
+    bundle = repo / "docs" / "arch"
+    _write_file(bundle / "overview.json", "{}\n")
+    _write_file(bundle / "dependencies.json", "{}\n")
+    _write_file(bundle / "dataflow.v1.js", "window.__ARCH_DATAFLOW__ = null;\n")
+    _write_file(bundle / "chunks" / "part-app.js", "x\n")
+    _write_file(bundle / "chunks" / "index.json", "{}\n")
+    _write_file(bundle / "vendor" / "elk-worker.min.js", "x\n")
+    _write_file(bundle / "adr-001.md", "# ADR\n")
+    _write_file(repo / "docs" / "architecture.md", "# docs\n")
+    _write_file(repo / "pkg" / "arch" / "vendor" / "vendor.go", "package vendor\n")
+    _write_file(repo / "pkg" / "arch" / "chunks" / "notes.py", "x = 1\n")
+    if use_git:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+
+    assert set(get_repo_files(repo)) == {
+        "docs/arch/adr-001.md",
+        "docs/architecture.md",
+        "pkg/arch/chunks/notes.py",
+        "pkg/arch/vendor/vendor.go",
+    }
