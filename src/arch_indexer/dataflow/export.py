@@ -13,6 +13,13 @@ from arch_indexer.viewer.renderer import safe_json_embed
 SCHEMA_VERSION = "1.0"
 
 
+def _header_value(rows: Sequence[Mapping[str, Any]], field: str, fallback: str) -> str:
+    values = {str(row.get(field) or "") for row in rows} - {""}
+    if not values:
+        return fallback
+    return values.pop() if len(values) == 1 else "mixed"
+
+
 def build_dataflow_payload(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -84,8 +91,8 @@ def build_dataflow_payload(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "tool": tool,
-        "tool_version": tool_version,
+        "tool": _header_value(rows, "tool", tool),
+        "tool_version": _header_value(rows, "tool_version", tool_version),
         "edges": edges,
     }
 

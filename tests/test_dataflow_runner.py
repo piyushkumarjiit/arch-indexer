@@ -97,9 +97,12 @@ def _persisted(repo: Path, cache: Path) -> dict[str, dict]:
         return {row["entry_id"]: row for row in store.get_dataflow_edges()}
 
 
+def _sidecar_payload(repo: Path) -> dict:
+    return json.loads((repo / "docs" / "arch" / "dataflow.v1.json").read_text(encoding="utf-8"))
+
+
 def _sidecar(repo: Path) -> dict[str, dict]:
-    payload = json.loads((repo / "docs" / "arch" / "dataflow.v1.json").read_text(encoding="utf-8"))
-    return {edge["entry_id"]: edge for edge in payload["edges"]}
+    return {edge["entry_id"]: edge for edge in _sidecar_payload(repo)["edges"]}
 
 
 def test_unfiltered_run_replaces_every_stored_edge(
@@ -221,3 +224,27 @@ def test_max_entries_trim_clears_stale_edges_of_analysed_entries(
     assert persisted["ep:GET:/a"]["sink_boundary_id"] == "ds:a2"
     assert persisted["ep:GET:/c"]["sink_boundary_id"] == "ds:c"
     assert persisted["ep:GET:/d"]["sink_boundary_id"] == "ds:d"
+
+
+def test_merged_sidecar_header_is_mixed_when_stored_rows_disagree(
+    tmp_path: Path, engine_rows: dict[str, list[dict]]
+) -> None:
+    repo, cache = _seed_repo(tmp_path, [("POST", "/ask"), ("GET", "/items")])
+    engine_rows["current"] = [
+        _row("ep:GET:/items", "ds:sqlite"),
+        _row("ep:POST:/ask", "ext:ollama"),
+    ]
+    run_dataflow(repo, cache_dir=cache, max_entries=10)
+    payload = _sidecar_payload(repo)
+    assert payload["tool"] == "opengrep"
+    assert payload["tool_version"] == "2.1.0"
+
+    engine_rows["current"] = [
+        {**_row("ep:POST:/ask", "ext:openai"), "tool": "joern", "tool_version": "4.0.693"}
+    ]
+    run_dataflow(repo, cache_dir=cache, entries=["ep:POST:/ask"])
+
+    payload = _sidecar_payload(repo)
+    assert payload["tool"] == "mixed"
+    assert payload["tool_version"] == "mixed"
+    assert set(_sidecar(repo)) == {"ep:POST:/ask", "ep:GET:/items"}
