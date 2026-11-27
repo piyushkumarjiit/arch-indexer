@@ -12,6 +12,8 @@ import {
   getGroupChangeStatus,
   getPartChangeStatus,
 } from "../ui/ChangeBadges";
+import { projectRuntimeNodeMetrics } from "../ui/RuntimeLayer";
+import { sortTraceSpans } from "../ui/TraceReplay";
 import type {
   ChunkEdge,
   ChunkFlow,
@@ -22,6 +24,7 @@ import type {
   OverviewEdge,
   PartChunk,
   RuntimeOverlayData,
+  RuntimeTrace,
   ViewEdgeData,
   ViewNodeData,
 } from "../types/bundle";
@@ -41,6 +44,8 @@ export interface ViewBuildOptions {
   dataflow: DataflowData | null;
   activeFlow: ChunkFlow | null;
   flowStepIndex: number;
+  activeTrace?: RuntimeTrace | null;
+  traceSpanIndex?: number;
 }
 
 /** Split a file-view symbol id (``sym:<path>:<name>:<line>``) into its parts. */
@@ -132,22 +137,75 @@ function applyFlowDimming(
   }
 }
 
+function applyTraceDimming(
+  nodes: ViewNodeData[],
+  edges: ViewEdgeData[],
+  activeTrace: RuntimeTrace | null | undefined,
+  traceSpanIndex: number | undefined,
+  resolveSpanNode: FlowStepResolver,
+): void {
+  if (!activeTrace || activeTrace.spans.length === 0) return;
+  const sortedSpans = sortTraceSpans(activeTrace.spans);
+  const clampedIdx = Math.max(0, Math.min(sortedSpans.length - 1, traceSpanIndex ?? 0));
+  const spanEntityById = new Map<string, string>();
+  const traceNodeIds = new Set<string>();
+  for (const sp of sortedSpans) {
+    const entity = sp.node_id ? resolveSpanNode(sp.node_id) : undefined;
+    if (entity) {
+      spanEntityById.set(sp.span_id, entity);
+      traceNodeIds.add(entity);
+    }
+  }
+  const currentSpan = sortedSpans[clampedIdx];
+  const currentEntityId = currentSpan?.node_id
+    ? resolveSpanNode(currentSpan.node_id)
+    : undefined;
+
+  const traceEdges = new Set<string>();
+  for (const sp of sortedSpans) {
+    const dst = spanEntityById.get(sp.span_id);
+    const src = sp.parent_id ? spanEntityById.get(sp.parent_id) : undefined;
+    if (src && dst && src !== dst) {
+      traceEdges.add(`${src}->${dst}`);
+    }
+  }
+
+  for (const n of nodes) {
+    const inTrace = traceNodeIds.has(n.id);
+    n.isCurrentStep = n.id === currentEntityId;
+    n.highlighted = inTrace;
+    n.dimmed = !inTrace;
+  }
+
+  for (const e of edges) {
+    const inTrace = traceEdges.has(`${e.source}->${e.target}`);
+    e.highlighted = inTrace;
+    e.dimmed = !inTrace;
+  }
+}
+
 function appendRuntimeDriftEdges(
   edgeMap: Map<string, ViewEdgeData>,
   visibleNodeIds: Set<string>,
   runtime: RuntimeOverlayData | null,
   layers: LayerFilter,
+  resolveEndpoint?: FlowStepResolver,
 ): void {
   if (!runtime || !layers.runtime) return;
   for (const [key, metric] of Object.entries(runtime.edge_metrics ?? {})) {
     if (metric.static) continue;
     const arrowIdx = key.indexOf("->");
     if (arrowIdx <= 0) continue;
-    const source = key.slice(0, arrowIdx);
-    const target = key.slice(arrowIdx + 2);
+    const rawSource = key.slice(0, arrowIdx);
+    const rawTarget = key.slice(arrowIdx + 2);
+    const source = resolveEndpoint ? resolveEndpoint(rawSource) : rawSource;
+    const target = resolveEndpoint ? resolveEndpoint(rawTarget) : rawTarget;
+    if (!source || !target || source === target) continue;
     if (!visibleNodeIds.has(source) || !visibleNodeIds.has(target)) continue;
+    const baseId = `${source}->${target}`;
+    const edgeId = edgeMap.has(baseId) ? `${baseId}#runtime` : baseId;
     mergeEdgeIntoMap(edgeMap, {
-      id: `${source}->${target}`,
+      id: edgeId,
       source,
       target,
       kinds: ["runtime"],
@@ -159,8 +217,33 @@ function appendRuntimeDriftEdges(
   }
 }
 
+function attachProjectedMetrics(
+  nodes: ViewNodeData[],
+  runtime: RuntimeOverlayData | null,
+  overview: OverviewData,
+  chunks: Record<string, PartChunk>,
+): void {
+  if (!runtime) return;
+  for (const n of nodes) {
+    if (!n.metrics) {
+      n.metrics = projectRuntimeNodeMetrics(n.id, runtime, overview, chunks);
+    }
+  }
+}
+
 export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
-  const { overview, layers, exactOnly, runtime, dataflow, activeFlow, flowStepIndex } = opts;
+  const {
+    overview,
+    chunks,
+    layers,
+    exactOnly,
+    runtime,
+    dataflow,
+    activeFlow,
+    flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
+  } = opts;
 
   const nodes: ViewNodeData[] = [];
   const nodeIds = new Set<string>();
@@ -176,13 +259,19 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
       drillable: true,
       partId: part.id,
       evidence: part.evidence,
-      metrics: runtime?.node_metrics?.[part.id] ?? null,
+      metrics: projectRuntimeNodeMetrics(part.id, runtime, overview, chunks),
     });
     nodeIds.add(part.id);
   }
 
   // Filter overview edges by active layers first, projecting mod:* endpoints to part_id
   const groupToPart = new Map(overview.groups.map((g) => [g.id, g.part_id]));
+  const chunkNodeToPart = new Map<string, string>();
+  for (const [pid, chunk] of Object.entries(chunks)) {
+    for (const cn of chunk.nodes) {
+      chunkNodeToPart.set(cn.id, groupToPart.get(cn.module_id) ?? pid);
+    }
+  }
   const visibleEdges: ViewEdgeData[] = [];
   const connectedBoundaryIds = new Set<string>();
   const edgeMap = new Map<string, ViewEdgeData>();
@@ -244,7 +333,16 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
     nodeIds.add(b.id);
   }
 
-  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers);
+  const resolveOverviewEndpoint: FlowStepResolver = (rawId) => {
+    if (nodeIds.has(rawId)) return rawId;
+    const fromGroup = groupToPart.get(rawId);
+    if (fromGroup && nodeIds.has(fromGroup)) return fromGroup;
+    const fromChunk = chunkNodeToPart.get(rawId);
+    if (fromChunk && nodeIds.has(fromChunk)) return fromChunk;
+    return undefined;
+  };
+
+  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers, resolveOverviewEndpoint);
 
   for (const e of edgeMap.values()) {
     if (nodeIds.has(e.source) && nodeIds.has(e.target)) {
@@ -256,6 +354,9 @@ export function buildOverviewGraph(opts: ViewBuildOptions): ViewGraphInput {
   applyFlowDimming(nodes, visibleEdges, activeFlow, flowStepIndex, (nodeId) =>
     nodeIds.has(nodeId) ? nodeId : flowPartId,
   );
+  if (!activeFlow) {
+    applyTraceDimming(nodes, visibleEdges, activeTrace, traceSpanIndex, resolveOverviewEndpoint);
+  }
   const capped = capNodesForView(nodes, visibleEdges, "overview");
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -264,7 +365,17 @@ export function buildPartGraph(
   partId: string,
   opts: ViewBuildOptions,
 ): ViewGraphInput {
-  const { overview, chunks, layers, exactOnly, runtime, activeFlow, flowStepIndex } = opts;
+  const {
+    overview,
+    chunks,
+    layers,
+    exactOnly,
+    runtime,
+    activeFlow,
+    flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
+  } = opts;
   const partGroups = overview.groups.filter((g) => g.part_id === partId);
   const insideGroupIds = new Set(partGroups.map((g) => g.id));
 
@@ -392,12 +503,19 @@ export function buildPartGraph(
     }
   }
 
-  const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) => {
+  const resolvePartTraceNode: FlowStepResolver = (nodeId) => {
     const moduleId = stepNodeModules.get(nodeId);
     const entityId = resolveEntity(moduleId ?? nodeId);
     return entityId !== null && nodeIds.has(entityId) ? entityId : undefined;
-  });
+  };
+  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers, resolvePartTraceNode);
+  attachProjectedMetrics(nodes, runtime, overview, chunks);
+
+  const edges = Array.from(edgeMap.values());
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolvePartTraceNode);
+  if (!activeFlow) {
+    applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolvePartTraceNode);
+  }
   const capped = capNodesForView(nodes, edges, `part:${partId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -413,7 +531,17 @@ export function buildGroupGraph(
   dirFilter: string | null,
   opts: ViewBuildOptions,
 ): ViewGraphInput {
-  const { overview, chunks, layers, exactOnly, activeFlow, flowStepIndex } = opts;
+  const {
+    overview,
+    chunks,
+    layers,
+    exactOnly,
+    runtime,
+    activeFlow,
+    flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
+  } = opts;
   const chunk = chunks[partId];
   if (!chunk) {
     return { nodes: [], edges: [], foldedCount: 0 };
@@ -528,14 +656,16 @@ export function buildGroupGraph(
     }
   }
 
+  const resolveGroupNode: FlowStepResolver = (nodeId) =>
+    nodeFileLookup.get(nodeId) ?? (nodeIds.has(nodeId) ? nodeId : undefined);
+  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers, resolveGroupNode);
+  attachProjectedMetrics(nodes, runtime, overview, chunks);
+
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(
-    nodes,
-    edges,
-    activeFlow,
-    flowStepIndex,
-    (nodeId) => nodeFileLookup.get(nodeId) ?? (nodeIds.has(nodeId) ? nodeId : undefined),
-  );
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveGroupNode);
+  if (!activeFlow) {
+    applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveGroupNode);
+  }
   const capped = capNodesForView(nodes, edges, `group:${groupId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }
@@ -546,7 +676,17 @@ export function buildFileGraph(
   filePath: string,
   opts: ViewBuildOptions,
 ): ViewGraphInput {
-  const { overview, chunks, layers, exactOnly, activeFlow, flowStepIndex } = opts;
+  const {
+    overview,
+    chunks,
+    layers,
+    exactOnly,
+    runtime,
+    activeFlow,
+    flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
+  } = opts;
   const chunk = chunks[partId];
   if (!chunk) {
     return { nodes: [], edges: [], foldedCount: 0 };
@@ -701,11 +841,18 @@ export function buildFileGraph(
     }
   }
 
-  const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) => {
+  const resolveFileNode: FlowStepResolver = (nodeId) => {
     if (fileNodeMap.has(nodeId)) return keptIds.has(nodeId) ? nodeId : foldId;
     return nodeIds.has(nodeId) ? nodeId : undefined;
-  });
+  };
+  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers, resolveFileNode);
+  attachProjectedMetrics(nodes, runtime, overview, chunks);
+
+  const edges = Array.from(edgeMap.values());
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveFileNode);
+  if (!activeFlow) {
+    applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveFileNode);
+  }
   const capped = capNodesForView(nodes, edges, `file:${filePath}`);
   return {
     nodes: capped.nodes,
@@ -719,7 +866,17 @@ export function buildSymbolGraph(
   symbolId: string,
   opts: ViewBuildOptions,
 ): ViewGraphInput {
-  const { overview, chunks, layers, exactOnly, activeFlow, flowStepIndex } = opts;
+  const {
+    overview,
+    chunks,
+    layers,
+    exactOnly,
+    runtime,
+    activeFlow,
+    flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
+  } = opts;
   const chunk = chunks[partId];
   if (!chunk) {
     return { nodes: [], edges: [], foldedCount: 0 };
@@ -769,6 +926,18 @@ export function buildSymbolGraph(
     }
   }
 
+  // Also include runtime-drift neighbors of symbolId when runtime layer is active
+  if (runtime && layers.runtime) {
+    for (const [key, metric] of Object.entries(runtime.edge_metrics ?? {})) {
+      if (metric.static) continue;
+      const arrowIdx = key.indexOf("->");
+      if (arrowIdx <= 0) continue;
+      const s = key.slice(0, arrowIdx);
+      const t = key.slice(arrowIdx + 2);
+      if (s === symbolId) includedIds.add(t);
+      if (t === symbolId) includedIds.add(s);
+    }
+  }
   const nodes: ViewNodeData[] = [];
   const nodeIds = new Set<string>();
 
@@ -862,10 +1031,16 @@ export function buildSymbolGraph(
     }
   }
 
+  const resolveSymbolNode: FlowStepResolver = (nodeId) =>
+    nodeIds.has(nodeId) ? nodeId : undefined;
+  appendRuntimeDriftEdges(edgeMap, nodeIds, runtime, layers, resolveSymbolNode);
+  attachProjectedMetrics(nodes, runtime, overview, chunks);
+
   const edges = Array.from(edgeMap.values());
-  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, (nodeId) =>
-    nodeIds.has(nodeId) ? nodeId : undefined,
-  );
+  applyFlowDimming(nodes, edges, activeFlow, flowStepIndex, resolveSymbolNode);
+  if (!activeFlow) {
+    applyTraceDimming(nodes, edges, activeTrace, traceSpanIndex, resolveSymbolNode);
+  }
   const capped = capNodesForView(nodes, edges, `symbol:${symbolId}`);
   return { nodes: capped.nodes, edges: capped.edges, foldedCount: capped.foldedCount };
 }

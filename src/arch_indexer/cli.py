@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 from arch_indexer.assembler import assemble
 from arch_indexer.checks.citations import run_check_citations
@@ -16,6 +19,7 @@ from arch_indexer.config import (
     DEFAULT_MAX_SECTIONS_PER_WORKER,
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
     DEFAULT_UNIT_TIMEOUT_SEC,
+    RepoCachePaths,
 )
 from arch_indexer.indexer import run_index
 from arch_indexer.planner import run_plan
@@ -25,6 +29,20 @@ from arch_indexer.query import (
     QueryError,
     run_query,
 )
+from arch_indexer.runtime.jaeger import fetch_traces
+from arch_indexer.runtime.join import (
+    join,
+    load_bundle_for_join,
+    write_runtime_overlay,
+)
+from arch_indexer.runtime.otlp import load_otlp_json, load_otlp_proto
+from arch_indexer.serve import (
+    DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_SERVE_HOST,
+    DEFAULT_SERVE_PORT,
+    serve_viewer,
+)
+from arch_indexer.store import IndexStore
 from arch_indexer.toolchain import (
     ensure_toolchain,
     format_status_report,
@@ -41,6 +59,9 @@ EXIT_DELTA_DETECTED: int = 2
 EXIT_VALIDATION_FAILED: int = 3
 EXIT_TOOLCHAIN_MISSING: int = 4
 
+_LOOKBACK_RE = re.compile(r"^(\d+)([smhd]?)$")
+_LOOKBACK_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
 
 def _positive_int(value: str) -> int:
     try:
@@ -50,6 +71,40 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def _parse_lookback_seconds(value: str) -> int:
+    match = _LOOKBACK_RE.match(value.strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid lookback duration {value!r}; expected e.g. '1h', '30m', '3600s'"
+        )
+    amount = int(match.group(1))
+    unit = match.group(2)
+    return amount * _LOOKBACK_UNITS[unit]
+
+
+def _load_otlp_auto(path: Path) -> tuple[list[Any], str]:
+    suffix = path.suffix.lower()
+    if suffix in (".pb", ".bin", ".proto"):
+        return load_otlp_proto(path), "otlp-proto"
+    if suffix in (".json", ".jsonl", ".ndjson"):
+        return load_otlp_json(path), "otlp-json"
+    raw = path.read_bytes()
+    stripped = raw.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return load_otlp_json(path), "otlp-json"
+    return load_otlp_proto(path), "otlp-proto"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -410,6 +465,96 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
 
+    # 8. trace
+    trace_parser = subparsers.add_parser(
+        "trace", help="Ingest OTLP or Jaeger traces into a runtime overlay"
+    )
+    trace_sub = trace_parser.add_subparsers(dest="trace_action", required=True)
+    trace_ingest = trace_sub.add_parser(
+        "ingest", help="Join OTLP/Jaeger spans onto docs/arch bundle"
+    )
+    trace_ingest.add_argument("repo", help="Target repository path")
+    trace_src = trace_ingest.add_mutually_exclusive_group(required=True)
+    trace_src.add_argument("--otlp-file", default=None, help="OTLP JSON or protobuf file path")
+    trace_src.add_argument(
+        "--collector-file", default=None, help="OTel Collector file-exporter JSON/JSONL path"
+    )
+    trace_src.add_argument("--jaeger", default=None, help="Jaeger v2 base URL (read-only GET)")
+    trace_ingest.add_argument("--service", default=None, help="Service name for --jaeger query")
+    trace_ingest.add_argument(
+        "--lookback",
+        type=_parse_lookback_seconds,
+        default=3600,
+        help="Lookback window for --jaeger (e.g. 1h, 30m, 3600s; default: 1h)",
+    )
+    trace_ingest.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=200,
+        help="Maximum traces to fetch from Jaeger (default: 200)",
+    )
+    trace_ingest.add_argument(
+        "--path-prefix-map",
+        action="append",
+        dest="path_prefix_map",
+        default=None,
+        metavar="SRC=DST",
+        help="Map instrumented container file prefix to repo path (repeatable)",
+    )
+    trace_ingest.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+    )
+    trace_ingest.add_argument("--cache-dir", default=None, help="Cache directory override")
+
+    # 9. serve (Decision D5: optional read-only localhost HTTP server)
+    serve_parser = subparsers.add_parser(
+        "serve", help="Optional read-only localhost HTTP server for live overlay polling"
+    )
+    serve_parser.add_argument("repo", help="Target repository path")
+    serve_parser.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+    )
+    serve_parser.add_argument(
+        "--host", default=DEFAULT_SERVE_HOST, help=f"Bind host (default: {DEFAULT_SERVE_HOST})"
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=_non_negative_int,
+        default=DEFAULT_SERVE_PORT,
+        help=f"Bind port (default: {DEFAULT_SERVE_PORT})",
+    )
+    serve_parser.add_argument(
+        "--jaeger", default=None, help="Optional Jaeger v2 URL to poll read-only in memory"
+    )
+    serve_parser.add_argument("--service", default=None, help="Service name for --jaeger polling")
+    serve_parser.add_argument(
+        "--lookback",
+        type=_parse_lookback_seconds,
+        default=3600,
+        help="Lookback window for --jaeger polling (default: 1h)",
+    )
+    serve_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=200,
+        help="Maximum traces to fetch per Jaeger poll (default: 200)",
+    )
+    serve_parser.add_argument(
+        "--poll-interval",
+        type=_positive_int,
+        default=DEFAULT_POLL_INTERVAL_S,
+        help=f"Jaeger poll interval in seconds (default: {DEFAULT_POLL_INTERVAL_S})",
+    )
+    serve_parser.add_argument(
+        "--path-prefix-map",
+        action="append",
+        dest="path_prefix_map",
+        default=None,
+        metavar="SRC=DST",
+        help="Map instrumented container file prefix to repo path (repeatable)",
+    )
+    serve_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
+
     return parser
 
 
@@ -578,6 +723,116 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except Exception as e:
             sys.stderr.write(f"Error checking mermaid diagrams: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "trace":
+        if args.trace_action == "ingest":
+            try:
+                repo_path = Path(args.repo)
+                docs_path = Path(args.docs_dir)
+                if not docs_path.is_absolute():
+                    docs_path = repo_path / docs_path
+
+                if args.jaeger:
+                    if not args.service:
+                        sys.stderr.write("Error: --jaeger requires --service NAME\n")
+                        return EXIT_ERROR
+                    jaeger_res = fetch_traces(
+                        args.jaeger,
+                        args.service,
+                        lookback_s=args.lookback,
+                        limit=args.limit,
+                    )
+                    spans = list(jaeger_res)
+                    source_info = jaeger_res.source
+                elif args.collector_file:
+                    cpath = Path(args.collector_file)
+                    spans = load_otlp_json(cpath)
+                    source_info = {
+                        "kind": "otlp-json",
+                        "uri_redacted": cpath.name,
+                        "service_names": sorted(
+                            {s["service_name"] for s in spans if s["service_name"]}
+                        ),
+                    }
+                else:
+                    opath = Path(args.otlp_file)
+                    spans, skind = _load_otlp_auto(opath)
+                    source_info = {
+                        "kind": skind,
+                        "uri_redacted": opath.name,
+                        "service_names": sorted(
+                            {s["service_name"] for s in spans if s["service_name"]}
+                        ),
+                    }
+
+                overview, chunks = load_bundle_for_join(docs_path)
+                cache_paths = RepoCachePaths.from_repo(repo_path, cache_dir_override=args.cache_dir)
+                if cache_paths.index_db.is_file():
+                    with IndexStore(cache_paths.index_db) as store:
+                        overlay = join(
+                            spans,
+                            overview,
+                            chunks,
+                            store=store,
+                            path_map=args.path_prefix_map,
+                            source=source_info,
+                        )
+                else:
+                    overlay = join(
+                        spans,
+                        overview,
+                        chunks,
+                        store=None,
+                        path_map=args.path_prefix_map,
+                        source=source_info,
+                    )
+
+                total_spans = len(spans)
+                unmatched_cnt = overlay["unmatched"]["span_count"]
+                matched_cnt = total_spans - unmatched_cnt
+                if total_spans == 0 or (matched_cnt / total_spans) < 0.10:
+                    sys.stderr.write(
+                        "Runtime overlay match rate too low "
+                        f"({matched_cnt}/{total_spans} spans matched).\n"
+                    )
+                    top_unmatched = overlay["unmatched"]["top_names"]
+                    if top_unmatched:
+                        sys.stderr.write("Top unmatched span names:\n")
+                        for name, cnt in top_unmatched:
+                            sys.stderr.write(f"  {cnt:4d}  {name}\n")
+                    return EXIT_VALIDATION_FAILED
+
+                json_path, js_path = write_runtime_overlay(docs_path / "arch", overlay)
+                print(
+                    f"Wrote runtime overlay ({matched_cnt}/{total_spans} spans matched): "
+                    f"{json_path}, {js_path}"
+                )
+                return EXIT_OK
+            except (OSError, RuntimeError, ValueError) as e:
+                sys.stderr.write(f"Error ingesting traces: {e}\n")
+                return EXIT_ERROR
+
+    elif args.command == "serve":
+        try:
+            if args.jaeger and not args.service:
+                sys.stderr.write("Error: --jaeger requires --service NAME\n")
+                return EXIT_ERROR
+            return serve_viewer(
+                args.repo,
+                docs_dir=args.docs_dir,
+                host=args.host,
+                port=args.port,
+                jaeger_url=args.jaeger,
+                service=args.service,
+                lookback_s=args.lookback,
+                limit=args.limit,
+                path_map=args.path_prefix_map,
+                cache_dir=args.cache_dir,
+                poll_interval_s=args.poll_interval,
+            )
+        except (OSError, RuntimeError, ValueError) as e:
+            sys.stderr.write(f"Error serving viewer: {e}\n")
             return EXIT_ERROR
 
     # All other commands are out of scope for this task and exit 1

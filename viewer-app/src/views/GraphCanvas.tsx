@@ -20,6 +20,7 @@ import {
   type LayoutResult,
 } from "../layout/elkWorker";
 import { ChangeBadge } from "../ui/ChangeBadges";
+import { runtimeHeatLevel } from "../ui/RuntimeLayer";
 import type { LayerFilter, ViewEdgeData, ViewNodeData } from "../types/bundle";
 
 const DEFAULT_ACTIVE_LAYERS: LayerFilter = {
@@ -30,6 +31,7 @@ const DEFAULT_ACTIVE_LAYERS: LayerFilter = {
 };
 
 const DrillHandlerContext = createContext<((node: ViewNodeData) => void) | null>(null);
+const RuntimeActiveContext = createContext<boolean>(false);
 
 interface SwimlaneBox {
   partition: 0 | 1 | 2;
@@ -121,10 +123,13 @@ function computeSwimlanes(
 
 function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<string, unknown>>>) {
   const onDrillNode = useContext(DrillHandlerContext);
+  const runtimeActive = useContext(RuntimeActiveContext);
   const isFold = data.kind === "fold";
+  const heat = runtimeActive ? runtimeHeatLevel(data.metrics) : "none";
   const classes = [
     "arch-node-card",
     `kind-${data.kind}`,
+    heat !== "none" ? `arch-node-card--rt-${heat}` : "",
     selected ? "is-selected" : "",
     data.isCurrentStep ? "is-current-step" : "",
     data.highlighted ? "is-highlighted" : "",
@@ -173,6 +178,22 @@ function ArchNodeCard({ data, selected }: NodeProps<Node<ViewNodeData & Record<s
       {data.subtitle && (
         <div className="arch-node-sub" title={data.subtitle}>
           {data.subtitle}
+        </div>
+      )}
+      {runtimeActive && data.metrics && (
+        <div className="arch-node-runtime-row" data-testid="node-runtime-metrics">
+          <span
+            className="arch-badge arch-badge--layer-runtime"
+            data-testid="runtime-tier-badge"
+          >
+            {data.metrics.match_tier}
+          </span>
+          <span className="arch-badge">{data.metrics.p95_ms}ms</span>
+          {data.metrics.error_count > 0 && (
+            <span className="arch-badge arch-badge--rt-error">
+              {data.metrics.error_count} err
+            </span>
+          )}
         </div>
       )}
       <Handle type="source" position={Position.Right} className="arch-handle" />
@@ -308,6 +329,7 @@ export function GraphCanvas({
   }
 
   return (
+    <RuntimeActiveContext.Provider value={Boolean(layers.runtime)}>
     <DrillHandlerContext.Provider value={onDrillNode}>
       <div
         className="arch-canvas-wrap"
@@ -357,5 +379,6 @@ export function GraphCanvas({
         </ReactFlow>
       </div>
     </DrillHandlerContext.Provider>
+    </RuntimeActiveContext.Provider>
   );
 }

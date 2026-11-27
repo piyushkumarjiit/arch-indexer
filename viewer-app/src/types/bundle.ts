@@ -257,6 +257,24 @@ export interface RuntimeEdgeMetric {
   static: boolean;
 }
 
+export interface RuntimeTraceSpan {
+  span_id: string;
+  parent_id: string | null;
+  node_id: string | null;
+  name: string;
+  start_ns: number;
+  dur_ns: number;
+  status: string;
+  match_tier: string;
+  exception_type?: string;
+}
+
+export interface RuntimeTrace {
+  trace_id: string;
+  root_node_id: string;
+  spans: RuntimeTraceSpan[];
+}
+
 export interface RuntimeOverlayData {
   schema_version: string;
   source: {
@@ -265,24 +283,11 @@ export interface RuntimeOverlayData {
     service_names: string[];
   };
   captured_at: string;
+  window_s?: number;
   static_commit: string;
   node_metrics: Record<string, RuntimeNodeMetric>;
   edge_metrics: Record<string, RuntimeEdgeMetric>;
-  traces: Array<{
-    trace_id: string;
-    root_node_id: string;
-    spans: Array<{
-      span_id: string;
-      parent_id: string | null;
-      node_id: string | null;
-      name: string;
-      start_ns: number;
-      dur_ns: number;
-      status: string;
-      match_tier: string;
-      exception_type?: string;
-    }>;
-  }>;
+  traces: RuntimeTrace[];
   unmatched: {
     span_count: number;
     top_names: Array<[string, number]>;

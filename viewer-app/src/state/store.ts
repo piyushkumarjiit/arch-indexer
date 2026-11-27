@@ -5,6 +5,7 @@ import {
   loadSearchIndex,
   readOptionalOverlays,
 } from "../data/chunks";
+import { sortTraceSpans } from "../ui/TraceReplay";
 import { buildSymbolGraph, parseFileSymbolId } from "../views/viewGraphs";
 import type {
   BreadcrumbItem,
@@ -50,11 +51,15 @@ export interface ViewerStoreState {
   activeFlow: ChunkFlow | null;
   flowFollowStep: boolean;
 
+  activeTraceId: string | null;
+  traceSpanIndex: number;
+
   searchOpen: boolean;
   recentBoardOpen: boolean;
 
   initFromOverview: (overview: OverviewData) => void;
   refreshOverlays: () => void;
+  setRuntimeOverlay: (overlay: RuntimeOverlayData | null) => void;
   ensurePartLoaded: (partId: string) => Promise<PartChunk | null>;
   openSearch: () => Promise<void>;
   closeSearch: () => void;
@@ -80,6 +85,11 @@ export interface ViewerStoreState {
   prevFlowStep: () => void;
   toggleFlowFollowStep: () => void;
   exitFlow: () => void;
+
+  startTrace: (traceId: string) => void;
+  nextTraceSpan: () => void;
+  prevTraceSpan: () => void;
+  exitTrace: () => void;
 
   navigateToNodeId: (nodeId: string) => Promise<void>;
 }
@@ -218,6 +228,9 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
   activeFlow: null,
   flowFollowStep: true,
 
+  activeTraceId: null,
+  traceSpanIndex: 0,
+
   searchOpen: false,
   recentBoardOpen: false,
 
@@ -243,6 +256,8 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
       activeFlowId: null,
       flowStepIndex: 0,
       activeFlow: null,
+      activeTraceId: null,
+      traceSpanIndex: 0,
       layers: {
         control: true,
         data: true,
@@ -261,6 +276,21 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
       layers: {
         ...state.layers,
         runtime: overlays.runtime !== null ? state.layers.runtime : false,
+      },
+    }));
+  },
+
+  setRuntimeOverlay: (overlay) => {
+    if (typeof window !== "undefined") {
+      window.__ARCH_RUNTIME__ = overlay;
+    }
+    set((state) => ({
+      runtime: overlay,
+      activeTraceId: overlay ? state.activeTraceId : null,
+      traceSpanIndex: overlay ? state.traceSpanIndex : 0,
+      layers: {
+        ...state.layers,
+        runtime: overlay !== null,
       },
     }));
   },
@@ -574,6 +604,60 @@ export const useViewerStore = create<ViewerStoreState>((set, get) => ({
   },
 
   exitFlow: () => set({ activeFlowId: null, flowStepIndex: 0, activeFlow: null }),
+
+  startTrace: (traceId) => {
+    const { runtime } = get();
+    const trace = runtime?.traces.find((t) => t.trace_id === traceId);
+    if (!trace) return;
+    const sorted = sortTraceSpans(trace.spans);
+    const firstNodeId = sorted[0]?.node_id ?? null;
+    set((s) => ({
+      activeTraceId: traceId,
+      traceSpanIndex: 0,
+      activeFlowId: null,
+      activeFlow: null,
+      flowStepIndex: 0,
+      selectedNodeId: firstNodeId ?? s.selectedNodeId,
+      selectedEdgeId: null,
+      inspectorOpen: Boolean(firstNodeId),
+      layers: {
+        ...s.layers,
+        runtime: true,
+      },
+    }));
+  },
+
+  nextTraceSpan: () => {
+    const { runtime, activeTraceId, traceSpanIndex } = get();
+    const trace = runtime?.traces.find((t) => t.trace_id === activeTraceId);
+    if (!trace || trace.spans.length === 0) return;
+    const sorted = sortTraceSpans(trace.spans);
+    const nextIdx = Math.min(sorted.length - 1, traceSpanIndex + 1);
+    const nodeId = sorted[nextIdx]?.node_id ?? null;
+    set((s) => ({
+      traceSpanIndex: nextIdx,
+      selectedNodeId: nodeId ?? s.selectedNodeId,
+      selectedEdgeId: null,
+      inspectorOpen: Boolean(nodeId) || s.inspectorOpen,
+    }));
+  },
+
+  prevTraceSpan: () => {
+    const { runtime, activeTraceId, traceSpanIndex } = get();
+    const trace = runtime?.traces.find((t) => t.trace_id === activeTraceId);
+    if (!trace || trace.spans.length === 0) return;
+    const sorted = sortTraceSpans(trace.spans);
+    const prevIdx = Math.max(0, traceSpanIndex - 1);
+    const nodeId = sorted[prevIdx]?.node_id ?? null;
+    set((s) => ({
+      traceSpanIndex: prevIdx,
+      selectedNodeId: nodeId ?? s.selectedNodeId,
+      selectedEdgeId: null,
+      inspectorOpen: Boolean(nodeId) || s.inspectorOpen,
+    }));
+  },
+
+  exitTrace: () => set({ activeTraceId: null, traceSpanIndex: 0 }),
 
   navigateToNodeId: async (nodeId) => {
     const { overview } = get();

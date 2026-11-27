@@ -909,3 +909,140 @@ body,
   color: var(--text-muted);
   font-size: 13px;
 }
+
+.arch-runtime-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  background: rgba(15, 23, 42, 0.85);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.arch-runtime-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 16px;
+  background: rgba(244, 63, 94, 0.08);
+  border-bottom: 1px solid rgba(244, 63, 94, 0.35);
+  font-size: 12px;
+}
+
+.arch-runtime-bar__meta,
+.arch-runtime-bar__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.arch-runtime-bar__services {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arch-runtime-bar__stat,
+.arch-runtime-bar__hint {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.arch-runtime-select {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-primary);
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.arch-runtime-poll-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.arch-runtime-error {
+  color: #fda4af;
+  font-size: 11px;
+}
+
+.arch-node-runtime-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.arch-node-card--rt-ok {
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.45);
+}
+
+.arch-node-card--rt-slow {
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 0 1.5px rgba(245, 158, 11, 0.55);
+}
+
+.arch-node-card--rt-error {
+  border-color: var(--accent-rose);
+  box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.55);
+}
+
+.arch-badge--rt-error {
+  color: #fecdd3;
+  background: rgba(244, 63, 94, 0.22);
+  border-color: var(--accent-rose);
+}
+
+.arch-trace-replay {
+  position: absolute;
+  left: 16px;
+  right: 356px;
+  bottom: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-rose);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  z-index: 25;
+}
+
+.arch-trace-replay__info,
+.arch-trace-replay__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.arch-trace-replay__name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arch-trace-replay__node {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}

@@ -13,12 +13,19 @@ export function PartView() {
   const dataflow = useViewerStore((s) => s.dataflow);
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
+  const activeTraceId = useViewerStore((s) => s.activeTraceId);
+  const traceSpanIndex = useViewerStore((s) => s.traceSpanIndex);
   const selectedNodeId = useViewerStore((s) => s.selectedNodeId);
   const selectedEdgeId = useViewerStore((s) => s.selectedEdgeId);
   const selectNode = useViewerStore((s) => s.selectNode);
   const selectEdge = useViewerStore((s) => s.selectEdge);
   const drillToPart = useViewerStore((s) => s.drillToPart);
   const drillToGroup = useViewerStore((s) => s.drillToGroup);
+
+  const activeTrace = useMemo(
+    () => (activeTraceId ? runtime?.traces.find((t) => t.trace_id === activeTraceId) ?? null : null),
+    [runtime, activeTraceId],
+  );
 
   const graph = useMemo(() => {
     if (!overview || !partId) return { nodes: [], edges: [], foldedCount: 0 };
@@ -31,8 +38,10 @@ export function PartView() {
       dataflow,
       activeFlow,
       flowStepIndex,
+      activeTrace,
+      traceSpanIndex,
     });
-  }, [overview, partId, chunks, layers, exactOnly, runtime, dataflow, activeFlow, flowStepIndex]);
+  }, [overview, partId, chunks, layers, exactOnly, runtime, dataflow, activeFlow, flowStepIndex, activeTrace, traceSpanIndex]);
 
   if (!overview || !partId) return null;
 

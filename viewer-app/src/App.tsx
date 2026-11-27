@@ -10,8 +10,10 @@ import {
 import { FlowBanner } from "./ui/FlowBanner";
 import { Inspector } from "./ui/Inspector";
 import { LayerToggles } from "./ui/LayerToggles";
+import { RuntimeLayerControls } from "./ui/RuntimeLayer";
 import { SearchPalette } from "./ui/SearchPalette";
 import { Tier2Banner } from "./ui/Tier2Banner";
+import { TraceReplay } from "./ui/TraceReplay";
 import { FileView } from "./views/File";
 import { GroupView } from "./views/Group";
 import { OverviewView } from "./views/Overview";
@@ -76,12 +78,15 @@ export function App() {
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
   const flowFollowStep = useViewerStore((s) => s.flowFollowStep);
+  const activeTraceId = useViewerStore((s) => s.activeTraceId);
+  const traceSpanIndex = useViewerStore((s) => s.traceSpanIndex);
   const searchOpen = useViewerStore((s) => s.searchOpen);
   const recentBoardOpen = useViewerStore((s) => s.recentBoardOpen);
   const chunkError = useViewerStore((s) => s.chunkError);
 
   const initFromOverview = useViewerStore((s) => s.initFromOverview);
   const refreshOverlays = useViewerStore((s) => s.refreshOverlays);
+  const setRuntimeOverlay = useViewerStore((s) => s.setRuntimeOverlay);
   const openSearch = useViewerStore((s) => s.openSearch);
   const closeSearch = useViewerStore((s) => s.closeSearch);
   const toggleRecentBoard = useViewerStore((s) => s.toggleRecentBoard);
@@ -99,6 +104,10 @@ export function App() {
   const prevFlowStep = useViewerStore((s) => s.prevFlowStep);
   const toggleFlowFollowStep = useViewerStore((s) => s.toggleFlowFollowStep);
   const exitFlow = useViewerStore((s) => s.exitFlow);
+  const startTrace = useViewerStore((s) => s.startTrace);
+  const nextTraceSpan = useViewerStore((s) => s.nextTraceSpan);
+  const prevTraceSpan = useViewerStore((s) => s.prevTraceSpan);
+  const exitTrace = useViewerStore((s) => s.exitTrace);
   const navigateToNodeId = useViewerStore((s) => s.navigateToNodeId);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -125,6 +134,11 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, [initFromOverview, navigateToNodeId, refreshOverlays]);
 
+  const activeTrace = useMemo(
+    () => (activeTraceId ? runtime?.traces.find((t) => t.trace_id === activeTraceId) ?? null : null),
+    [runtime, activeTraceId],
+  );
+
   const currentGraph = useMemo(() => {
     if (!overview) return { nodes: [], edges: [], foldedCount: 0 };
     const opts = {
@@ -136,6 +150,8 @@ export function App() {
       dataflow,
       activeFlow,
       flowStepIndex,
+      activeTrace,
+      traceSpanIndex,
     };
     switch (level) {
       case "part":
@@ -165,6 +181,8 @@ export function App() {
     dataflow,
     activeFlow,
     flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
     level,
     partId,
     groupId,
@@ -394,6 +412,18 @@ export function App() {
       </div>
 
       {overview && (
+        <RuntimeLayerControls
+          runtime={runtime}
+          overview={overview}
+          runtimeLayerActive={layers.runtime}
+          activeTraceId={activeTraceId}
+          onLoadRuntime={setRuntimeOverlay}
+          onStartTrace={startTrace}
+          onClearRuntime={() => setRuntimeOverlay(null)}
+        />
+      )}
+
+      {overview && (
         <Tier2Banner
           tier2Modules={overview.tier_summary.tier2_modules}
           onSelectModule={(modId) => void navigateToNodeId(modId)}
@@ -443,6 +473,17 @@ export function App() {
           onNext={nextFlowStep}
           onExit={exitFlow}
         />
+
+        {!activeFlow && (
+          <TraceReplay
+            trace={activeTrace}
+            spanIndex={traceSpanIndex}
+            onPrev={prevTraceSpan}
+            onNext={nextTraceSpan}
+            onExit={exitTrace}
+            onFocusNode={(nid) => void navigateToNodeId(nid)}
+          />
+        )}
 
         <Inspector
           open={inspectorOpen}
