@@ -27,7 +27,7 @@ dev = [
     "ruff>=0.1.0",
 ]
 browser = [
-    "playwright==1.59.0",
+    "playwright==1.65.2",
 ]
 
 [project.scripts]
