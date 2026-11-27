@@ -114,6 +114,15 @@ async function followFlowStepToSymbol(
   const stepNodeId = flow.steps[clamped]?.node_id;
   if (!stepNodeId) return;
 
+  const isStale = (): boolean => {
+    const current = get();
+    return (
+      current.activeFlow !== flow ||
+      current.flowStepIndex !== clamped ||
+      !current.flowFollowStep
+    );
+  };
+
   // If already in Symbol view and the step node is already rendered there, just keep it selected.
   if (state.level === "symbol" && state.partId && state.symbolId) {
     const symGraph = buildSymbolGraph(state.partId, state.symbolId, {
@@ -161,11 +170,13 @@ async function followFlowStepToSymbol(
 
   for (const pid of candidateParts) {
     const chunk = await get().ensurePartLoaded(pid);
+    if (isStale()) return;
     if (!chunk) continue;
     const symNode = chunk.nodes.find((n) => n.id === anchorId);
     if (symNode) {
       const grpId = symNode.module_id || overview.groups.find((g) => g.part_id === pid)?.id || "";
       await get().drillToSymbol(pid, grpId, symNode.file, symNode.id);
+      if (isStale()) return;
       set({ selectedNodeId: stepNodeId, selectedEdgeId: null, inspectorOpen: true });
       return;
     }
