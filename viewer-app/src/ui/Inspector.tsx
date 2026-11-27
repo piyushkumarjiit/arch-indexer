@@ -192,6 +192,10 @@ export function Inspector({
         ? selectedEdge.kindCounts
         : Object.fromEntries(selectedEdge.kinds.map((k) => [k, selectedEdge.kinds.length === 1 ? selectedEdge.count : 1])),
     ).sort((a, b) => a[0].localeCompare(b[0]));
+    const runtimeEdgeKey = selectedEdge.id.endsWith("#runtime")
+      ? selectedEdge.id.slice(0, -"#runtime".length)
+      : selectedEdge.id;
+    const runtimeEdgeMetric = runtime?.edge_metrics?.[runtimeEdgeKey] ?? null;
 
     return (
       <aside className="arch-inspector" aria-label="Edge inspector" data-testid="edge-inspector">
@@ -226,8 +230,27 @@ export function Inspector({
                   {selectedEdge.confidence === "heuristic" ? "approx (heuristic)" : selectedEdge.confidence}
                 </span>
               )}
+              {selectedEdge.runtimeOnly && (
+                <span className="arch-badge arch-badge--layer-runtime" data-testid="runtime-only-edge-badge">
+                  runtime_only
+                </span>
+              )}
             </div>
           </div>
+          {runtimeEdgeMetric && (
+            <div className="arch-detail-block" data-testid="edge-runtime-section">
+              <div className="arch-detail-label">
+                Runtime Edge{" "}
+                <span className="arch-badge arch-badge--layer-runtime">
+                  {runtimeEdgeMetric.match_tier}
+                </span>
+              </div>
+              <div className="arch-detail-text">
+                {runtimeEdgeMetric.span_count} spans &middot; {runtimeEdgeMetric.error_count} errors &middot; p95{" "}
+                {runtimeEdgeMetric.p95_ms} ms
+              </div>
+            </div>
+          )}
           {selectedEdge.evidence && selectedEdge.evidence.length > 0 && (
             <div className="arch-detail-block">
               <div className="arch-detail-label">Evidence ({selectedEdge.evidence.length})</div>
@@ -436,12 +459,59 @@ export function Inspector({
         )}
 
         {runtimeMetric && (
-          <div className="arch-detail-block">
-            <div className="arch-detail-label">Runtime ({runtimeMetric.match_tier})</div>
-            <div className="arch-detail-text">
-              {runtimeMetric.span_count} spans &middot; {runtimeMetric.error_count} errors &middot; p95{" "}
-              {runtimeMetric.p95_ms} ms
+          <div className="arch-detail-block" data-testid="inspector-runtime-section">
+            <div className="arch-detail-label">
+              Runtime{" "}
+              <span
+                className="arch-badge arch-badge--layer-runtime"
+                data-testid="inspector-runtime-tier"
+              >
+                {runtimeMetric.match_tier}
+              </span>
             </div>
+            <div className="arch-detail-text">
+              {runtimeMetric.span_count} spans &middot; {runtimeMetric.error_count} errors &middot; p50{" "}
+              {runtimeMetric.p50_ms} ms &middot; p95 {runtimeMetric.p95_ms} ms
+            </div>
+            {runtimeMetric.top_exceptions && runtimeMetric.top_exceptions.length > 0 && (
+              <div className="arch-links-list" data-testid="inspector-top-exceptions">
+                {runtimeMetric.top_exceptions.map(([excType, cnt]) => (
+                  <div key={excType} className="arch-evidence-row">
+                    <span className="arch-detail-mono">{excType}</span>
+                    <span className="arch-badge arch-badge--rt-error">{cnt}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {runtimeMetric.error_frames && runtimeMetric.error_frames.length > 0 && (
+              <div className="arch-evidence-list" data-testid="inspector-error-frames">
+                {runtimeMetric.error_frames.map((fr, idx) => {
+                  const ev: Evidence = {
+                    file: fr.file,
+                    line: fr.line,
+                    source: "runtime",
+                  };
+                  const cite = formatEvidenceCitation(ev);
+                  const href = buildEditorHref(ev, overview?.editor_url);
+                  return (
+                    <div key={`${cite}-${idx}`} className="arch-evidence-row">
+                      {href ? (
+                        <a href={href} className="arch-evidence-cite">{cite}</a>
+                      ) : (
+                        <span className="arch-evidence-cite">{cite}</span>
+                      )}
+                      <button
+                        type="button"
+                        className="arch-mini-btn"
+                        onClick={() => copyCitation(cite)}
+                      >
+                        {copiedCitation === cite ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 

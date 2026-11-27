@@ -15,12 +15,19 @@ export function SymbolView() {
   const dataflow = useViewerStore((s) => s.dataflow);
   const activeFlow = useViewerStore((s) => s.activeFlow);
   const flowStepIndex = useViewerStore((s) => s.flowStepIndex);
+  const activeTraceId = useViewerStore((s) => s.activeTraceId);
+  const traceSpanIndex = useViewerStore((s) => s.traceSpanIndex);
   const selectedNodeId = useViewerStore((s) => s.selectedNodeId);
   const selectedEdgeId = useViewerStore((s) => s.selectedEdgeId);
   const selectNode = useViewerStore((s) => s.selectNode);
   const selectEdge = useViewerStore((s) => s.selectEdge);
   const drillToSymbol = useViewerStore((s) => s.drillToSymbol);
   const startFlow = useViewerStore((s) => s.startFlow);
+
+  const activeTrace = useMemo(
+    () => (activeTraceId ? runtime?.traces.find((t) => t.trace_id === activeTraceId) ?? null : null),
+    [runtime, activeTraceId],
+  );
 
   const graph = useMemo(() => {
     if (!overview || !partId || !symbolId) return { nodes: [], edges: [], foldedCount: 0 };
@@ -33,6 +40,8 @@ export function SymbolView() {
       dataflow,
       activeFlow,
       flowStepIndex,
+      activeTrace,
+      traceSpanIndex,
     });
   }, [
     overview,
@@ -45,6 +54,8 @@ export function SymbolView() {
     dataflow,
     activeFlow,
     flowStepIndex,
+    activeTrace,
+    traceSpanIndex,
   ]);
 
   if (!overview || !partId || !symbolId) return null;
