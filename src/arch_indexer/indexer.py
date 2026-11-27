@@ -88,13 +88,14 @@ class DiagramSync:
 def _graph_diagrams(target_repo: Path, docs_dir: str) -> dict[str, str]:
     """Deterministic diagrams for the ``graph.json`` this run just exported."""
     from arch_indexer.graph import load_graph
-    from arch_indexer.mermaid_gen import generate_diagrams
+    from arch_indexer.mermaid_gen import generate_diagrams, load_parts_for_docs
 
     graph_path = target_repo / docs_dir / "graph.json"
     if not graph_path.is_file():
         return {}
     try:
-        return generate_diagrams(load_graph(graph_path))
+        parts = load_parts_for_docs(target_repo, docs_dir)
+        return generate_diagrams(load_graph(graph_path), parts=parts)
     except (OSError, ValueError):
         return {}
 
@@ -1017,6 +1018,10 @@ def run_index(
                 "new_files": delta.added_files,
             },
         )
+
+        from arch_indexer.describe import update_descriptions_staleness
+
+        update_descriptions_staleness(target_repo, docs_dir=docs_dir, store=store)
 
         # Print the summary line and per-unit tiers to stdout. Scope the counts exactly as
         # master-index.json/graph.json do so the log and the artifacts always agree.

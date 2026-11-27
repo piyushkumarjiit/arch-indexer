@@ -652,6 +652,8 @@ def test_incremental_dotted_modules_resolve_to_canonical(tmp_path: Path):
             [
                 "plan",
                 str(repo),
+                "--by",
+                "modules",
                 "--max-lines-per-worker",
                 "6",
                 "--cache-dir",

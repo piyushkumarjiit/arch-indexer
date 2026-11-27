@@ -356,6 +356,8 @@ export interface ViewNodeData {
   symbolId?: string;
   evidence?: Evidence[];
   metrics?: RuntimeNodeMetric | null;
+  descriptionSummary?: string;
+  descriptionStale?: boolean;
   meta?: Record<string, unknown>;
 }
 

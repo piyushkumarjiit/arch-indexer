@@ -27,6 +27,7 @@ from arch_indexer.mermaid_gen import (
     diagram_ids,
     generate_diagram,
     generate_diagrams,
+    load_parts_for_docs,
     mermaid_id,
     render_auto_diagram_block,
 )
@@ -253,7 +254,8 @@ def test_mermaid_budget_aggregates_or_truncates_with_note(tmp_path):
 
 def _write_design_with_all_diagrams(repo: Path) -> dict[str, str]:
     graph = load_graph(repo / "docs" / "graph.json")
-    diagrams = generate_diagrams(graph)
+    parts = load_parts_for_docs(repo, "docs")
+    diagrams = generate_diagrams(graph, parts=parts)
     blocks = "\n\n".join(
         render_auto_diagram_block(diagram_id, code) for diagram_id, code in diagrams.items()
     )
@@ -314,7 +316,8 @@ def test_assemble_derives_auto_diagrams_from_graph(tmp_path):
 
     repo = _copy_fixture("python_routes", tmp_path)
     assert _index(repo, tmp_path) == EXIT_DELTA_DETECTED
-    expected = set(diagram_ids(load_graph(repo / "docs" / "graph.json")))
+    parts = load_parts_for_docs(repo, "docs")
+    expected = set(diagram_ids(load_graph(repo / "docs" / "graph.json"), parts=parts))
 
     drafts = repo / "docs" / ".drafts"
     drafts.mkdir(parents=True)

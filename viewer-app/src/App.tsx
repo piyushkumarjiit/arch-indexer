@@ -148,6 +148,7 @@ export function App() {
       exactOnly,
       runtime,
       dataflow,
+      descriptions,
       activeFlow,
       flowStepIndex,
       activeTrace,
@@ -179,6 +180,7 @@ export function App() {
     exactOnly,
     runtime,
     dataflow,
+    descriptions,
     activeFlow,
     flowStepIndex,
     activeTrace,
@@ -320,8 +322,9 @@ export function App() {
     [overview, chunks],
   );
 
+  const flowDesc = activeFlow ? descriptions?.entries?.[activeFlow.id] ?? null : null;
   const flowTitle = activeFlow
-    ? descriptions?.entries?.[activeFlow.id]?.title ?? activeFlow.entry_id
+    ? flowDesc?.title ?? activeFlow.entry_id
     : undefined;
 
   return (
@@ -467,6 +470,7 @@ export function App() {
           flow={activeFlow}
           stepIndex={flowStepIndex}
           flowTitle={flowTitle}
+          flowDescription={flowDesc}
           followStep={flowFollowStep}
           onToggleFollowStep={toggleFlowFollowStep}
           onPrev={prevFlowStep}

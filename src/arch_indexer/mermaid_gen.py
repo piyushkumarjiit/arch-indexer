@@ -8,10 +8,18 @@ verified later by regenerating it from docs/graph.json.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from collections import deque
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
-from arch_indexer.config import DEFAULT_MAX_DIAGRAM_EDGES, DEFAULT_MAX_DIAGRAM_NODES
+from arch_indexer.config import (
+    DEFAULT_DOCS_DIR,
+    DEFAULT_MAX_DIAGRAM_EDGES,
+    DEFAULT_MAX_DIAGRAM_NODES,
+)
 
 MODULE_OVERVIEW_ID = "module-overview"
 
@@ -90,8 +98,76 @@ def _entrypoints_by_domain(
     return {diagram_id: sorted(ids) for diagram_id, ids in groups.items()}
 
 
-def diagram_ids(graph: dict[str, Any]) -> list[str]:
+def load_parts_for_docs(
+    repo_path: str | Path,
+    docs_dir: str = DEFAULT_DOCS_DIR,
+) -> list[dict[str, Any]] | None:
+    """Load ``overview.json['parts']`` when Parts-first docs mode is active (D6: >= 2 parts)."""
+    docs = Path(docs_dir)
+    ov_path = (docs if docs.is_absolute() else Path(repo_path) / docs) / "arch" / "overview.json"
+    if not ov_path.is_file():
+        return None
+    try:
+        overview = json.loads(ov_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    parts = overview.get("parts") if isinstance(overview, Mapping) else None
+    if isinstance(parts, list) and len(parts) >= 2:
+        return parts
+    return None
+
+
+def _parts_flow_groups(
+    graph: dict[str, Any],
+    parts: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, list[str]]]:
+    """Map ``flow-<part>`` diagram ids to their part metadata and entrypoint node ids."""
+    mod_to_part: dict[str, str] = {}
+    part_by_id: dict[str, Mapping[str, Any]] = {}
+    for p in parts:
+        pid = str(p.get("id") or "")
+        if not pid:
+            continue
+        part_by_id[pid] = p
+        for gid in p.get("group_ids") or ():
+            mod_to_part[str(gid)] = pid
+
+    entries_by_part: dict[str, list[str]] = {}
+    for node in graph.get("nodes", []):
+        if node.get("kind") not in ("entrypoint", "frontend_caller"):
+            continue
+        pid = mod_to_part.get(str(node.get("module_id") or ""))
+        if pid:
+            entries_by_part.setdefault(pid, []).append(str(node["id"]))
+
+    part_by_diag: dict[str, Mapping[str, Any]] = {}
+    entries_by_diag: dict[str, list[str]] = {}
+    used_slugs: set[str] = set()
+    for pid in sorted(entries_by_part):
+        raw_slug = pid.removeprefix("part:")
+        slug = re.sub(r"[^a-z0-9-]+", "-", raw_slug.lower()).strip("-") or "part"
+        diag_id = f"flow-{slug}"
+        if diag_id in used_slugs:
+            idx = 2
+            while f"flow-{slug}-{idx}" in used_slugs:
+                idx += 1
+            diag_id = f"flow-{slug}-{idx}"
+        used_slugs.add(diag_id)
+        part_by_diag[diag_id] = part_by_id[pid]
+        entries_by_diag[diag_id] = sorted(entries_by_part[pid])
+
+    return part_by_diag, entries_by_diag
+
+
+def diagram_ids(
+    graph: dict[str, Any],
+    *,
+    parts: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
     """All diagram ids the graph deterministically produces, sorted."""
+    if parts is not None:
+        _, entries_by_diag = _parts_flow_groups(graph, parts)
+        return [MODULE_OVERVIEW_ID, *sorted(entries_by_diag)]
     groups = _entrypoints_by_domain(graph, _module_names(graph))
     return [MODULE_OVERVIEW_ID, *sorted(groups)]
 
@@ -115,6 +191,277 @@ def _budget_note(reason: str, max_nodes: int, max_edges: int) -> str:
         f"%% Note: {reason} (budget {max_nodes} nodes / {max_edges} edges); "
         "see docs/flow-viewer.html for the full interactive graph."
     )
+
+
+def _all_graph_edges(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return graph edges plus synthesized resource reader/writer edges."""
+    edges = list(graph.get("edges", []))
+    resources = graph.get("resources") or ()
+    if not resources:
+        return edges
+    from arch_indexer.bundle import _synthesize_resource_edges
+
+    nodes_by_id = {str(n["id"]): n for n in graph.get("nodes", ()) if "id" in n}
+    return edges + _synthesize_resource_edges(graph, nodes_by_id)
+
+
+def _parts_overview(
+    graph: dict[str, Any],
+    parts: Sequence[Mapping[str, Any]],
+    max_nodes: int,
+    max_edges: int,
+) -> str:
+    """``flowchart LR`` of derived parts plus boundaries (with child modules in labels)."""
+    modules = {module["id"]: module for module in graph.get("modules", [])}
+    stores = {store["id"]: store for store in graph.get("data_stores", [])}
+    sinks = {sink["id"]: sink for sink in graph.get("external_sinks", [])}
+    sidecars = {
+        sc["id"]: {**sc, "label": sc.get("name") or sc["id"], "kind": "sidecar"}
+        for sc in graph.get("sidecars", ())
+        if isinstance(sc, Mapping) and sc.get("id")
+    }
+    resources = {
+        res["id"]: {
+            **res,
+            "label": res.get("value") or res["id"],
+            "kind": res.get("kind", "resource"),
+        }
+        for res in graph.get("resources", ())
+        if isinstance(res, Mapping) and res.get("id")
+    }
+
+    part_map: dict[str, Mapping[str, Any]] = {}
+    mod_to_part: dict[str, str] = {}
+    for p in parts:
+        pid = str(p.get("id") or "")
+        if not pid:
+            continue
+        part_map[pid] = p
+        for gid in p.get("group_ids") or ():
+            mod_to_part[str(gid)] = pid
+
+    node_parts = {
+        str(node["id"]): mod_to_part[str(node.get("module_id"))]
+        for node in graph.get("nodes", [])
+        if str(node.get("module_id") or "") in mod_to_part
+    }
+
+    all_boundaries = {**stores, **sinks, **sidecars, **resources}
+    pair_kinds: dict[tuple[str, str], set[str]] = {}
+    for edge in _all_graph_edges(graph):
+        src_raw = str(edge.get("source"))
+        tgt_raw = str(edge.get("target"))
+        source = node_parts.get(src_raw) or mod_to_part.get(src_raw) or src_raw
+        if tgt_raw in all_boundaries:
+            target = tgt_raw
+        else:
+            target = node_parts.get(tgt_raw) or mod_to_part.get(tgt_raw) or tgt_raw
+        if source not in part_map or (target not in part_map and target not in all_boundaries):
+            continue
+        if source == target:
+            continue
+        pair_kinds.setdefault((source, target), set()).add(str(edge.get("kind")))
+
+    degree: dict[str, int] = {}
+    for source, target in pair_kinds:
+        degree[source] = degree.get(source, 0) + 1
+        degree[target] = degree.get(target, 0) + 1
+
+    notes: list[str] = []
+    core_boundary_ids = sorted(stores) + sorted(sinks) + sorted(sidecars)
+    if len(part_map) + len(core_boundary_ids) + len(resources) <= max_nodes:
+        boundary_ids = core_boundary_ids + sorted(resources)
+    else:
+        boundary_ids = core_boundary_ids + sorted(
+            rid for rid in resources if degree.get(rid, 0) > 0
+        )
+
+    if len(boundary_ids) > max_nodes:
+        boundary_ids = sorted(boundary_ids, key=lambda bid: (-degree.get(bid, 0), bid))[:max_nodes]
+        notes.append("boundaries exceeded the budget")
+
+    available_parts = max(0, max_nodes - len(boundary_ids))
+    part_ids = sorted(part_map, key=lambda pid: (-degree.get(pid, 0), pid))
+    if len(part_ids) > available_parts:
+        part_ids = part_ids[:available_parts]
+        notes.append("parts exceeded the budget")
+
+    kept = set(part_ids) | set(boundary_ids)
+    pairs = sorted(
+        (pair for pair in pair_kinds if pair[0] in kept and pair[1] in kept),
+        key=lambda pair: (-len(pair_kinds[pair]), pair[0], pair[1]),
+    )
+    if len(pairs) > max_edges:
+        pairs = sorted(pairs[:max_edges], key=lambda pair: (pair[0], pair[1]))
+        notes.append("edges exceeded the budget")
+
+    def label_for(entity_id: str) -> str:
+        if entity_id in part_map:
+            part = part_map[entity_id]
+            mod_names = [
+                modules[gid].get("name", gid) if gid in modules else str(gid).removeprefix("mod:")
+                for gid in part.get("group_ids", ())
+            ]
+            if mod_names:
+                preview = ", ".join(mod_names[:3])
+                if len(mod_names) > 3:
+                    preview += f", +{len(mod_names) - 3}"
+                return _clean(f"{part.get('name', entity_id)} ({preview})", limit=58)
+            return _clean(str(part.get("name", entity_id)), limit=58)
+        record = all_boundaries.get(entity_id, {})
+        return _clean(f"{record.get('label', entity_id)} ({record.get('kind', '')})")
+
+    lines = ["flowchart LR"]
+    if notes:
+        lines.append("  " + _budget_note("; ".join(notes), max_nodes, max_edges))
+    if kept:
+        for entity_id in sorted(kept):
+            lines.append(_declaration(entity_id, label_for(entity_id)))
+    else:
+        lines.append(_declaration("system_empty", "No indexed components"))
+    for source, target in sorted(pairs):
+        kinds = ",".join(sorted(pair_kinds[(source, target)]))
+        lines.append(f"  {mermaid_id(source)} -->|{kinds}| {mermaid_id(target)}")
+    return "\n".join(lines)
+
+
+def _part_flow_diagram(
+    graph: dict[str, Any],
+    diagram_id: str,
+    entry_ids: list[str],
+    max_nodes: int,
+    max_edges: int,
+) -> str:
+    """Boundary-centred ``flowchart TD`` for one part, capped at the top 3 flows."""
+    nodes = {str(node["id"]): node for node in graph.get("nodes", [])}
+    stores = {store["id"]: store for store in graph.get("data_stores", [])}
+    sinks = {sink["id"]: sink for sink in graph.get("external_sinks", [])}
+    sidecars = {
+        sc["id"]: {**sc, "label": sc.get("name") or sc["id"], "kind": "sidecar"}
+        for sc in graph.get("sidecars", ())
+        if isinstance(sc, Mapping) and sc.get("id")
+    }
+    resources = {
+        res["id"]: {
+            **res,
+            "label": res.get("value") or res["id"],
+            "kind": res.get("kind", "resource"),
+        }
+        for res in graph.get("resources", ())
+        if isinstance(res, Mapping) and res.get("id")
+    }
+    boundaries = {**stores, **sinks, **sidecars, **resources}
+    adj: dict[str, list[dict[str, Any]]] = {}
+    for edge in sorted(
+        _all_graph_edges(graph),
+        key=lambda e: (str(e.get("source")), str(e.get("target")), str(e.get("kind"))),
+    ):
+        adj.setdefault(str(edge.get("source")), []).append(edge)
+
+    candidate_flows: list[tuple[tuple[int, int, str, str], list[str], list[dict[str, str]]]] = []
+    for eid in sorted(entry_ids):
+        depth: dict[str, int] = {eid: 0}
+        parent: dict[str, tuple[str, dict[str, Any]]] = {}
+        reached: set[str] = set()
+        queue: deque[str] = deque([eid])
+        while queue:
+            cur = queue.popleft()
+            if cur != eid and cur in boundaries:
+                continue
+            cur_d = depth[cur]
+            if cur_d >= 12:
+                continue
+            for edge in adj.get(cur, ()):
+                nxt = str(edge.get("target") or "")
+                if not nxt or nxt not in nodes and nxt not in boundaries:
+                    continue
+                if nxt not in depth:
+                    depth[nxt] = cur_d + 1
+                    parent[nxt] = (cur, edge)
+                    if nxt in boundaries:
+                        reached.add(nxt)
+                    else:
+                        queue.append(nxt)
+
+        targets = sorted(reached)[:3]
+        if targets:
+            for bid in targets:
+                path_nodes: list[str] = []
+                path_edges: list[dict[str, str]] = []
+                cur = bid
+                while cur != eid:
+                    prev_id, edge = parent[cur]
+                    path_nodes.append(cur)
+                    kind = re.sub(r"[^A-Za-z_]+", "_", str(edge.get("kind") or "calls"))
+                    path_edges.append({"source": prev_id, "target": cur, "kind": kind})
+                    cur = prev_id
+                path_nodes.append(eid)
+                path_nodes.reverse()
+                path_edges.reverse()
+                rank = (0, -len(reached), eid, bid)
+                candidate_flows.append((rank, path_nodes, path_edges))
+        else:
+            deepest = min(depth, key=lambda nid: (-depth[nid], nid))
+            path_nodes = []
+            path_edges = []
+            cur = deepest
+            while cur != eid:
+                prev_id, edge = parent[cur]
+                path_nodes.append(cur)
+                kind = re.sub(r"[^A-Za-z_]+", "_", str(edge.get("kind") or "calls"))
+                path_edges.append({"source": prev_id, "target": cur, "kind": kind})
+                cur = prev_id
+            path_nodes.append(eid)
+            path_nodes.reverse()
+            path_edges.reverse()
+            rank = (1, -len(path_nodes), eid, deepest)
+            candidate_flows.append((rank, path_nodes, path_edges))
+
+    candidate_flows.sort(key=lambda item: item[0])
+    top_flows = candidate_flows[:3]
+
+    visited: set[str] = set()
+    edge_keys: set[tuple[str, str, str]] = set()
+    selected: list[dict[str, str]] = []
+    for _rank, pnodes, pedges in top_flows:
+        visited.update(pnodes)
+        for pe in pedges:
+            key = (pe["source"], pe["target"], pe["kind"])
+            if key not in edge_keys:
+                edge_keys.add(key)
+                selected.append(pe)
+
+    if len(visited) > max_nodes:
+        kept = sorted(visited)[:max_nodes]
+        visited = set(kept)
+        selected = [e for e in selected if e["source"] in visited and e["target"] in visited]
+    if len(selected) > max_edges:
+        selected = sorted(selected, key=lambda e: (e["source"], e["target"], e["kind"]))[:max_edges]
+
+    def group_of(node_id: str) -> str:
+        if node_id in boundaries:
+            return "boundary"
+        node = nodes.get(node_id)
+        if node is not None and node.get("kind") in ("entrypoint", "frontend_caller"):
+            return "entry"
+        return "service"
+
+    def label_for(node_id: str) -> str:
+        if node_id in boundaries:
+            rec = boundaries[node_id]
+            return _clean(f"{rec.get('label', node_id)} ({rec.get('kind', '')})")
+        if node_id in nodes:
+            return _node_label(nodes[node_id])
+        return _clean(node_id)
+
+    lines = ["flowchart TD", f"  %% {diagram_id}"]
+    for node_id in sorted(visited, key=lambda nid: (group_of(nid), nid)):
+        lines.append(_declaration(node_id, label_for(node_id)))
+    for edge in sorted(selected, key=lambda e: (e["source"], e["target"], e["kind"])):
+        lines.append(
+            f"  {mermaid_id(edge['source'])} -->|{edge['kind']}| {mermaid_id(edge['target'])}"
+        )
+    return "\n".join(lines)
 
 
 def _module_overview(graph: dict[str, Any], max_nodes: int, max_edges: int) -> str:
@@ -362,10 +709,20 @@ def generate_diagram(
     diagram_id: str,
     max_nodes: int = DEFAULT_MAX_DIAGRAM_NODES,
     max_edges: int = DEFAULT_MAX_DIAGRAM_EDGES,
+    *,
+    parts: Sequence[Mapping[str, Any]] | None = None,
 ) -> str | None:
     """Generate one diagram body (inside the mermaid fence), or None if unknown."""
     if diagram_id == MODULE_OVERVIEW_ID:
+        if parts is not None:
+            return _parts_overview(graph, parts, max_nodes, max_edges)
         return _module_overview(graph, max_nodes, max_edges)
+    if parts is not None:
+        _, entries_by_diag = _parts_flow_groups(graph, parts)
+        entry_ids = entries_by_diag.get(diagram_id)
+        if entry_ids is None:
+            return None
+        return _part_flow_diagram(graph, diagram_id, entry_ids, max_nodes, max_edges)
     entry_ids = _entrypoints_by_domain(graph, _module_names(graph)).get(diagram_id)
     if entry_ids is None:
         return None
@@ -376,11 +733,13 @@ def generate_diagrams(
     graph: dict[str, Any],
     max_nodes: int = DEFAULT_MAX_DIAGRAM_NODES,
     max_edges: int = DEFAULT_MAX_DIAGRAM_EDGES,
+    *,
+    parts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, str]:
     """All deterministic diagrams for a graph, keyed by AUTO-DIAGRAM id, sorted."""
     diagrams: dict[str, str] = {}
-    for diagram_id in diagram_ids(graph):
-        code = generate_diagram(graph, diagram_id, max_nodes, max_edges)
+    for diagram_id in diagram_ids(graph, parts=parts):
+        code = generate_diagram(graph, diagram_id, max_nodes, max_edges, parts=parts)
         if code is not None:
             diagrams[diagram_id] = code
     return diagrams

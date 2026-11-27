@@ -738,10 +738,11 @@ def assemble(
     graph_path = target_docs_dir / "graph.json"
     if graph_path.is_file():
         from arch_indexer.graph import load_graph
-        from arch_indexer.mermaid_gen import generate_diagrams
+        from arch_indexer.mermaid_gen import generate_diagrams, load_parts_for_docs
 
         try:
-            graph_diagrams = generate_diagrams(load_graph(graph_path))
+            parts = load_parts_for_docs(repo_path, docs_dir)
+            graph_diagrams = generate_diagrams(load_graph(graph_path), parts=parts)
         except (OSError, ValueError) as exc:
             stderr.write(f"Error reading '{graph_path}': {exc}\n")
             return 1

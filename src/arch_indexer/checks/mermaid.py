@@ -84,6 +84,8 @@ def verify_auto_diagram(
     diagram_id: str,
     mermaid_code: str,
     graph: dict[str, Any] | None,
+    *,
+    parts: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str | None]:
     """Verify an AUTO-DIAGRAM block against the deterministic output for the graph.
 
@@ -95,7 +97,11 @@ def verify_auto_diagram(
     if graph is None:
         return True, None
 
-    expected = generate_diagram(graph, diagram_id)
+    expected = (
+        generate_diagram(graph, diagram_id, parts=parts)
+        if parts is not None
+        else generate_diagram(graph, diagram_id)
+    )
     if expected is None:
         return (
             False,
@@ -1048,6 +1054,8 @@ def check_document_mermaid(
     doc_path: Path,
     doc_rel: str,
     graph: dict[str, Any] | None,
+    *,
+    parts: list[dict[str, Any]] | None = None,
 ) -> list[MermaidError]:
     """Parse and validate all fenced mermaid blocks in a markdown document."""
     errors: list[MermaidError] = []
@@ -1153,11 +1161,19 @@ def check_document_mermaid(
                         )
                     )
                 else:
-                    ok, msg = verify_auto_diagram(
-                        diagram_id=active_auto_diagram_id,
-                        mermaid_code="\n".join(current_block),
-                        graph=graph,
-                    )
+                    if parts is not None:
+                        ok, msg = verify_auto_diagram(
+                            diagram_id=active_auto_diagram_id,
+                            mermaid_code="\n".join(current_block),
+                            graph=graph,
+                            parts=parts,
+                        )
+                    else:
+                        ok, msg = verify_auto_diagram(
+                            diagram_id=active_auto_diagram_id,
+                            mermaid_code="\n".join(current_block),
+                            graph=graph,
+                        )
                     if not ok:
                         errors.append(
                             MermaidError(
@@ -1229,6 +1245,9 @@ def check_mermaid(
     notes: list[str] = []
     errors: list[MermaidError] = []
 
+    from arch_indexer.mermaid_gen import diagram_ids, load_parts_for_docs
+
+    parts = load_parts_for_docs(repo_path, docs_dir)
     graph, graph_error = _load_graph(graph_path)
     if graph_error is not None:
         errors.append(
@@ -1252,21 +1271,24 @@ def check_mermaid(
             doc_path=doc_path,
             doc_rel=doc_rel,
             graph=graph,
+            parts=parts,
         )
         errors.extend(doc_errors)
 
     # Spec 8.3: every deterministic diagram from graph.json must be present in DESIGN.md.
     design_path = target_docs_dir / "DESIGN.md"
     if graph is not None and design_path.is_file():
-        from arch_indexer.mermaid_gen import diagram_ids
-
         try:
             design_text = design_path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             notes.append(f"Note: cannot read {docs_dir}/DESIGN.md for AUTO-DIAGRAM checks: {exc}")
         else:
             errors.extend(
-                missing_auto_diagrams(diagram_ids(graph), design_text, f"{docs_dir}/DESIGN.md")
+                missing_auto_diagrams(
+                    diagram_ids(graph, parts=parts),
+                    design_text,
+                    f"{docs_dir}/DESIGN.md",
+                )
             )
 
     # Deterministic sorting: by document, line number, error code

@@ -10,6 +10,12 @@ from typing import Any
 
 from arch_indexer.assembler import assemble
 from arch_indexer.checks.citations import run_check_citations
+from arch_indexer.checks.claims import (
+    DEFAULT_JUDGES,
+    DEFAULT_MAX_PARTIAL,
+    run_verify_claims_gate,
+    run_verify_claims_plan,
+)
 from arch_indexer.checks.mermaid import run_check_mermaid
 from arch_indexer.config import (
     DEFAULT_CHUNK_FILES,
@@ -20,6 +26,11 @@ from arch_indexer.config import (
     DEFAULT_MAX_SYMBOLS_PER_WORKER,
     DEFAULT_UNIT_TIMEOUT_SEC,
     RepoCachePaths,
+)
+from arch_indexer.describe import (
+    DEFAULT_TOP_FLOWS,
+    run_describe_check,
+    run_describe_plan,
 )
 from arch_indexer.indexer import run_index
 from arch_indexer.planner import run_plan
@@ -392,6 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser = subparsers.add_parser("plan", help="Bounded worker planning")
     plan_parser.add_argument("repo", help="Target repository path")
     plan_parser.add_argument(
+        "--by",
+        choices=["parts", "modules"],
+        default=None,
+        help="Planning axis (default: parts when >=2 parts exist, modules otherwise)",
+    )
+    plan_parser.add_argument(
         "--max-lines-per-worker",
         type=int,
         default=DEFAULT_MAX_LINES_PER_WORKER,
@@ -462,6 +479,98 @@ def build_parser() -> argparse.ArgumentParser:
         "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
     )
     mermaid_parser.add_argument(
+        "--format", choices=["json", "text"], default="text", help="Output format"
+    )
+
+    # 8. describe
+    describe_parser = subparsers.add_parser(
+        "describe", help="Plan and validate plain-language descriptions"
+    )
+    describe_sub = describe_parser.add_subparsers(dest="describe_action", required=True)
+
+    desc_plan = describe_sub.add_parser(
+        "plan", help="Plan bounded description packets for parts, groups, boundaries, and flows"
+    )
+    desc_plan.add_argument("repo", help="Target repository path")
+    desc_plan.add_argument(
+        "--top-flows",
+        type=_positive_int,
+        default=DEFAULT_TOP_FLOWS,
+        help="Number of top boundary-reaching flows to include (default: 10)",
+    )
+    desc_plan.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Docs directory containing arch/overview.json"
+    )
+    desc_plan.add_argument("--cache-dir", default=None, help="Cache directory override")
+    desc_plan.add_argument("--out", default=None, help="Output path for describe-plan.json")
+
+    desc_check = describe_sub.add_parser(
+        "check", help="Validate descriptions.json and emit descriptions.js on pass"
+    )
+    desc_check.add_argument("repo", help="Target repository path")
+    desc_check.add_argument(
+        "--input",
+        default=None,
+        help="Descriptions JSON path (default: <docs-dir>/arch/descriptions.json)",
+    )
+    desc_check.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Docs directory containing arch/overview.json"
+    )
+    desc_check.add_argument(
+        "--format", choices=["json", "text"], default="text", help="Output format"
+    )
+    desc_check.add_argument("--cache-dir", default=None, help="Cache directory override")
+
+    # 9. verify-claims
+    claims_parser = subparsers.add_parser(
+        "verify-claims", help="Cross-model claim planning and verification gate"
+    )
+    claims_sub = claims_parser.add_subparsers(dest="claims_action", required=True)
+
+    claims_plan = claims_sub.add_parser(
+        "plan", help="Extract footnoted claims and description claims with capped code spans"
+    )
+    claims_plan.add_argument("repo", help="Target repository path")
+    claims_plan.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+    )
+    claims_plan.add_argument(
+        "--descriptions", default=None, help="Optional path to descriptions.json"
+    )
+    claims_plan.add_argument("--cache-dir", default=None, help="Cache directory override")
+    claims_plan.add_argument("--out", default=None, help="Output path for claims-plan.json")
+
+    claims_gate = claims_sub.add_parser(
+        "gate", help="Gate docs and descriptions using independent judge verdict JSONL(s)"
+    )
+    claims_gate.add_argument("repo", help="Target repository path")
+    claims_gate.add_argument(
+        "--verdicts",
+        action="append",
+        required=True,
+        help="Path to judge verdicts JSONL (repeatable for multi-judge consensus)",
+    )
+    claims_gate.add_argument(
+        "--writer-model", required=True, help="Model ID that authored the docs/descriptions"
+    )
+    claims_gate.add_argument(
+        "--judge-model",
+        default=None,
+        help="Judge model ID when verdict rows omit judge_model",
+    )
+    claims_gate.add_argument(
+        "--judges",
+        type=_positive_int,
+        default=DEFAULT_JUDGES,
+        help="Number of judges for majority quorum (default: 1)",
+    )
+    claims_gate.add_argument(
+        "--max-partial",
+        type=float,
+        default=DEFAULT_MAX_PARTIAL,
+        help="Maximum allowed (partial + bad-citation) fraction (default: 0.05)",
+    )
+    claims_gate.add_argument(
         "--format", choices=["json", "text"], default="text", help="Output format"
     )
 
@@ -658,6 +767,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return run_plan(
                 repo=args.repo,
+                by=args.by,
                 max_lines_per_worker=args.max_lines_per_worker,
                 max_symbols_per_worker=args.max_symbols_per_worker,
                 max_sections_per_worker=args.max_sections_per_worker,
@@ -834,6 +944,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error serving viewer: {e}\n")
             return EXIT_ERROR
+
+    elif args.command == "describe":
+        if args.describe_action == "plan":
+            try:
+                return run_describe_plan(
+                    args.repo,
+                    top_flows=args.top_flows,
+                    docs_dir=args.docs_dir,
+                    cache_dir=args.cache_dir,
+                    out_path=args.out,
+                )
+            except Exception as e:
+                sys.stderr.write(f"Error planning descriptions: {e}\n")
+                return EXIT_ERROR
+        elif args.describe_action == "check":
+            try:
+                return run_describe_check(
+                    args.repo,
+                    input_path=args.input,
+                    docs_dir=args.docs_dir,
+                    output_format=args.format,
+                    cache_dir=args.cache_dir,
+                )
+            except Exception as e:
+                sys.stderr.write(f"Error checking descriptions: {e}\n")
+                return EXIT_ERROR
+
+    elif args.command == "verify-claims":
+        if args.claims_action == "plan":
+            try:
+                return run_verify_claims_plan(
+                    args.repo,
+                    docs_dir=args.docs_dir,
+                    descriptions_path=args.descriptions,
+                    cache_dir=args.cache_dir,
+                    out_path=args.out,
+                )
+            except Exception as e:
+                sys.stderr.write(f"Error planning claim verification: {e}\n")
+                return EXIT_ERROR
+        elif args.claims_action == "gate":
+            try:
+                return run_verify_claims_gate(
+                    args.repo,
+                    verdicts=args.verdicts,
+                    writer_model=args.writer_model,
+                    judge_model=args.judge_model,
+                    judges=args.judges,
+                    max_partial=args.max_partial,
+                    output_format=args.format,
+                )
+            except Exception as e:
+                sys.stderr.write(f"Error gating claims: {e}\n")
+                return EXIT_ERROR
 
     # All other commands are out of scope for this task and exit 1
     sys.stderr.write(f"Command '{args.command}' is not implemented yet\n")
