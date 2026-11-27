@@ -59,6 +59,7 @@ def test_sonnet_verdicts_fixture_fails_gate_with_known_contradictions(tmp_path: 
         planned_keys=planned_keys,
     )
     assert result.passed is False
+    assert result.total_claims == len(planned_keys)
     assert "DESIGN#148" in result.contradicted_keys
     assert "DESIGN#215" in result.contradicted_keys
 
@@ -208,6 +209,49 @@ def test_gate_rejects_verdicts_missing_a_planned_claim(tmp_path: Path) -> None:
         ]
     )
     assert code == EXIT_ERROR
+
+
+def test_gate_ignores_unplanned_verdicts_in_totals_and_rate(tmp_path: Path) -> None:
+    planned = [f"DESIGN#{index}" for index in range(1, 21)]
+    verdict_rows = [
+        {
+            "key": key,
+            "judge_model": "judge-a",
+            "verdict": "partial" if index < 2 else "supported",
+        }
+        for index, key in enumerate(planned)
+    ]
+    verdict_rows += [
+        {"key": f"DESIGN#stale{index}", "judge_model": "judge-a", "verdict": "supported"}
+        for index in range(20)
+    ]
+    verdicts = _write_jsonl(tmp_path / "verdicts.jsonl", verdict_rows)
+    plan_path = _write_plan(tmp_path / "claims-plan.json", planned)
+
+    result = gate_claims(
+        verdicts,
+        writer_model="writer-a",
+        judges=1,
+        planned_keys=planned,
+    )
+    assert result.total_claims == 20
+    assert result.partial_plus_bad_rate == pytest.approx(0.1)
+    assert result.passed is False
+
+    code = main(
+        [
+            "verify-claims",
+            "gate",
+            str(tmp_path),
+            "--verdicts",
+            str(verdicts),
+            "--writer-model",
+            "writer-a",
+            "--plan",
+            str(plan_path),
+        ]
+    )
+    assert code == EXIT_VALIDATION_FAILED
 
 
 def test_gate_requires_every_judge_to_vote_on_each_planned_claim(tmp_path: Path) -> None:

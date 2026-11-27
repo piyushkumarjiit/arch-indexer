@@ -381,7 +381,8 @@ def gate_claims(
     Refuses ``judge_model == writer_model`` with ``JudgeWriterConflictError``.
     Raises ``ValueError`` when fewer distinct judges voted than ``judges``, and,
     when ``planned_keys`` is given, when a planned claim has no verdict or lacks
-    a vote from every requested judge.
+    a vote from every requested judge. With ``planned_keys``, totals and rates
+    cover only the planned claims; verdicts for other keys are ignored.
     """
     writer_norm = writer_model.strip().lower()
     if not writer_norm:
@@ -426,6 +427,7 @@ def gate_claims(
         if missing:
             shown = ", ".join(missing[:5])
             raise ValueError(f"{len(missing)} planned claim(s) have no verdict: {shown}")
+        by_key = {key: by_key[key] for key in planned}
         for key in sorted(planned):
             key_judges = {str(v.get("judge_model") or "") for v in by_key[key]}
             if len(key_judges) < judges:
