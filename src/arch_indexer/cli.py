@@ -559,6 +559,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Judge model ID when verdict rows omit judge_model",
     )
     claims_gate.add_argument(
+        "--plan",
+        default=None,
+        help="Claims plan path (default: <cache>/claims-plan.json from 'verify-claims plan')",
+    )
+    claims_gate.add_argument("--cache-dir", default=None, help="Cache directory override")
+    claims_gate.add_argument(
         "--judges",
         type=_positive_int,
         default=DEFAULT_JUDGES,
@@ -993,6 +999,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     judge_model=args.judge_model,
                     judges=args.judges,
                     max_partial=args.max_partial,
+                    plan_path=args.plan,
+                    cache_dir=args.cache_dir,
                     output_format=args.format,
                 )
             except Exception as e:

@@ -346,6 +346,27 @@ def _load_verdict_rows(
     return rows
 
 
+def _read_plan_keys(plan_path: Path) -> list[str]:
+    if not plan_path.is_file():
+        raise FileNotFoundError(
+            f"Claims plan does not exist: {plan_path} (run 'arch-indexer verify-claims plan' first)"
+        )
+    try:
+        payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{plan_path}: invalid JSON: {exc}") from exc
+    claims = payload.get("claims") if isinstance(payload, dict) else None
+    if not isinstance(claims, list):
+        raise ValueError(f"{plan_path}: claims plan is missing a 'claims' list")
+    keys: list[str] = []
+    for idx, item in enumerate(claims):
+        key = item.get("key") if isinstance(item, dict) else None
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{plan_path}: claims[{idx}] is missing a 'key'")
+        keys.append(key.strip())
+    return keys
+
+
 def gate_claims(
     verdicts_jsonl: Path | str | Sequence[Path | str],
     *,
@@ -353,11 +374,14 @@ def gate_claims(
     judges: int = DEFAULT_JUDGES,
     max_partial: float = DEFAULT_MAX_PARTIAL,
     judge_model: str | None = None,
-    footnotes_only: bool = False,
+    planned_keys: Sequence[str] | None = None,
 ) -> GateResult:
     """Evaluate judge verdicts against §4.5/D8 thresholds.
 
     Refuses ``judge_model == writer_model`` with ``JudgeWriterConflictError``.
+    Raises ``ValueError`` when fewer distinct judges voted than ``judges``, and,
+    when ``planned_keys`` is given, when a planned claim has no verdict or lacks
+    a vote from every requested judge.
     """
     writer_norm = writer_model.strip().lower()
     if not writer_norm:
@@ -373,8 +397,6 @@ def gate_claims(
         )
 
     rows = _load_verdict_rows(verdicts_jsonl, default_judge_model=judge_model)
-    if footnotes_only:
-        rows = [r for r in rows if "#L" not in r["key"]]
 
     seen_judges: list[str] = []
     seen_judge_set: set[str] = set()
@@ -391,6 +413,26 @@ def gate_claims(
             seen_judge_set.add(j_str)
             seen_judges.append(j_str)
         by_key.setdefault(row["key"], []).append(row)
+
+    if by_key and len(seen_judges) < judges:
+        raise ValueError(
+            f"expected at least {judges} distinct judge model(s), "
+            f"found {len(seen_judges)}: {', '.join(seen_judges)}"
+        )
+
+    if planned_keys is not None:
+        planned = set(planned_keys)
+        missing = sorted(planned - set(by_key))
+        if missing:
+            shown = ", ".join(missing[:5])
+            raise ValueError(f"{len(missing)} planned claim(s) have no verdict: {shown}")
+        for key in sorted(planned):
+            key_judges = {str(v.get("judge_model") or "") for v in by_key[key]}
+            if len(key_judges) < judges:
+                raise ValueError(
+                    f"claim {key!r} has verdicts from {len(key_judges)} judge model(s); "
+                    f"--judges {judges} requires {judges}"
+                )
 
     quorum = math.ceil(judges / 2)
     contradicted_keys: list[str] = []
@@ -538,6 +580,8 @@ def run_verify_claims_gate(
     judge_model: str | None = None,
     judges: int = DEFAULT_JUDGES,
     max_partial: float = DEFAULT_MAX_PARTIAL,
+    plan_path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
     output_format: str = "text",
     out: TextIO | None = None,
     err: TextIO | None = None,
@@ -558,6 +602,14 @@ def run_verify_claims_gate(
             vp = repo_path / vp
         resolved_verdicts.append(vp)
 
+    cache_paths = RepoCachePaths.from_repo(repo_path, cache_dir_override=cache_dir)
+    if plan_path is not None:
+        plan_file = Path(plan_path)
+        if not plan_file.is_absolute():
+            plan_file = repo_path / plan_file
+    else:
+        plan_file = cache_paths.repo_cache_dir / "claims-plan.json"
+
     try:
         result = gate_claims(
             resolved_verdicts[0] if len(resolved_verdicts) == 1 else resolved_verdicts,
@@ -565,6 +617,7 @@ def run_verify_claims_gate(
             judges=judges,
             max_partial=max_partial,
             judge_model=judge_model,
+            planned_keys=_read_plan_keys(plan_file),
         )
     except JudgeWriterConflictError as exc:
         stderr.write(f"Error: {exc}\n")
