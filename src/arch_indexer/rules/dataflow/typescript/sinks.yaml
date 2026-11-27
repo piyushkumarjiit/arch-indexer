@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow sink definitions for TypeScript aligned with PACKAGE_*_RULES.
+
+sinks:
+  - package_key: "@octokit"
+    patterns:
+      - pattern: $OCTOKIT.request(...)
+  - package_key: anthropic
+    patterns:
+      - pattern: $CLIENT.messages.create(...)
+  - package_key: better-sqlite3
+    patterns:
+      - pattern: $DB.prepare(...).run(...)
+      - pattern: $DB.prepare(...).get(...)
+      - pattern: $DB.prepare(...).all(...)
+      - pattern: $DB.exec(...)
+  - package_key: google.genai
+    patterns:
+      - pattern: $CLIENT.models.generateContent(...)
+  - package_key: node:sqlite
+    patterns:
+      - pattern: $DB.prepare(...).run(...)
+      - pattern: $DB.prepare(...).get(...)
+      - pattern: $DB.prepare(...).all(...)
+      - pattern: $DB.exec(...)
+  - package_key: ollama
+    patterns:
+      - pattern: $CLIENT.chat(...)
+      - pattern: $CLIENT.generate(...)
+  - package_key: openai
+    patterns:
+      - pattern: $CLIENT.chat.completions.create(...)
+      - pattern: $CLIENT.responses.create(...)
+  - package_key: typeorm
+    patterns:
+      - pattern: $REPO.save(...)
+      - pattern: $REPO.insert(...)
+      - pattern: $REPO.update(...)

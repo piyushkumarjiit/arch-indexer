@@ -53,3 +53,5 @@ Also included as TypeScript declaration dependencies in `viewer-app/package-lock
 | `coursier` | `2.1.27` | `Apache-2.0` | https://github.com/coursier/coursier | `src/arch_indexer/toolchain.py` |
 | Eclipse Temurin JDK (`jdk`) | `17.0.21.1+2` | `GPL-2.0-with-classpath-exception` | https://github.com/adoptium/temurin17-binaries | `src/arch_indexer/toolchain.py` (`--fetch-runtime`) |
 | Apache Maven (`maven`) | `3.9.16` | `Apache-2.0` | https://maven.apache.org/ | `src/arch_indexer/toolchain.py` (`--fetch-runtime`) |
+| `opengrep` | `2.1.0` | `LGPL-2.1` | https://github.com/opengrep/opengrep | `src/arch_indexer/dataflow/opengrep.py` (opt-in `--with opengrep`, invoked as subprocess only; never linked or bundled) |
+| `joern` | `4.0.693` | `Apache-2.0` | https://github.com/joernio/joern | `src/arch_indexer/dataflow/joern.py` (opt-in `--with joern`, invoked as subprocess only; requires JDK >= 17) |

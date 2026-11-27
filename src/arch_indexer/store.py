@@ -15,7 +15,7 @@ from arch_indexer.source_scope import in_scope
 UNRESOLVED_PREFIX_SPLIT_RE = re.compile(r"[./#@]")
 
 SCHEMA_MAJOR: int = 2
-SCHEMA_VERSION: str = "2.1"
+SCHEMA_VERSION: str = "2.2"
 
 
 def _repo_namespaces(modules: Iterable[str], fqnames: Iterable[str]) -> set[str]:
@@ -281,6 +281,53 @@ TABLE_REGISTRY: dict[str, TableSpec] = {
         upsert_mode="replace",
         sort_key=lambda u: u["unit_id"],
     ),
+    "dataflow_edges": TableSpec(
+        name="dataflow_edges",
+        file_column="source_file",
+        columns=(
+            "id",
+            "tool",
+            "tool_version",
+            "rule_id",
+            "entry_id",
+            "source_fqname",
+            "source_file",
+            "source_line",
+            "sink_fqname",
+            "sink_file",
+            "sink_line",
+            "sink_boundary_id",
+            "path_json",
+            "payload_hint",
+            "sarif_fingerprint",
+        ),
+        required_columns=frozenset(
+            {
+                "id",
+                "tool",
+                "tool_version",
+                "rule_id",
+                "entry_id",
+                "source_fqname",
+                "source_file",
+                "source_line",
+                "sink_file",
+                "sink_line",
+                "sink_boundary_id",
+                "path_json",
+            }
+        ),
+        upsert_mode="replace",
+        sort_key=lambda d: (
+            d["entry_id"],
+            d["source_file"],
+            d["source_line"],
+            d["sink_file"],
+            d["sink_line"],
+            d["sink_boundary_id"],
+            d["id"],
+        ),
+    ),
 }
 
 
@@ -418,6 +465,24 @@ CREATE TABLE IF NOT EXISTS units (
     indexed_at_commit TEXT
 );
 
+CREATE TABLE IF NOT EXISTS dataflow_edges (
+    id TEXT PRIMARY KEY,
+    tool TEXT NOT NULL,
+    tool_version TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    source_fqname TEXT NOT NULL,
+    source_file TEXT NOT NULL,
+    source_line INTEGER NOT NULL,
+    sink_fqname TEXT,
+    sink_file TEXT NOT NULL,
+    sink_line INTEGER NOT NULL,
+    sink_boundary_id TEXT NOT NULL,
+    path_json TEXT NOT NULL,
+    payload_hint TEXT,
+    sarif_fingerprint TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_unit_id ON files(unit_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_fqname ON symbols(fqname);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);
@@ -433,6 +498,8 @@ CREATE INDEX IF NOT EXISTS idx_symbol_relations_target ON symbol_relations(targe
 CREATE INDEX IF NOT EXISTS idx_symbol_relations_file_path ON symbol_relations(file_path);
 CREATE INDEX IF NOT EXISTS idx_resources_id ON resources(id);
 CREATE INDEX IF NOT EXISTS idx_resources_file_path ON resources(file_path);
+CREATE INDEX IF NOT EXISTS idx_dataflow_edges_entry_id ON dataflow_edges(entry_id);
+CREATE INDEX IF NOT EXISTS idx_dataflow_edges_source_file ON dataflow_edges(source_file);
 """
 
 
@@ -736,6 +803,70 @@ class IndexStore:
         with self.conn:
             self.conn.execute("DELETE FROM synthetic_symbols")
             self._upsert_rows("synthetic_symbols", rows)
+
+    def get_dataflow_edges(self, *, entry_ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        """Return persisted dataflow edges in deterministic order."""
+        cursor = self.conn.cursor()
+        entry_filter = (
+            sorted({str(eid) for eid in entry_ids if eid}) if entry_ids is not None else None
+        )
+        if entry_filter:
+            placeholders = ", ".join("?" for _ in entry_filter)
+            cursor.execute(
+                f"""
+                SELECT id, tool, tool_version, rule_id, entry_id, source_fqname, source_file,
+                       source_line, sink_fqname, sink_file, sink_line, sink_boundary_id,
+                       path_json, payload_hint, sarif_fingerprint
+                FROM dataflow_edges
+                WHERE entry_id IN ({placeholders})
+                ORDER BY entry_id, source_file, source_line, sink_file, sink_line,
+                         sink_boundary_id, id
+                """,
+                tuple(entry_filter),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, tool, tool_version, rule_id, entry_id, source_fqname, source_file,
+                       source_line, sink_fqname, sink_file, sink_line, sink_boundary_id,
+                       path_json, payload_hint, sarif_fingerprint
+                FROM dataflow_edges
+                ORDER BY entry_id, source_file, source_line, sink_file, sink_line,
+                         sink_boundary_id, id
+                """
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def replace_dataflow_edges(self, rows: Iterable[dict[str, Any]]) -> None:
+        """Replace all dataflow_edges rows deterministically in one transaction."""
+        spec = TABLE_REGISTRY["dataflow_edges"]
+        row_list = sorted(
+            (
+                {
+                    "id": row["id"],
+                    "tool": row["tool"],
+                    "tool_version": row["tool_version"],
+                    "rule_id": row["rule_id"],
+                    "entry_id": row["entry_id"],
+                    "source_fqname": row["source_fqname"],
+                    "source_file": row["source_file"],
+                    "source_line": int(row["source_line"]),
+                    "sink_fqname": row.get("sink_fqname"),
+                    "sink_file": row["sink_file"],
+                    "sink_line": int(row["sink_line"]),
+                    "sink_boundary_id": row["sink_boundary_id"],
+                    "path_json": row["path_json"],
+                    "payload_hint": row.get("payload_hint"),
+                    "sarif_fingerprint": row.get("sarif_fingerprint"),
+                }
+                for row in rows
+            ),
+            key=spec.sort_key,
+        )
+        with self.conn:
+            self.conn.execute("DELETE FROM dataflow_edges")
+            if row_list:
+                self._upsert_rows("dataflow_edges", row_list)
 
     def insert_unit_data(
         self,

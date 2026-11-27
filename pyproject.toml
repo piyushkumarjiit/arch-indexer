@@ -46,6 +46,8 @@ arch_indexer = [
     "viewer/dist/licenses/*",
     "facts/queries/*.scm",
     "rules/*.toml",
+    "rules/dataflow/*/*.yaml",
+    "dataflow/*.sc",
 ]
 
 [tool.ruff]
@@ -60,4 +62,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "browser: requires headless Chromium / Playwright",
+    "engine: requires optional dataflow engine installed in cache",
 ]

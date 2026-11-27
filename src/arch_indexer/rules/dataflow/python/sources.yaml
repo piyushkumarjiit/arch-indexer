@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow taint sources, sanitizers, and propagators for Python.
+
+sources:
+  - patterns:
+      - pattern-inside: |
+          @$APP.$METHOD(...)
+          async def $FUNC($REQ: $TYPE, ...):
+            ...
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          @$APP.$METHOD(...)
+          async def $FUNC($REQ, ...):
+            ...
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          @$APP.$METHOD(...)
+          def $FUNC($REQ: $TYPE, ...):
+            ...
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          @$APP.$METHOD(...)
+          def $FUNC($REQ, ...):
+            ...
+      - pattern: $REQ
+  - pattern: flask.request
+  - pattern: request.args
+  - pattern: request.form
+  - pattern: request.json
+  - pattern: request.data
+  - pattern: request.get_json(...)
+
+sanitizers:
+  - pattern: sanitize(...)
+  - pattern: html.escape(...)
+  - pattern: bleach.clean(...)
+  - pattern: urllib.parse.quote(...)
+  - pattern: int(...)
+  - pattern: float(...)
+  - pattern: bool(...)
+  - pattern: uuid.UUID(...)
+
+propagators:
+  - pattern: |
+      {"context": $CTX, "question": $Q}
+    from: $Q
+    to: $CTX

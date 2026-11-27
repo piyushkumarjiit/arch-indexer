@@ -27,6 +27,7 @@ from arch_indexer.config import (
     DEFAULT_UNIT_TIMEOUT_SEC,
     RepoCachePaths,
 )
+from arch_indexer.dataflow.runner import run_dataflow
 from arch_indexer.describe import (
     DEFAULT_TOP_FLOWS,
     run_describe_check,
@@ -55,6 +56,7 @@ from arch_indexer.serve import (
 )
 from arch_indexer.store import IndexStore
 from arch_indexer.toolchain import (
+    DataflowToolMissingError,
     ensure_toolchain,
     format_status_report,
     get_toolchain_status,
@@ -118,9 +120,28 @@ def _load_otlp_auto(path: Path) -> tuple[list[Any], str]:
     return load_otlp_proto(path), "otlp-proto"
 
 
+class _ArchArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser enforcing cross-argument rules (e.g. ``toolchain ensure`` target)."""
+
+    def parse_known_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> tuple[argparse.Namespace, list[str]]:
+        ns, extras = super().parse_known_args(args, namespace)
+        if (
+            getattr(ns, "command", None) == "toolchain"
+            and getattr(ns, "toolchain_action", None) == "ensure"
+            and getattr(ns, "repo", None) is None
+            and not getattr(ns, "with_tools", None)
+        ):
+            self.error("the following arguments are required: --repo (or --with)")
+        return ns, extras
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser matching the full command surface in spec section 7.1."""
-    parser = argparse.ArgumentParser(
+    parser = _ArchArgumentParser(
         prog="arch-indexer",
         description="Deterministic multi-language architecture indexer and doc generator.",
     )
@@ -140,8 +161,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     # toolchain ensure
     tc_ensure = toolchain_sub.add_parser("ensure", help="Install missing pinned indexers")
-    tc_ensure.add_argument("--repo", required=True, help="Target repository path")
+    tc_ensure.add_argument(
+        "--repo",
+        default=None,
+        help="Target repository path (required unless --with is specified)",
+    )
     tc_ensure.add_argument("--cache-dir", default=None, help="Cache directory override")
+    tc_ensure.add_argument(
+        "--with",
+        dest="with_tools",
+        action="append",
+        choices=["opengrep", "joern"],
+        default=None,
+        help="Install optional deep dataflow engine(s) into the cache",
+    )
     tc_ensure.add_argument(
         "--fetch-runtime",
         action="store_true",
@@ -678,6 +711,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
 
+    # 10. dataflow (opt-in deep dataflow, slice 8)
+    df_parser = subparsers.add_parser(
+        "dataflow", help="Run opt-in deep taint/dataflow analysis over indexed entrypoints"
+    )
+    df_parser.add_argument("repo", help="Target repository path")
+    df_parser.add_argument(
+        "--engine",
+        choices=["opengrep", "joern"],
+        default="opengrep",
+        help="Dataflow engine to invoke (default: opengrep; joern is opt-in)",
+    )
+    df_parser.add_argument(
+        "--entry",
+        action="append",
+        dest="entries",
+        default=None,
+        metavar="EP_ID",
+        help="Restrict exported dataflow edges to matching entrypoint ID (repeatable)",
+    )
+    df_parser.add_argument(
+        "--max-entries",
+        type=_positive_int,
+        default=50,
+        help="Maximum number of entrypoints to retain (default: 50)",
+    )
+    df_parser.add_argument(
+        "--timeout-sec",
+        type=_positive_int,
+        default=600,
+        help="Timeout in seconds for dataflow engine subprocess (default: 600)",
+    )
+    df_parser.add_argument(
+        "--docs-dir", default=DEFAULT_DOCS_DIR, help="Target docs output directory"
+    )
+    df_parser.add_argument("--cache-dir", default=None, help="Cache directory override")
+    df_parser.add_argument(
+        "--no-interfile",
+        action="store_true",
+        default=False,
+        help="Disable Opengrep interfile taint analysis (intrafile only)",
+    )
+    df_parser.add_argument(
+        "--jvm-max-heap-mb",
+        type=_positive_int,
+        default=None,
+        help="JVM max heap in MB for Joern",
+    )
+
     return parser
 
 
@@ -701,13 +782,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return EXIT_ERROR
 
         elif args.toolchain_action == "ensure":
+            if args.repo is None and not args.with_tools:
+                sys.stderr.write(
+                    "Error ensuring toolchain: --repo is required unless --with is specified\n"
+                )
+                return EXIT_ERROR
             try:
+                ensure_kwargs: dict[str, object] = {
+                    "cache_dir": args.cache_dir,
+                    "fetch_runtime": args.fetch_runtime,
+                }
+                if args.with_tools:
+                    ensure_kwargs["with_tools"] = args.with_tools
                 result = ensure_toolchain(
                     args.repo,
-                    cache_dir=args.cache_dir,
-                    fetch_runtime=args.fetch_runtime,
+                    **ensure_kwargs,  # type: ignore[arg-type]
                 )
-                print(f"Toolchain ensure completed for {args.repo}:")
+                target_label = args.repo or str(result.get("cache_dir") or "cache")
+                print(f"Toolchain ensure completed for {target_label}:")
                 print(f"  Active languages: {', '.join(result['active_languages'])}")
                 if result["installed"]:
                     print(f"  Installed tools:  {', '.join(result['installed'])}")
@@ -957,6 +1049,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write(f"Error serving viewer: {e}\n")
+            return EXIT_ERROR
+
+    elif args.command == "dataflow":
+        try:
+            res = run_dataflow(
+                args.repo,
+                engine=args.engine,
+                entries=args.entries,
+                max_entries=args.max_entries,
+                timeout_sec=args.timeout_sec,
+                docs_dir=args.docs_dir,
+                cache_dir=args.cache_dir,
+                interfile=not args.no_interfile,
+                jvm_max_heap_mb=args.jvm_max_heap_mb,
+            )
+            print(
+                f"Dataflow ({res['tool']} {res['tool_version']}): "
+                f"{res['edge_count']} edge(s) written to {res['json_path']}"
+            )
+            return EXIT_OK
+        except DataflowToolMissingError as e:
+            sys.stderr.write(f"Missing dataflow engine: {e}\n")
+            return EXIT_TOOLCHAIN_MISSING
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            subprocess.SubprocessError,
+        ) as e:
+            sys.stderr.write(f"Error running dataflow: {e}\n")
             return EXIT_ERROR
 
     elif args.command == "describe":

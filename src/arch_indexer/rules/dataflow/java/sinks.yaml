@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow sink definitions for Java aligned with PACKAGE_*_RULES.
+
+sinks:
+  - package_key: com.anthropic
+    patterns:
+      - pattern: $CLIENT.messages().create(...)
+  - package_key: com.openai
+    patterns:
+      - pattern: $CLIENT.chat().completions().create(...)
+  - package_key: dev.langchain4j
+    patterns:
+      - pattern: $MODEL.generate(...)
+      - pattern: $MODEL.chat(...)
+  - package_key: io.github.ollama4j
+    patterns:
+      - pattern: $OLLAMA.generate(...)
+      - pattern: $OLLAMA.chat(...)
+  - package_key: java.net.http
+    patterns:
+      - pattern: $HTTP.send(...)
+      - pattern: $HTTP.sendAsync(...)
+  - package_key: okhttp3
+    patterns:
+      - pattern: $CLIENT.newCall(...)
+  - package_key: org.apache.hc.client5
+    patterns:
+      - pattern: $CLIENT.execute(...)
+  - package_key: org.apache.http
+    patterns:
+      - pattern: $CLIENT.execute(...)
+  - package_key: org.kohsuke.github
+    patterns:
+      - pattern: $GH.getRepository(...)
+  - package_key: org.springframework.data.jpa
+    patterns:
+      - pattern: $REPO.save(...)
+      - pattern: $REPO.saveAll(...)
+      - pattern: $REPO.saveAndFlush(...)
+  - package_key: org.springframework.data.repository
+    patterns:
+      - pattern: $REPO.save(...)
+      - pattern: $REPO.saveAll(...)
+  - package_key: org.springframework.jdbc
+    patterns:
+      - pattern: $JDBC.execute(...)
+      - pattern: $JDBC.update(...)
+      - pattern: $JDBC.query(...)
+  - package_key: org.springframework.web.client
+    patterns:
+      - pattern: $REST.getForObject(...)
+      - pattern: $REST.postForObject(...)
+      - pattern: $REST.exchange(...)
+      - pattern: $REST.post().uri(...)
+      - pattern: $REST.put().uri(...)
+  - package_key: org.springframework.web.reactive.function.client
+    patterns:
+      - pattern: $WEB.get().uri(...)
+      - pattern: $WEB.post().uri(...)
+      - pattern: $WEB.put().uri(...)
+      - pattern: $WEB.delete().uri(...)

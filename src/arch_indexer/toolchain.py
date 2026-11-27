@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ else:
 
 from arch_indexer.config import (
     get_cache_dir,
+    get_dataflow_tools_dir,
     get_java_tools_dir,
     get_manifest_lock_path,
     get_node_tools_dir,
@@ -1100,6 +1102,245 @@ def _install_scip_java(
     return launcher
 
 
+OPTIONAL_DATAFLOW_TOOLS = frozenset({"opengrep", "joern"})
+_DATAFLOW_TOOL_MARKER = ".arch-indexer-tool.json"
+
+
+class DataflowToolMissingError(RuntimeError):
+    """Requested optional dataflow engine is not installed in the cache."""
+
+
+def _dataflow_archive_key() -> str:
+    sys_name = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = _ARCH_ALIASES.get(machine)
+    if sys_name == "linux" and arch in ("x64", "aarch64"):
+        return f"linux_{arch}"
+    if sys_name == "darwin" and arch in ("x64", "aarch64"):
+        return f"darwin_{'arm64' if arch == 'aarch64' else 'x64'}"
+    raise RuntimeError(
+        f"No pinned dataflow binary for host {platform.system()}/{platform.machine()} "
+        "(supported: linux x64/aarch64, macOS x64/arm64)"
+    )
+
+
+def _opengrep_install_dir(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
+    return get_dataflow_tools_dir(cache_dir) / f"opengrep-{cfg['version']}"
+
+
+def _opengrep_bin_path(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
+    return _opengrep_install_dir(cfg, cache_dir) / cfg.get("filename", "opengrep")
+
+
+def _joern_install_dir(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
+    return get_dataflow_tools_dir(cache_dir) / f"joern-{cfg['version']}"
+
+
+def _joern_bin_path(cfg: dict[str, Any], cache_dir: str | Path | None) -> Path:
+    return _joern_install_dir(cfg, cache_dir) / cfg.get("executable", "joern-cli/joern")
+
+
+def _tool_marker_matches(install_dir: Path, version: str, sha256: str | None = None) -> bool:
+    marker = install_dir / _DATAFLOW_TOOL_MARKER
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if data.get("version") != version:
+        return False
+    return sha256 is None or data.get("sha256") == sha256
+
+
+def _extract_zip_safely(archive: Path, dest: Path) -> None:
+    """Extract a zip archive while refusing absolute paths, '..', and escaping symlinks."""
+    root = dest.resolve()
+    with zipfile.ZipFile(archive, "r") as zf:
+        for info in zf.infolist():
+            parts = _safe_member_parts(info.filename)
+            if not parts:
+                continue
+            target = dest.joinpath(*parts)
+            _require_within(root, target, info.filename)
+            mode = (info.external_attr >> 16) & 0o777
+            is_symlink = ((info.external_attr >> 16) & 0o170000) == 0o120000
+            if is_symlink:
+                link_target = zf.read(info).decode("utf-8", errors="strict")
+                link_path = PurePosixPath(link_target)
+                if link_path.is_absolute():
+                    raise UnsafeArchiveError(
+                        f"Absolute symlink in zip archive: {info.filename} -> {link_target}"
+                    )
+                _require_within(
+                    root,
+                    target.parent.joinpath(*link_path.parts),
+                    f"{info.filename} -> {link_target}",
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(link_target, target)
+                continue
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                raise UnsafeArchiveError(
+                    f"Zip archive would write through a symlink: {info.filename}"
+                )
+            with zf.open(info, "r") as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+            if mode:
+                os.chmod(target, mode)
+
+
+def _tool_version_ok(
+    binary: Path, flag: str = "--version", env: dict[str, str] | None = None
+) -> bool:
+    try:
+        res = subprocess.run(
+            [str(binary), flag],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_merged_env(env),
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return res.returncode == 0
+
+
+def _install_opengrep(cfg: dict[str, Any], cache_dir: Path) -> tuple[Path, dict[str, str]]:
+    platform_key = _dataflow_archive_key()
+    archive_cfg = cfg.get("archives", {}).get(platform_key)
+    if not archive_cfg:
+        raise RuntimeError(f"toolchain.toml has no pinned opengrep asset for {platform_key}")
+
+    install_dir = _opengrep_install_dir(cfg, cache_dir)
+    bin_path = _opengrep_bin_path(cfg, cache_dir)
+    dataflow_dir = get_dataflow_tools_dir(cache_dir)
+    dataflow_dir.mkdir(parents=True, exist_ok=True)
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=".opengrep.tmp-", dir=dataflow_dir))
+    try:
+        tmp_bin = temp_dir / cfg.get("filename", "opengrep")
+        _download_verified(archive_cfg["url"], archive_cfg["sha256"], tmp_bin)
+        os.chmod(tmp_bin, 0o755)
+        if not _tool_version_ok(tmp_bin, "--version"):
+            raise RuntimeError("Downloaded opengrep binary failed --version check")
+        marker = {
+            "tool": "opengrep",
+            "version": cfg["version"],
+            "sha256": archive_cfg["sha256"],
+            "url": archive_cfg["url"],
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (temp_dir / _DATAFLOW_TOOL_MARKER).write_text(
+            json.dumps(marker, indent=2) + "\n", encoding="utf-8"
+        )
+        if install_dir.exists() or install_dir.is_symlink():
+            _remove_path(install_dir)
+        temp_dir.rename(install_dir)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+    return bin_path, archive_cfg
+
+
+def _install_joern(
+    cfg: dict[str, Any],
+    cache_dir: Path,
+    *,
+    fetch_runtime: bool = False,
+) -> tuple[Path, dict[str, str]]:
+    runtimes, _java_rt, _msgs = _prepare_java_runtime(
+        cache_dir, fetch_runtime=fetch_runtime, maven_repo=False
+    )
+    if not runtimes["java"].available:
+        min_v = cfg.get("java_min_version", "17")
+        raise RuntimeError(
+            f"Joern requires JDK >= {min_v}; host java is missing or too old "
+            "(pass --fetch-runtime to download a portable JDK)"
+        )
+
+    platform_key = _dataflow_archive_key()
+    archive_cfg = cfg.get("archives", {}).get(platform_key)
+    if not archive_cfg:
+        raise RuntimeError(f"toolchain.toml has no pinned joern archive for {platform_key}")
+
+    dataflow_dir = get_dataflow_tools_dir(cache_dir)
+    archives_dir = dataflow_dir / "archives"
+    archive_path = archives_dir / archive_cfg["filename"]
+    if not (archive_path.is_file() and compute_file_sha256(archive_path) == archive_cfg["sha256"]):
+        archive_path.unlink(missing_ok=True)
+        _download_verified(archive_cfg["url"], archive_cfg["sha256"], archive_path)
+
+    install_dir = _joern_install_dir(cfg, cache_dir)
+    bin_path = _joern_bin_path(cfg, cache_dir)
+    temp_dir = Path(tempfile.mkdtemp(prefix=".joern.tmp-", dir=dataflow_dir))
+    try:
+        _extract_zip_safely(archive_path, temp_dir)
+        extracted_bin = temp_dir / cfg.get("executable", "joern-cli/joern")
+        if not extracted_bin.is_file():
+            raise RuntimeError(
+                f"Extracted Joern archive missing expected executable {cfg.get('executable')}"
+            )
+        for script in extracted_bin.parent.iterdir():
+            if script.is_file() and not script.suffix:
+                os.chmod(script, 0o755)
+        marker = {
+            "tool": "joern",
+            "version": cfg["version"],
+            "sha256": archive_cfg["sha256"],
+            "url": archive_cfg["url"],
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (temp_dir / _DATAFLOW_TOOL_MARKER).write_text(
+            json.dumps(marker, indent=2) + "\n", encoding="utf-8"
+        )
+        if install_dir.exists() or install_dir.is_symlink():
+            _remove_path(install_dir)
+        temp_dir.rename(install_dir)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+    return bin_path, archive_cfg
+
+
+def resolve_dataflow_engine(
+    engine: str,
+    cache_dir: str | Path | None = None,
+) -> tuple[Path, str, dict[str, str]]:
+    """Resolve an installed optional dataflow engine binary, version, and subprocess env."""
+    if engine not in OPTIONAL_DATAFLOW_TOOLS:
+        raise ValueError(f"Unsupported dataflow engine: {engine!r}")
+    c_dir = get_cache_dir(cache_dir)
+    manifest = load_toolchain_manifest()
+    tool_info = manifest.get("tools", {}).get(engine, {})
+    pinned_version = str(tool_info.get("version", ""))
+
+    env: dict[str, str] = {}
+    if engine == "joern":
+        runtimes, java_runtime, _ = _effective_runtimes(c_dir)
+        if not runtimes["java"].available:
+            min_v = tool_info.get("java_min_version", "17")
+            raise DataflowToolMissingError(
+                f"Joern requires JDK >= {min_v}, which is not available. "
+                "Run `arch-indexer toolchain ensure --with joern --fetch-runtime`."
+            )
+        env = dict(java_runtime.env)
+
+    status = check_tool_status(engine, cache_dir=c_dir, env=env or None)
+    if not status.installed or status.install_path is None:
+        raise DataflowToolMissingError(
+            f"Dataflow engine '{engine}' is not installed in cache ({c_dir}). "
+            f"Run: arch-indexer toolchain ensure --with {engine}"
+        )
+    return status.install_path, pinned_version, env
+
+
 def check_tool_status(
     tool_name: str,
     cache_dir: str | Path | None = None,
@@ -1169,6 +1410,54 @@ def check_tool_status(
             message="Launcher for pinned version missing or failed --help",
         )
 
+    if tool_name == "opengrep":
+        install_dir = _opengrep_install_dir(tool_info, cache_dir)
+        bin_path = _opengrep_bin_path(tool_info, cache_dir)
+        if bin_path.is_file() and (
+            _tool_marker_matches(install_dir, pinned_version)
+            or _tool_version_ok(bin_path, "--version", env=env)
+        ):
+            return ToolStatus(
+                name=tool_name,
+                package_or_tag=pkg_or_tag,
+                pinned_version=pinned_version,
+                installed=True,
+                install_path=bin_path,
+                message="Installed",
+            )
+        return ToolStatus(
+            name=tool_name,
+            package_or_tag=pkg_or_tag,
+            pinned_version=pinned_version,
+            installed=False,
+            install_path=bin_path if bin_path.is_file() else None,
+            message="Not installed in cache (install with `toolchain ensure --with opengrep`)",
+        )
+
+    if tool_name == "joern":
+        install_dir = _joern_install_dir(tool_info, cache_dir)
+        bin_path = _joern_bin_path(tool_info, cache_dir)
+        if bin_path.is_file() and (
+            _tool_marker_matches(install_dir, pinned_version)
+            or _tool_version_ok(bin_path, "--help", env=env)
+        ):
+            return ToolStatus(
+                name=tool_name,
+                package_or_tag=pkg_or_tag,
+                pinned_version=pinned_version,
+                installed=True,
+                install_path=bin_path,
+                message="Installed",
+            )
+        return ToolStatus(
+            name=tool_name,
+            package_or_tag=pkg_or_tag,
+            pinned_version=pinned_version,
+            installed=False,
+            install_path=bin_path if bin_path.is_file() else None,
+            message="Not installed in cache (install with `toolchain ensure --with joern`)",
+        )
+
     return ToolStatus(
         name=tool_name,
         package_or_tag=pkg_or_tag,
@@ -1203,6 +1492,8 @@ def get_toolchain_status(
     for tool_name in ("scip-python", "scip-typescript"):
         tools[tool_name] = check_tool_status(tool_name, cache_dir=c_dir)
     tools["scip-java"] = check_tool_status("scip-java", cache_dir=c_dir, env=java_env)
+    tools["opengrep"] = check_tool_status("opengrep", cache_dir=c_dir)
+    tools["joern"] = check_tool_status("joern", cache_dir=c_dir, env=java_env)
 
     return ToolchainStatusReport(
         repo_path=repo,
@@ -1252,24 +1543,44 @@ def format_status_report(report: ToolchainStatusReport) -> str:
     lines.append("")
     lines.append("Tier 1 Indexer Tools (External Cache):")
     for tool_name, status in report.tools.items():
+        if tool_name in OPTIONAL_DATAFLOW_TOOLS:
+            continue
         state_str = "INSTALLED" if status.installed else "MISSING"
         path_str = f" ({status.install_path})" if status.installed and status.install_path else ""
         lines.append(f"  - {tool_name:16} (pinned {status.pinned_version}): {state_str}{path_str}")
+
+    optional_tools = [
+        (name, report.tools[name]) for name in ("opengrep", "joern") if name in report.tools
+    ]
+    if optional_tools:
+        lines.append("")
+        lines.append("Optional Dataflow Engines (install via `toolchain ensure --with <engine>`):")
+        for tool_name, status in optional_tools:
+            state_str = "INSTALLED" if status.installed else "NOT INSTALLED"
+            path_str = (
+                f" ({status.install_path})" if status.installed and status.install_path else ""
+            )
+            lines.append(
+                f"  - {tool_name:16} (pinned {status.pinned_version}): {state_str}{path_str}"
+            )
 
     return "\n".join(lines)
 
 
 def ensure_toolchain(
-    repo_path: str | Path,
+    repo_path: str | Path | None = None,
     cache_dir: str | Path | None = None,
     fetch_runtime: bool = False,
+    with_tools: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Ensure pinned Tier 1 indexers for detected languages are installed into cache.
 
-    - Detects languages for repo_path
+    - Detects languages for repo_path (when provided)
     - Installs only missing tools into <cache>/tools/
     - Node tools (scip-python, scip-typescript) installed via npm into <cache>/tools/node
     - Java tool (scip-java) bootstrapped with coursier into <cache>/tools/java
+    - With ``with_tools`` (``opengrep`` / ``joern``), installs requested optional
+      dataflow engines into <cache>/tools/dataflow/ with SHA-256 verification.
     - With fetch_runtime, downloads a pinned portable JDK into <cache>/runtimes/ for
       Java repos whose host java is missing or unusable, plus Maven when the repo
       has a pom.xml and host mvn is missing; a runtime that is already downloaded
@@ -1283,12 +1594,30 @@ def ensure_toolchain(
     tools_cfg = manifest["tools"]
     java_min = manifest["runtimes"]["java_min_version"]
 
-    repo = Path(repo_path).resolve()
-    c_dir = get_cache_dir(cache_dir)
+    requested_optional: list[str] = []
+    for name in with_tools or ():
+        if name not in OPTIONAL_DATAFLOW_TOOLS:
+            raise ValueError(
+                f"Unknown optional tool {name!r}; expected one of: "
+                + ", ".join(sorted(OPTIONAL_DATAFLOW_TOOLS))
+            )
+        if name not in requested_optional:
+            requested_optional.append(name)
 
-    detected_files = detect_repo_files(repo)
-    active_langs = _languages_from_files(detected_files)
-    maven_repo = any(os.path.basename(path) == "pom.xml" for path in detected_files["java"])
+    if repo_path is None and not requested_optional:
+        raise ValueError("repo_path is required unless with_tools is specified")
+
+    c_dir = get_cache_dir(cache_dir)
+    if repo_path is not None:
+        repo: Path | None = Path(repo_path).resolve()
+        detected_files = detect_repo_files(repo)
+        active_langs = _languages_from_files(detected_files)
+        maven_repo = any(os.path.basename(path) == "pom.xml" for path in detected_files["java"])
+    else:
+        repo = None
+        detected_files = {"python": [], "typescript": [], "java": [], "infra": []}
+        active_langs = []
+        maven_repo = False
     warnings: list[str] = []
     lock_data = get_installed_manifest_lock(c_dir)
     if "tools" not in lock_data:
@@ -1397,6 +1726,50 @@ def ensure_toolchain(
                 }
                 lock_dirty = True
                 installed_now.append("scip-java")
+
+    if lock_dirty:
+        save_manifest_lock(lock_data, cache_dir=c_dir)
+        lock_dirty = False
+
+    # 4. Optional dataflow tools (only when explicitly requested via --with)
+    for opt_name in requested_optional:
+        opt_cfg = tools_cfg[opt_name]
+        opt_env: dict[str, str] | None = None
+        if opt_name == "joern":
+            _, joern_java_rt, joern_msgs = _prepare_java_runtime(
+                c_dir, fetch_runtime=fetch_runtime, maven_repo=False
+            )
+            runtime_messages.extend(m for m in joern_msgs if m not in runtime_messages)
+            runtime_lock = get_installed_manifest_lock(c_dir).get("runtimes")
+            if runtime_lock:
+                lock_data["runtimes"] = runtime_lock
+            opt_env = joern_java_rt.env or None
+
+        status = check_tool_status(opt_name, cache_dir=c_dir, env=opt_env)
+        if status.installed:
+            skipped_existing.append(opt_name)
+            if status.install_path is not None and _refresh_skipped_tool_lock(
+                lock_data, opt_name, opt_cfg, status.install_path
+            ):
+                lock_dirty = True
+            continue
+
+        if opt_name == "opengrep":
+            opt_path, archive_cfg = _install_opengrep(opt_cfg, c_dir)
+        else:
+            opt_path, archive_cfg = _install_joern(opt_cfg, c_dir, fetch_runtime=fetch_runtime)
+            runtime_lock = get_installed_manifest_lock(c_dir).get("runtimes")
+            if runtime_lock:
+                lock_data["runtimes"] = runtime_lock
+
+        lock_data["tools"][opt_name] = {
+            **_lock_tool_entry(opt_cfg, opt_path),
+            "sha256": archive_cfg["sha256"],
+            "url": archive_cfg["url"],
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lock_dirty = True
+        installed_now.append(opt_name)
 
     if lock_dirty:
         save_manifest_lock(lock_data, cache_dir=c_dir)

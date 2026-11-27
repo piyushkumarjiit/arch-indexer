@@ -14,6 +14,11 @@ import type {
   ViewNodeData,
 } from "../types/bundle";
 import { ChangeBadge, getFileChangeStatus } from "./ChangeBadges";
+import {
+  DataFlowPathsSection,
+  matchDataflowForEdge,
+  matchDataflowForNode,
+} from "./DataFlowLayer";
 
 function formatEvidenceCitation(ev: Evidence): string {
   return `${ev.file}:${ev.line}`;
@@ -188,6 +193,7 @@ export function Inspector({
   };
 
   if (selectedEdge && !resolvedNode) {
+    const edgeDataflow = matchDataflowForEdge(dataflow, selectedEdge, overview, chunks);
     const kindEntries = Object.entries(
       selectedEdge.kindCounts && Object.keys(selectedEdge.kindCounts).length > 0
         ? selectedEdge.kindCounts
@@ -279,6 +285,12 @@ export function Inspector({
               </div>
             </div>
           )}
+          <DataFlowPathsSection
+            edges={edgeDataflow}
+            editorUrl={overview?.editor_url}
+            onCopyCitation={copyCitation}
+            copiedCitation={copiedCitation}
+          />
         </div>
       </aside>
     );
@@ -348,13 +360,7 @@ export function Inspector({
     }
   }
 
-  const relatedDataflow =
-    dataflow?.edges?.filter(
-      (d) =>
-        d.entry_id === resolvedNode.id ||
-        d.source_fqname === resolvedNode.id ||
-        d.sink_boundary_id === resolvedNode.id,
-    ) ?? [];
+  const relatedDataflow = matchDataflowForNode(dataflow, resolvedNode, overview, chunks);
 
   const fileChange = getFileChangeStatus(
     resolvedNode.filePath ?? resolvedNode.evidence?.[0]?.file,
@@ -590,18 +596,12 @@ export function Inspector({
           </div>
         )}
 
-        {relatedDataflow.length > 0 && (
-          <div className="arch-detail-block">
-            <div className="arch-detail-label">Dataflow Paths ({relatedDataflow.length})</div>
-            <div className="arch-links-list">
-              {relatedDataflow.map((df, i) => (
-                <div key={`${df.entry_id}-${i}`} className="arch-detail-mono">
-                  {df.payload_hint || df.source_fqname} &rarr; {df.sink_boundary_id}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <DataFlowPathsSection
+          edges={relatedDataflow}
+          editorUrl={overview?.editor_url}
+          onCopyCitation={copyCitation}
+          copiedCitation={copiedCitation}
+        />
 
         <div className="arch-detail-block">
           <div className="arch-detail-label">Incoming ({incoming.length})</div>

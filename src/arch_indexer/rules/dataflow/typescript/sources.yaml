@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# Original dataflow taint sources and sanitizers for TypeScript / Node.
+
+sources:
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.body
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.params
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.query
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, async ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.body
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, async ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.params
+  - patterns:
+      - pattern-inside: |
+          $APP.$METHOD($PATH, async ($REQ, $RES, ...) => { ... })
+      - pattern: $REQ.query
+  - patterns:
+      - pattern-inside: |
+          createServer(($REQ, $RES) => { ... })
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          createServer(async ($REQ, $RES) => { ... })
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          createServer($OPTS, ($REQ, $RES) => { ... })
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          createServer($OPTS, async ($REQ, $RES) => { ... })
+      - pattern: $REQ
+  - patterns:
+      - pattern-inside: |
+          ($REQ: IncomingMessage, $RES: ServerResponse) => { ... }
+      - pattern: $REQ
+  - pattern: await readBody($REQ)
+  - pattern: readBody($REQ)
+
+sanitizers:
+  - pattern: sanitize(...)
+  - pattern: escapeHtml(...)
+  - pattern: encodeURIComponent(...)
+  - pattern: parseInt(...)
+  - pattern: Number(...)
+  - pattern: Boolean(...)
